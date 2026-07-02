@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>手机销售智能客服</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>📱 手机销售智能客服</h1>
+            <p class="subtitle">商品咨询 · 价格推荐 · 售后问答</p>
+        </header>
+        
+        <main class="main-content">
+            <aside class="sidebar">
+                <div class="quick-actions">
+                    <h3>快捷问题</h3>
+                    <button class="quick-btn" onclick="sendQuickQuestion('推荐3000元左右的手机')">💰 预算推荐</button>
+                    <button class="quick-btn" onclick="sendQuickQuestion('iPhone 15多少钱')">📱 价格查询</button>
+                    <button class="quick-btn" onclick="sendQuickQuestion('退换货政策')">🔄 退换货政策</button>
+                    <button class="quick-btn" onclick="sendQuickQuestion('保修期多久')">🛡️ 保修查询</button>
+                    <button class="quick-btn" onclick="sendQuickQuestion('华为Mate 60怎么样')">⭐ 商品咨询</button>
+                </div>
+                
+                <div class="hot-products">
+                    <h3>热门机型</h3>
+                    <div id="hotProductsList"></div>
+                </div>
+            </aside>
+            
+            <section class="chat-section">
+                <div class="chat-header">
+                    <span class="status-dot"></span>
+                    <span>在线客服 - 小智</span>
+                </div>
+                <div class="chat-messages" id="chatMessages">
+                    <div class="message bot-message">
+                        <div class="message-avatar">🤖</div>
+                        <div class="message-content">
+                            <p>您好！我是手机销售智能客服小智，很高兴为您服务！</p>
+                            <p>我可以帮您：</p>
+                            <ul>
+                                <li>📱 查询手机价格和配置</li>
+                                <li>💰 根据预算推荐合适的手机</li>
+                                <li>🔄 解答售后相关问题</li>
+                            </ul>
+                            <p>请问有什么可以帮您的？</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <input type="text" id="userInput" placeholder="输入您的问题，例如：推荐3000元左右的手机" onkeypress="handleKeyPress(event)">
+                    <button onclick="sendMessage()">发送</button>
+                </div>
+            </section>
+        </main>
+        
+        <footer class="footer">
+            <p>© 2024 手机销售智能客服系统 | 7×24小时在线服务</p>
+        </footer>
+    </div>
+    
+    <script src="js/products.js"></script>
+    <script src="js/recommend.js"></script>
+    <script src="js/chat.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
