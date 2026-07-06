@@ -1,0 +1,32 @@
+{
+  "models": [
+    {
+      "id": "longcat",
+      "name": "LongCat-2.0",
+      "base_url": "https://api.longcat.chat/openai",
+      "api_key": "ak_2GC0Me3qc4He0Ck80O3Kz5sc2VT7t",
+      "model": "LongCat-2.0",
+      "ctx": 1000000,
+      "enabled": true,
+      "timeout": 120
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "qwen3.7-max",
+      "base_url": "https://llm-wwuob9mfx64yjvby.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "api_key": "sk-ws-H.RXIPXMM.ek0b.MEUCIA52hpjlrnJS-QVSbdRhVlZ1Ad5YJh1PmVmZ5inzXlR-AiEApaxUCJTPJc2spQyEj1-gdILovoUPqeyxX6wZdrPA0CI",
+      "model": "qwen3.7-max",
+      "ctx": 1000000,
+      "enabled": true,
+      "timeout": 120
+    }
+  ],
+  "agent_models": {
+    "manager": "longcat",
+    "planner": "longcat",
+    "repo": "longcat",
+    "coder": "longcat",
+    "verifier": "longcat",
+    "doc": "longcat"
+  }
+}
