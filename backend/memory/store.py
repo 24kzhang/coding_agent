@@ -51,7 +51,7 @@ class MemoryStore:
         # 首次见到项目时写入项目路径，后续 list_history 会从这里反查真实 workdir。
         if not project_md.exists():
             project_md.write_text(
-                f"# 项目长期记忆\n\n项目路径：`{Path(workdir).resolve()}`\n\n暂无。\n",
+                f"# 项目长期记忆\n\n项目路径：`{Path(workdir).resolve()}`\n\n",
                 encoding="utf-8",
             )
         return path
