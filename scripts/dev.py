@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 # ROOT 是本 agent 项目根目录，后端和前端启动都以它为基准定位文件。
@@ -29,6 +30,21 @@ def run(cmd: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Popen[str]
     """启动子进程并保留输出，让用户能直接看到后端和前端日志。"""
     # cmd 是要启动的命令参数列表，cwd 是子进程工作目录，env 是环境变量。
     return subprocess.Popen(cmd, cwd=cwd, env=env, text=True)
+
+
+def wait_for_port(port: int, timeout: float = 20.0) -> bool:
+    """等待本机端口开始监听，避免浏览器打开时前端仍未就绪。"""
+
+    # deadline 是最晚等待时间，使用单调时钟避免系统时间调整。
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # sock 每次只尝试短连接，服务未启动时不会长时间阻塞。
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.2)
+    return False
 
 
 def main() -> None:
@@ -64,6 +80,10 @@ def main() -> None:
     )
     # frontend 是 Vite 前端开发服务器进程。
     frontend = run([npm, "run", "dev", "--", "--host", "127.0.0.1", "--port", str(frontend_port)], frontend_dir, env)
+
+    # 双击启动脚本时自动打开工作台；自动化验收可用 AGENT_NO_BROWSER=1 关闭。
+    if wait_for_port(frontend_port) and env.get("AGENT_NO_BROWSER") != "1":
+        webbrowser.open(f"http://127.0.0.1:{frontend_port}")
 
     def stop(_sig: int, _frame: object) -> None:
         """同时关闭前后端，避免双击启动后残留进程。"""

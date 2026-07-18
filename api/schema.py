@@ -11,21 +11,21 @@ class ModelConfig(BaseModel):
     """模型配置。字段名保持短小，便于前端和 json 文件共同使用。"""
 
     # 模型在本地配置文件中的唯一 id，前端下拉框和智能体映射都用它引用模型。
-    id: str
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._-]+$")
     # 给用户看的模型名称，例如“LongCat 默认模型”。
-    name: str
+    name: str = Field(min_length=1, max_length=120)
     # OpenAI-compatible 服务的基础地址，LlmClient 会自动拼接 chat completions 路径。
-    base_url: str
+    base_url: str = Field(min_length=8, max_length=500)
     # 模型 API key，当前项目按需求明文保存到 memory/config/models.json。
-    api_key: str
+    api_key: str = Field(min_length=1, max_length=1000)
     # 供应商实际要求的模型名，例如 LongCat-2.0。
-    model: str
+    model: str = Field(min_length=1, max_length=200)
     # 模型上下文窗口大小，MemoryStore 会用它判断会话记忆是否需要压缩。
-    ctx: int = Field(default=128000, description="模型上下文窗口，单位为 token")
+    ctx: int = Field(default=128000, ge=1024, le=10_000_000, description="模型上下文窗口，单位为 token")
     # 模型是否启用；没有显式选择模型时，ModelStore 会优先使用启用模型。
     enabled: bool = True
     # 单次 HTTP 请求超时时间，避免模型接口长时间无响应导致后端卡死。
-    timeout: int = 120
+    timeout: int = Field(default=120, ge=5, le=1800)
 
 
 # 系统内置智能体名称；如果新增智能体，要同步修改这里、AgentModelMap、前端 agents 数组和 AgentGraph。
@@ -53,9 +53,9 @@ class ChatRequest(BaseModel):
     """前端点击发送后提交给 /api/chat/stream 的请求体。"""
 
     # 当前会话 id；后端会通过它反查该会话所属项目目录。
-    session_id: str
+    session_id: str = Field(min_length=1, max_length=80)
     # 用户本轮输入的原始文本。
-    text: str
+    text: str = Field(min_length=1, max_length=200_000)
     # 是否开启 Plan 模式；这是前端开关，不完全依赖自然语言判断。
     plan_mode: bool = False
     # 是否直接执行已有计划；当前前端不展示按钮，但保留字段支持 API 和后续快捷操作。
@@ -68,7 +68,7 @@ class SessionCreate(BaseModel):
     """创建新会话时的请求体。"""
 
     # 用户选择的项目工作目录，agent 的文件工具只能在这个目录内操作。
-    workdir: str
+    workdir: str = Field(min_length=1, max_length=4000)
     # 可选会话名称；为空时前端展示会话 id。
     title: str | None = None
 
@@ -77,9 +77,9 @@ class SessionUpdate(BaseModel):
     """修改会话信息时的请求体，目前只支持修改会话名称。"""
 
     # 会话所属项目目录，用于定位 memory/data/projects/<项目哈希>/sessions/<会话id>.jsonl。
-    workdir: str
+    workdir: str = Field(min_length=1, max_length=4000)
     # 用户输入的新会话名称，会写入会话 jsonl 的 rename 记录。
-    title: str
+    title: str = Field(min_length=1, max_length=60)
 
 
 class SessionInfo(BaseModel):
@@ -202,3 +202,7 @@ class TaskResult(BaseModel):
     plan_path: str | None = None
     # 文档智能体写入的文档路径；未生成文档时为空。
     doc_path: str | None = None
+    # tokens 是本轮所有模型调用累计 token 数或估算值。
+    tokens: int = 0
+    # duration_ms 是从 AgentGraph 开始到 final 节点的耗时。
+    duration_ms: int = 0

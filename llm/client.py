@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,7 +60,7 @@ class LlmClient:
         # base 去掉末尾斜杠，避免拼接路径时出现双斜杠。
         base = self.cfg.base_url.rstrip("/")
         # urls 按优先级保存候选地址，chat() 会依次尝试。
-        urls: list[str] = []
+        urls: list[str] = [base]
         # 用户如果已经填到完整 chat completions 地址，就直接使用。
         if base.endswith("/chat/completions"):
             urls.append(base)
@@ -90,47 +91,118 @@ class LlmClient:
         }
         # last_error 保存最后一次失败原因，所有候选 URL 都失败后抛给上层。
         last_error = ""
-        # 按 _urls() 给出的候选地址依次尝试，兼容不同供应商 URL 规则。
-        for url in self._urls():
-            try:
-                # client 是本次 HTTP 请求客户端，timeout 来自模型配置。
-                with httpx.Client(timeout=self.cfg.timeout) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                # 404/405 可能只是路径不匹配，继续尝试下一个候选地址。
-                if resp.status_code in {404, 405}:
-                    last_error = f"{url} 返回 {resp.status_code}"
-                    continue
-                # 其他 4xx/5xx 通常表示鉴权、模型名或服务异常，直接抛出。
-                if resp.status_code >= 400:
-                    raise LlmError(f"模型接口错误 {resp.status_code}: {resp.text[:500]}")
-                # data 是供应商返回的 JSON 响应。
-                data = resp.json()
-                # 记录 usage，若供应商不返回 usage，则 _usage() 会做估算。
-                self.last_usage = self._usage(data, messages)
-                return data["choices"][0]["message"]["content"]
-            except (httpx.HTTPError, KeyError, IndexError, json.JSONDecodeError) as exc:
-                # 单个候选地址失败时保存错误，继续尝试其他地址。
-                last_error = f"{url} 调用失败：{exc}"
+        # 一个 client 复用连接池；候选 URL 和短重试不需要重复建立 TLS 连接。
+        with httpx.Client(timeout=self.cfg.timeout) as client:
+            # 按 _urls() 给出的候选地址依次尝试，兼容不同供应商 URL 规则。
+            for url in self._urls():
+                for attempt in range(2):
+                    try:
+                        # resp 是本次 OpenAI-compatible 请求响应。
+                        resp = client.post(url, headers=headers, json=payload)
+                        # 404/405 通常只是路径不匹配，直接尝试下一个候选地址。
+                        if resp.status_code in {404, 405}:
+                            last_error = f"{url} 返回 {resp.status_code}"
+                            break
+                        # 限流和服务端临时错误允许一次短退避重试。
+                        if resp.status_code in {429, 500, 502, 503, 504} and attempt == 0:
+                            # retry_after 优先使用服务端建议，但最长只等待 3 秒。
+                            # 部分网关返回 HTTP 日期而不是秒数，无法转为数字时使用短默认值。
+                            try:
+                                retry_after = min(float(resp.headers.get("Retry-After", "0.6")), 3.0)
+                            except ValueError:
+                                retry_after = 0.6
+                            time.sleep(max(retry_after, 0.1))
+                            continue
+                        # 其他 4xx/5xx 通常表示鉴权、模型名或长期服务异常。
+                        if resp.status_code >= 400:
+                            raise LlmError(f"模型接口错误 {resp.status_code}: {resp.text[:500]}")
+                        # data 是供应商返回的 JSON 响应。
+                        data = resp.json()
+                        # 记录 usage，若供应商不返回 usage，则 _usage() 会做估算。
+                        self.last_usage = self._usage(data, messages)
+                        # content 兼容纯字符串和部分供应商返回的文本分片列表。
+                        content = data["choices"][0]["message"]["content"]
+                        return self._content_text(content)
+                    except LlmError:
+                        raise
+                    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        # 网络抖动第一次会重试；结构错误或第二次失败则尝试下一个 URL。
+                        last_error = f"{url} 调用失败：{exc}"
+                        if attempt == 0 and isinstance(exc, httpx.HTTPError):
+                            time.sleep(0.4)
+                            continue
+                        break
         raise LlmError(last_error or "没有可用的模型接口地址")
 
     def chat_json(self, messages: list[dict[str, str]], temperature: float = 0.1) -> dict[str, Any]:
         """要求模型返回 JSON，并对常见代码块包裹做容错。"""
-        # text 是模型原始文本输出，后续会尽量清洗成 JSON 字符串。
-        text = self.chat(messages, temperature=temperature).strip()
+        # raw_text 是模型原始文本输出，错误信息会保留其短片段用于排查。
+        raw_text = self.chat(messages, temperature=temperature).strip()
+        # text 是去除 Markdown 代码围栏后的候选 JSON 文本。
+        text = raw_text
         # 有些模型会返回 ```json 代码块，这里去掉代码围栏。
         if text.startswith("```"):
             lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
-        # start/end 用于从解释性文本里截取最外层 JSON 对象。
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
+        # candidate 从解释文字中提取第一个括号平衡的 JSON 对象，不会被字符串内的花括号干扰。
+        candidate = self._extract_json_object(text)
+        if candidate:
+            text = candidate
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
             # 抛出前带上截断后的模型输出，方便定位 prompt 或模型格式问题。
             raise LlmError(f"模型没有返回合法 JSON：{exc}\n{text[:1000]}") from exc
+
+    def _content_text(self, content: Any) -> str:
+        """把兼容接口返回的 content 统一转换为纯文本。"""
+
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # parts 只提取字符串项或带 text 字段的内容块。
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            if parts:
+                return "".join(parts)
+        raise LlmError("模型响应中没有可用的文本 content")
+
+    def _extract_json_object(self, text: str) -> str:
+        """提取文本中第一个完整 JSON 对象，正确处理字符串和转义字符。"""
+
+        # start 是当前候选对象起始位置；depth 是花括号嵌套深度。
+        start = -1
+        depth = 0
+        # in_string 和 escaped 用于忽略 JSON 字符串内部的花括号及转义引号。
+        in_string = False
+        escaped = False
+        for index, char in enumerate(text):
+            if start < 0:
+                if char == "{":
+                    start = index
+                    depth = 1
+                continue
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        return ""
 
     def test(self) -> dict[str, Any]:
         """用于前端设置页的连通性测试。"""

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+
 from backend.memory import MemoryStore
 
 
@@ -76,3 +79,57 @@ def test_memory_deletes_session_and_project(tmp_path) -> None:
 
     assert store.delete_project(workdir) is True
     assert store.list_history() == []
+
+
+def test_memory_uses_short_timestamp_and_migrates_old_value(tmp_path) -> None:
+    root = tmp_path / "mem"
+    workdir = str(tmp_path / "proj")
+    store = MemoryStore(root)
+    record = store.append(workdir, "s1", "user", "input", "message", "第一条消息")
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["ts"])
+
+    path = store.session_path(workdir, "s1")
+    old = {**record, "ts": "2026-07-18T10:20:30.123456+00:00"}
+    path.write_text(json.dumps(old, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    migrated = MemoryStore(root).read_session(workdir, "s1")
+    assert migrated[0]["ts"] == "2026-07-18T10:20:30Z"
+
+
+def test_memory_context_keeps_dialogue_and_drops_events(tmp_path) -> None:
+    store = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    store.append(workdir, "s1", "user", "input", "message", "先修改接口")
+    store.append(workdir, "s1", "coder", "event", "tool", "很长的工具输出")
+    store.append(workdir, "s1", "manager", "final", "result", "接口已修改", {"summary": "接口已修改"})
+    store.append(workdir, "s1", "user", "input", "message", "继续完善")
+
+    context = store.conversation_context(workdir, "s1", exclude_latest_user=True)
+
+    assert context == ["用户：先修改接口", "Agent：接口已修改"]
+    assert all("工具输出" not in item for item in context)
+
+
+def test_memory_run_lifecycle_ignores_session_rename(tmp_path) -> None:
+    store = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    store.append(workdir, "s1", "manager", "run", "start", "开始")
+    assert store.interrupted(workdir, "s1") is True
+
+    store.append(workdir, "s1", "manager", "run", "done", "结束")
+    store.rename_session(workdir, "s1", "新名称")
+
+    assert store.interrupted(workdir, "s1") is False
+
+
+def test_long_term_memory_deduplicates_content_across_writes(tmp_path) -> None:
+    """同一条长期偏好重复写入时只保留一份正文。"""
+
+    store = MemoryStore(tmp_path / "memory")
+    workdir = str(tmp_path / "project")
+
+    store.remember(workdir, "默认使用 uv")
+    store.remember(workdir, "默认使用 uv")
+
+    assert store.project_memory(workdir).count("默认使用 uv") == 1

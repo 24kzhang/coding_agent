@@ -133,4 +133,8 @@ export interface TaskResult {
   plan_path?: string | null;
   // 文档文件路径。
   doc_path?: string | null;
+  // 本轮累计 token 用量或估算值。
+  tokens: number;
+  // 本轮执行总耗时，单位毫秒。
+  duration_ms: number;
 }

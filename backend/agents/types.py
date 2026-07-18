@@ -20,6 +20,10 @@ class AgentState(TypedDict, total=False):
     execute_plan: bool
     # 临时覆盖模型 id；为空时按每个智能体自己的模型映射选择。
     model_id: str | None
+    # resuming 表示开始本轮前检测到上一轮异常中断。
+    resuming: bool
+    # started_at 保存单调时钟起点，用于计算本轮执行耗时。
+    started_at: float
     # 管理者分类出的任务类型，例如 direct、code_gen、doc_gen。
     task_type: str
     # 管理者之后的下一跳节点名。
@@ -50,6 +54,12 @@ class AgentState(TypedDict, total=False):
     tests_ok: bool
     # Coding/验证失败后的重试轮次计数。
     retry: int
+    # coding_ok 表示 Coding ReAct 是否明确完成，而不只是循环退出。
+    coding_ok: bool
+    # coding_summary 保存 Coding 模型对本轮修改的结构化摘要。
+    coding_summary: str
+    # error 保存执行失败时的用户可读原因。
+    error: str
     # 当前准备给用户看的最终文本摘要。
     final: str
     # final 节点整理出的最终 TaskResult 字典。
