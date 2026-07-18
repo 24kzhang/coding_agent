@@ -15,8 +15,10 @@ class ModelStore:
     """
 
     def __init__(self, path: Path | None = None):
-        # path 是模型配置文件路径；测试时可传入临时路径，生产默认写 memory/config/models.json。
-        self.path = path or Path("memory/config/models.json")
+        # project_root 让默认配置路径不依赖启动命令当时的 cwd。
+        project_root = Path(__file__).resolve().parents[1]
+        # path 是模型配置文件路径；测试时可传入临时路径。
+        self.path = path or project_root / "memory" / "config" / "models.json"
         # 确保配置目录存在，避免首次启动保存模型时报错。
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # 首次启动时创建空模型列表和默认智能体模型映射。
@@ -43,6 +45,11 @@ class ModelStore:
 
         # data 是当前配置文件内容，只替换 agent_models 部分。
         data = self._read()
+        # model_ids 是当前真实存在的模型；非空映射不能指向已删除或拼错的 id。
+        model_ids = {str(item.get("id")) for item in data.get("models", [])}
+        invalid = sorted({model_id for model_id in model_map.model_dump().values() if model_id and model_id not in model_ids})
+        if invalid:
+            raise ValueError("智能体模型映射引用了不存在的模型：" + "、".join(invalid))
         data["agent_models"] = model_map.model_dump()
         self._write(data)
         return model_map
@@ -109,7 +116,8 @@ class ModelStore:
         # model_map 是删除前的智能体模型映射。
         model_map = AgentModelMap(**data.get("agent_models", {}))
         # fallback 是删除后可用的第一个模型 id；没有模型时为空字符串。
-        fallback = data["models"][0]["id"] if data["models"] else ""
+        enabled = [item for item in data["models"] if item.get("enabled", True)]
+        fallback = (enabled or data["models"])[0]["id"] if data["models"] else ""
         # mapped 是可修改的映射 dict。
         mapped = model_map.model_dump()
         # 如果某个智能体原来绑定被删除模型，就切换到 fallback，避免前端下拉框悬空。
@@ -128,6 +136,9 @@ class ModelStore:
     def _write(self, data: dict[str, Any]) -> None:
         """把配置写回 JSON 文件。"""
 
-        with self.path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
+        # content 是格式化后的完整配置，便于用户直接检查明文文件。
+        content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        # temp_path 与正式配置同目录，写完后原子替换，避免程序中断留下半个 JSON。
+        temp_path = self.path.with_name(f".{self.path.name}.tmp")
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(self.path)

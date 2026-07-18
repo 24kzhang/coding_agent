@@ -10,6 +10,8 @@
 
 ---
 
+> 当前版本说明：本手册已按生产化加固后的代码更新。系统按单用户本地开发场景设计，不引入任务队列和多人并发控制；重点放在按需路由、真实上下文、磁盘写入正确性、工具边界、失败恢复和自动验证。
+
 ## 1. 学完后你应该能做什么
 
 读完并跟着操作后，你应该能做到：
@@ -98,13 +100,15 @@ sequenceDiagram
     U->>F: 输入任务并点击发送
     F->>B: POST /api/chat/stream
     B->>M: 追加 user/input/message
+    B->>M: 追加 manager/run/start
     B->>G: AgentGraph.run()
     G->>M: 检查 pending_plan / saved_plan / interrupted
     G->>L: 管理者分类或直接规则分类
     G->>G: 根据分类路由
     G->>T: 仓库读取 / 写文件 / 跑命令
     G->>L: Plan / Coding / Doc / Answer 模型调用
-    G->>M: 写入事件、状态、最终结果
+    G->>M: 写入精简事件、状态、最终结果
+    B->>M: 追加 manager/run/done 或 run/error
     G-->>B: TaskResult
     B-->>F: NDJSON event / result
     F-->>U: 更新事件流和对话窗口
@@ -199,6 +203,8 @@ class TaskResult(BaseModel):
     tests: list[dict[str, Any]]
     plan_path: str | None
     doc_path: str | None
+    tokens: int
+    duration_ms: int
 ```
 
 前端最终展示的 Agent 消息就是基于 `TaskResult` 格式化出来的。
@@ -269,10 +275,11 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 这个函数做了几件事：
 
 1. 根据 `session_id` 反查 `workdir`。
-2. 把用户输入写进会话记忆。
-3. 创建 `event_queue`。
-4. 开一个后台线程运行 `AgentGraph`。
-5. 把事件和最终结果用 NDJSON 流式返回给前端。
+2. 在写入当前输入前判断上一轮是否异常中断，再把输入和 `run/start` 写进会话记忆。
+3. 创建 `event_queue`，开一个后台线程运行 `AgentGraph`。
+4. 每 15 秒输出 heartbeat，防止长任务被代理层误判为空闲连接。
+5. 成功时写入 `run/done`；异常时把可恢复的错误结果和 `run/error` 一起持久化。
+6. 把事件和最终结果用 NDJSON 流式返回给前端。
 
 为什么用队列和线程？
 
@@ -364,6 +371,11 @@ state: AgentState = {
     "tests_ok": True,
     "retry": 0,
     "tokens": 0,
+    "coding_ok": True,
+    "coding_summary": "",
+    "resuming": False,
+    "started_at": 0.0,
+    "error": "",
 }
 ```
 
@@ -475,14 +487,15 @@ ctx = ContextPackage(
 
 ### 7.7 仓库读取智能体：`repo()`
 
-`repo()` 做的是轻量仓库扫描，不是把整个项目塞给模型。
+`repo()` 做的是任务相关仓库扫描，不是把整个项目塞给模型。
 
 它会：
 
-1. `FsTool.list()` 列出最多 200 个文件。
-2. 优先读取 `README.md`、`pyproject.toml`、`package.json`、`index.html` 等关键文件。
-3. 再读取前 30 个常见代码文件的一部分内容。
-4. 用 `_detect_stack()` 识别技术栈。
+1. `FsTool.list()` 最多列出 1200 个源码候选，并忽略 `.git`、`node_modules`、`.venv`、构建目录和缓存目录。
+2. `_repo_candidates()` 根据入口文件、文件名、目录名和用户需求关键词计算相关性。
+3. 只读取排序靠前的相关文件，仓库摘要总量限制在约 60000 字符。
+4. 跳过 `.env`、私钥、凭据、模型配置等敏感文件。
+5. 用 `_detect_stack()` 识别技术栈；Coding 后续仍可用搜索和分段读取补充上下文。
 
 如果你发现 Coding 智能体缺少某些上下文，优先改 `repo()` 的优先文件列表或读取策略。
 
@@ -532,7 +545,8 @@ Coding 智能体是 ReAct 循环。
 3. 读取 `thought` 和 `actions`。
 4. 对每个 action 调用 `_do_action()`。
 5. 把工具结果写入 observations。
-6. 最多执行 6 步。
+6. 最多执行 10 步；每轮结构化输出失败时允许一次格式纠正重试。
+7. 任一工具失败都会保留在 observations 中，模型不能仅凭 `done=true` 把失败任务报告为成功。
 
 模型返回格式：
 
@@ -540,7 +554,9 @@ Coding 智能体是 ReAct 循环。
 {
   "thought": "本轮判断，中文",
   "actions": [
-    {"tool": "write_file", "path": "index.html", "content": "..."},
+    {"tool": "search_files", "query": "旧函数名"},
+    {"tool": "read_file", "path": "src/app.py", "start": 0, "max_chars": 12000},
+    {"tool": "replace_file", "path": "src/app.py", "old": "旧文本", "new": "新文本", "expected": 1},
     {"tool": "run_command", "cmd": "python -m py_compile app.py"}
   ],
   "done": false,
@@ -558,10 +574,13 @@ Coding 智能体是 ReAct 循环。
 | --- | --- | --- |
 | `write_file` | `FsTool.write()` | 写完整文件 |
 | `append_file` | `FsTool.append()` | 追加文件 |
-| `read_file` | `FsTool.read()` | 读取文件 |
+| `replace_file` | `FsTool.replace()` | 按预期匹配次数精确替换，避免覆盖整文件 |
+| `read_file` | `FsTool.read()` | 按起始行和行数分段读取文件 |
 | `list_files` | `FsTool.list()` | 列文件 |
+| `search_files` | `FsTool.search()` | 搜索文本并返回文件、行号和片段 |
 | `run_command` | `ShellTool.run()` | 执行命令 |
 | `git_status` | `GitTool.status()` | 查看 Git 状态 |
+| `git_diff` | `GitTool.diff()` | 查看当前未提交差异 |
 
 如果你要给 Coding 新增工具，例如 `replace_file`：
 
@@ -576,18 +595,18 @@ Coding 智能体是 ReAct 循环。
 
 | 项目特征 | 验证方式 |
 | --- | --- |
-| 有 `pyproject.toml` | `uv run pytest` |
-| 有 Python 文件 | `python -m py_compile ...` |
-| 有 `package.json` | `npm test -- --run` |
+| 有 Python 文件 | 对源码目录运行 `python -m compileall -q` |
+| 存在 Python 测试 | `uv run pytest -q` |
+| 有 `package.json` | 读取 scripts 后依次选择 `lint`、`test`、`typecheck`、`build` |
 | 有静态 Web 文件 | 静态 Web 接线检查 |
 
-如果测试失败，并且 `retry < 2`，会回到 `coder` 修复。
+如果 Coding 自己失败，验证状态不会被默认值覆盖成成功。验证失败且总尝试次数不足 3 次时，会把结构化失败结果交回 `coder` 修复。
 
 这段逻辑在：
 
 ```python
 def route_after_verifier(self, state: AgentState) -> str:
-    if not state.get("tests_ok", True) and int(state.get("retry", 0)) < 2:
+    if not state.get("tests_ok", True) and int(state.get("retry", 0)) < 3:
         return "coder"
 ```
 
@@ -615,13 +634,15 @@ def route_after_verifier(self, state: AgentState) -> str:
 
 ```python
 result = {
-    "ok": ok,
+    "ok": coding_ok and tests_ok,
     "summary": summary,
     "files": state.get("changes", []),
     "commands": state.get("commands", []),
     "tests": state.get("tests", []),
     "plan_path": ...,
     "doc_path": ...,
+    "tokens": state.get("tokens", 0),
+    "duration_ms": ...,
 }
 ```
 
@@ -648,10 +669,13 @@ memory/
     global.md
     projects/
       <项目路径哈希>/
+        meta.json
         project.md
         sessions/
           <会话id>.jsonl
 ```
+
+`meta.json` 保存真实项目路径，`project.md` 只保存项目长期记忆。旧版本把路径混在 `project.md`，当前代码仍兼容读取，但新项目不会继续混写。
 
 为什么项目目录用哈希？
 
@@ -666,7 +690,7 @@ memory/
 ```json
 {
   "id": 1,
-  "ts": "2026-07-02T00:00:00+00:00",
+  "ts": "2026-07-02T00:00:00Z",
   "ag": "manager",
   "tl": "classify",
   "k": "context",
@@ -680,7 +704,7 @@ memory/
 | 字段 | 含义 |
 | --- | --- |
 | `id` | 会话内递增 id |
-| `ts` | 时间戳 |
+| `ts` | 精简到秒的 UTC 时间戳 |
 | `ag` | agent 名称 |
 | `tl` | 工具或阶段 |
 | `k` | 记录类型 |
@@ -701,7 +725,7 @@ GET /api/history
 memory_store.list_history()
 ```
 
-`list_history()` 会扫描所有项目目录，再扫描每个项目下的 `sessions/*.jsonl`。
+`list_history()` 会扫描所有项目目录，再扫描每个项目下的 `sessions/*.jsonl`；进程内会维护会话索引，避免每次请求都做重复的全量定位。
 
 每个会话会通过 `_history_messages()` 提取两类消息：
 
@@ -732,27 +756,17 @@ memory.append(
 
 ### 8.5 中断判断
 
-```python
-def interrupted(self, workdir: str, session_id: str) -> bool:
-    records = self.read_session(workdir, session_id)
-    last = records[-1]
-    return not (last.get("ag") == "manager" and last.get("k") == "result")
-```
-
-如果最后一条不是管理者最终结果，就认为上次可能中断。
+当前实现优先检查成对的 `manager/run/start` 与 `manager/run/done|error`，因此会话重命名等管理记录不会被误判成中断。对旧会话没有运行生命周期记录时，才回退到“最后是否存在最终结果”的兼容逻辑。
 
 ### 8.6 压缩策略
 
 `maybe_compress()` 用简单估算判断会话是否超过模型上下文 85%。
 
-如果超过，就保留：
+压缩时优先把连续工具日志折叠为阶段摘要，重复命令只保留最新结果，同时保留用户消息、最终回复、Plan 状态和运行生命周期。仍超过 85% 时才按组丢弃最早阶段，写回过程使用原子替换，避免中途损坏 jsonl。
 
-- 压缩摘要。
-- 最开头几条记录。
-- 每个 agent/tool 最新一次输出。
-- 最新 20 条记录。
+下游智能体不会直接读取全部记录。`conversation_context()` 只提取用户消息和 Agent 最终回复，并按条数、字符预算裁剪；事件流和工具输出不会伪装成对话上下文。
 
-这个策略简单，但能避免会话 jsonl 无限增长后全部塞进上下文。
+长期记忆也不是每轮自动写入。只有用户明确使用“请记住”“以后都这样”等长期表达时才调用 `remember()`，项目临时事实和一次性命令结果不会进入长期记忆。
 
 ## 9. 模型层：`llm/`
 
@@ -797,12 +811,12 @@ https://api.longcat.chat/openai
 
 ### 9.3 `chat()` 和 `chat_json()`
 
-`chat()` 返回普通文本。
+`chat()` 返回普通文本，并在网络错误、限流或可恢复的 5xx 响应上做一次短重试。候选 URL 共用同一个连接池。
 
 `chat_json()` 做了额外容错：
 
 - 去掉 ```json 代码块。
-- 从文本里截取第一个 `{` 到最后一个 `}`。
+- 使用字符串感知的括号平衡扫描，提取第一个完整 JSON 对象。
 - `json.loads()` 解析。
 - 失败就抛 `LlmError`。
 
@@ -858,16 +872,16 @@ dangerous = {
 
 ### 11.1 顶部类型定义
 
-前端手写了与后端对应的 TypeScript 类型：
+前端从独立契约文件 `api/types.ts` 导入与后端对应的 TypeScript 类型：
 
 ```ts
-interface ModelConfig {}
-interface AgentModelMap {}
-interface AgentEvent {}
-interface TaskResult {}
-interface ChatMessage {}
-interface HistorySession {}
-interface HistoryProject {}
+import type {
+  AgentEvent,
+  AgentModelMap,
+  HistoryProject,
+  ModelConfig,
+  TaskResult
+} from "../../api/types";
 ```
 
 如果后端 schema 变了，这里通常也要跟着变。
@@ -927,7 +941,7 @@ interface HistoryProject {}
 这个函数是前端最关键的逻辑：
 
 ```ts
-async function runTask(executePlan = false) {
+async function runTask() {
   const trimmedTask = task.trim();
   const id = sessionId || (await createSessionAndReturnId());
   setMessages((prev) => [...prev, { role: "user", content: trimmedTask }]);
@@ -950,7 +964,8 @@ async function runTask(executePlan = false) {
 4. 调用流式接口。
 5. 逐行解析 NDJSON。
 6. event 加到右侧事件流。
-7. result 格式化成 Agent 消息。
+7. result 格式化成 Agent 消息；Markdown、GFM 表格和代码块由 `react-markdown` 安全渲染。
+8. HTTP 错误、残余 NDJSON、后台持久化错误和 `finally` 状态都会被处理，不会出现“请求失败但界面仍显示运行中”。
 
 如果 Agent 最终回复展示不对，优先看 `formatResultMessage()`。
 
@@ -1006,7 +1021,8 @@ main.shell
 4. 如果 `frontend/node_modules` 不存在，执行 `npm install`。
 5. 启动 uvicorn。
 6. 启动 Vite。
-7. 监听 Ctrl+C，同时关闭前后端。
+7. 等待两个端口真正可用后自动打开浏览器；设置 `AGENT_NO_BROWSER=1` 可关闭自动打开。
+8. 监听 Ctrl+C，同时关闭前后端。
 
 如果你要改端口范围，就改这里。
 
@@ -1257,8 +1273,18 @@ flowchart TB
 - 历史消息恢复。
 - 没有自定义名称时展示 session id。
 - 删除会话和项目 memory。
+- 秒级时间戳迁移、真实对话上下文和运行生命周期。
 
-### 15.3 建议每次修改后跑什么
+### 15.3 `tests/test_tools.py` 和 `tests/test_llm.py`
+
+重点覆盖：
+
+- 依赖目录不会进入仓库摘要。
+- 精确替换、文本搜索和敏感文件拦截。
+- 复合 shell、直接或嵌套解释器内联代码会被拒绝。
+- 模型解释文字中的 JSON 能正确处理字符串内部花括号。
+
+### 15.4 建议每次修改后跑什么
 
 只改文档：
 

@@ -3,24 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>多智能体编程系统代码学习页</title>
   <style>
     /* 页面采用静态自包含实现，双击本文件即可阅读，不依赖外部 CDN。 */
     :root {
-      --bg: #f7f5f1;
-      --surface: #fffdf9;
-      --surface-2: #f1f7f4;
-      --ink: #1f2328;
-      --muted: #687076;
-      --line: #d9d1c4;
-      --teal: #07856f;
-      --teal-soft: #dff4ef;
-      --amber: #b46d05;
-      --amber-soft: #fff2d8;
-      --red: #b33a3a;
-      --code: #17202a;
-      --code-bg: #f3f0e8;
-      --shadow: 0 14px 34px rgba(31, 35, 40, 0.08);
+      --bg: #edf3fa;
+      --surface: #ffffff;
+      --surface-2: #eefaf6;
+      --ink: #142033;
+      --muted: #5e6b7d;
+      --line: #c8d5e5;
+      --teal: #1267d6;
+      --teal-soft: #e7f0ff;
+      --amber: #9b6200;
+      --amber-soft: #fff2c7;
+      --red: #c63f52;
+      --code: #17243a;
+      --code-bg: #edf3fb;
+      --shadow: 0 14px 34px rgba(36, 73, 119, 0.1);
       --radius: 8px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
     }
@@ -37,8 +38,10 @@
       margin: 0;
       color: var(--ink);
       background:
-        linear-gradient(90deg, rgba(7, 133, 111, 0.06), transparent 28%),
-        linear-gradient(180deg, #fbfaf7, var(--bg));
+        linear-gradient(rgba(18, 103, 214, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(18, 103, 214, 0.055) 1px, transparent 1px),
+        var(--bg);
+      background-size: 24px 24px;
       font-size: 15px;
       line-height: 1.65;
     }
@@ -66,7 +69,7 @@
       height: 100vh;
       overflow: auto;
       border-right: 1px solid var(--line);
-      background: rgba(255, 253, 249, 0.92);
+      background: rgba(255, 255, 255, 0.94);
       backdrop-filter: blur(10px);
     }
 
@@ -196,7 +199,7 @@
       gap: 12px;
       padding: 22px 22px 16px;
       border-bottom: 1px solid var(--line);
-      background: linear-gradient(180deg, #fffdf9, #fbf8f1);
+      background: #f7faff;
     }
 
     .lesson h2 {
@@ -587,6 +590,7 @@
       </div>
       <nav class="nav" id="nav">
         <a href="#goal" class="active">学习目标<small>先知道要掌握什么</small></a>
+        <a href="#current">当前基线<small>这轮完善解决了什么</small></a>
         <a href="#map">项目分层<small>8 层代码结构</small></a>
         <a href="#chain">请求调用链<small>一次发送任务怎么流动</small></a>
         <a href="#backend">后端入口<small>FastAPI 和流式响应</small></a>
@@ -601,7 +605,7 @@
       <div class="topbar">
         <div>
           <h1>多智能体编程系统代码学习页</h1>
-          <p>这不是展示页，而是把 `guide.md` 里的教学内容做成可浏览的代码地图。你可以按章节理解数据结构、后端入口、LangGraph 编排、memory、模型层、工具层和前端交互。</p>
+          <p>这不是展示页，而是把 <code>guide.md</code> 里的教学内容做成可浏览的代码地图。你可以按章节理解数据结构、后端入口、LangGraph 编排、memory、模型层、工具层和前端交互。</p>
         </div>
         <a class="file-link" href="./guide.md">打开 Markdown 原文</a>
       </div>
@@ -631,6 +635,45 @@
             </div>
           </div>
           <p class="note">学习这个项目最重要的不是背函数，而是把问题定位到具体层、具体文件、具体函数。</p>
+        </div>
+      </section>
+
+      <section class="lesson" id="current" data-title="当前版本 生产化 按需路由 相关检索 工具安全 失败恢复 单用户">
+        <div class="lesson-head">
+          <div>
+            <span class="tag">当前基线</span>
+            <h2>先理解“真正能做项目”意味着什么</h2>
+            <p>当前系统面向单用户本地开发，不堆任务队列；可靠性来自正确路由、受控工具、可恢复记忆和验证证据。</p>
+          </div>
+          <button class="complete" data-complete="current">标记完成</button>
+        </div>
+        <div class="lesson-body">
+          <div class="grid-3">
+            <div class="card">
+              <h3>按需编排</h3>
+              <p>问候只走 Manager；解释、文档和代码任务分别调用需要的节点。Plan 回复会找回原始问题和累计答案。</p>
+            </div>
+            <div class="card">
+              <h3>真实代码上下文</h3>
+              <p>Repo Reader 按任务相关性选文件；Coder 可以搜索、分段读取、精确替换和查看 Git diff。</p>
+            </div>
+            <div class="card">
+              <h3>完成必须有证据</h3>
+              <p>工具失败不能自报完成，Verifier 继承 Coding 状态并运行项目已有检查，失败结果返回 Coder 修复。</p>
+            </div>
+            <div class="card">
+              <h3>记忆可恢复</h3>
+              <p>JSONL 使用运行生命周期识别中断，只提取真实对话给下游，超长记录按阶段压缩。</p>
+            </div>
+            <div class="card">
+              <h3>安全在执行层</h3>
+              <p>文件工具拒绝目录越界和敏感配置；Shell 不经过 shell 解释，并拒绝复合命令和内联代码。</p>
+            </div>
+            <div class="card">
+              <h3>单用户取舍</h3>
+              <p>不实现多人队列和分布式锁，只保留进程内文件完整性保护与前端运行态防重复发送。</p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -697,7 +740,7 @@
 
           <div class="codebox">
             <div class="label"><span>前端发送任务的核心代码</span><button class="copy">复制</button></div>
-            <pre><code>async function runTask(executePlan = false) {
+            <pre><code>async function runTask() {
   const trimmedTask = task.trim();
   const id = sessionId || (await createSessionAndReturnId());
   setMessages((prev) => [...prev, { role: "user", content: trimmedTask }]);
@@ -705,7 +748,7 @@
   const res = await fetch(`${API}/api/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: id, text: trimmedTask, plan_mode: planMode, execute_plan: executePlan })
+    body: JSON.stringify({ session_id: id, text: trimmedTask, plan_mode: planMode })
   });
 
   // 逐行读取 NDJSON：event 更新事件流，result 更新最终回复。
@@ -794,7 +837,7 @@
             </div>
             <div class="card">
               <h3>verifier()</h3>
-              <p>按项目结构选择测试命令，失败时最多回到 Coding 修复一次。</p>
+              <p>读取项目已有脚本选择检查，初始状态继承 Coding 是否完成，失败时最多完成三次 Coding 尝试。</p>
             </div>
           </div>
 
@@ -844,6 +887,7 @@ else:
     global.md
     projects/
       &lt;项目路径哈希&gt;/
+        meta.json
         project.md
         sessions/
           &lt;会话id&gt;.jsonl</div>
@@ -863,7 +907,7 @@ else:
             </div>
             <div class="card">
               <h3>中断判断</h3>
-              <p>如果最后一条不是 <code>manager/final/result</code>，系统认为上次可能异常中断。</p>
+              <p>最近运行生命周期是 <code>manager/run/start</code> 且没有 <code>done/error</code> 时，系统认为上次可能异常中断。</p>
             </div>
           </div>
 
@@ -871,7 +915,7 @@ else:
             <div class="label"><span>会话记忆的一条记录</span><button class="copy">复制</button></div>
             <pre><code>{
   "id": 1,
-  "ts": "2026-07-03T00:00:00+00:00",
+  "ts": "2026-07-03T00:00:00Z",
   "ag": "manager",
   "tl": "classify",
   "k": "context",
@@ -909,7 +953,7 @@ else:
           <div class="grid-2">
             <div class="card">
               <h3>消息气泡</h3>
-              <p>用户和 Agent 使用同一种结构：<code>.message-row</code> 包住 <code>.bubble</code>，复制按钮放在气泡外部右下角。</p>
+              <p>用户和 Agent 使用同一种矩形结构，复制按钮在气泡外部右下角；长消息内部滚动，Markdown 代码块和表格可读。</p>
             </div>
             <div class="card">
               <h3>历史弹窗</h3>
@@ -997,11 +1041,12 @@ npm run build</code></pre>
         <section class="progress-card">
           <h2>学习进度</h2>
           <div class="bar"><span id="progressBar"></span></div>
-          <p id="progressText">已完成 0 / 8 节</p>
+          <p id="progressText">已完成 0 / 9 节</p>
         </section>
 
         <section class="quick">
           <h2>快速定位</h2>
+          <a href="#current">当前版本做了哪些加固</a>
           <a href="#graph">管理者为什么误调用智能体</a>
           <a href="#memory">Plan 回复为什么要有上下文</a>
           <a href="#frontend">消息气泡和复制按钮怎么改</a>

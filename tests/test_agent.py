@@ -212,6 +212,45 @@ def test_manager_can_cancel_pending_plan(tmp_path) -> None:
     assert graph._latest_pending_plan(workdir, "s1") is None
 
 
+def test_pending_plan_does_not_hijack_a_new_greeting(tmp_path) -> None:
+    """普通问候应按新输入处理，并终止不再继续的旧 Plan。"""
+
+    memory = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    memory.append(
+        workdir,
+        "s1",
+        "planner",
+        "state",
+        "pending_plan",
+        "Plan 问题等待用户回答",
+        {"goal": "旧任务", "questions": [{"question": "继续吗", "options": ["继续", "取消"]}]},
+    )
+    graph = AgentGraph(ModelStore(), memory)
+
+    next_state = graph.manager(
+        {
+            "session_id": "s1",
+            "workdir": workdir,
+            "text": "你好",
+            "plan_mode": False,
+            "execute_plan": False,
+            "model_id": None,
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        }
+    )
+
+    assert next_state["route"] == "final"
+    assert next_state["task_type"] == "direct"
+    assert "你好" in next_state["final"]
+    assert graph._latest_pending_plan(workdir, "s1") is None
+
+
 def test_manager_executes_latest_saved_plan(tmp_path) -> None:
     memory = MemoryStore(tmp_path / "mem")
     workdir = str(tmp_path / "proj")
@@ -246,3 +285,46 @@ def test_manager_executes_latest_saved_plan(tmp_path) -> None:
     assert next_state["after_repo"] == "coder"
     assert next_state["after_verify"] == "doc"
     assert "实现客服系统" in next_state["context"].goal
+
+
+def test_manager_classifies_project_improvement_as_code_change(tmp_path) -> None:
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "session_id": "s1",
+        "workdir": str(tmp_path / "proj"),
+        "text": "请仔细完善这个 agent 项目",
+        "plan_mode": False,
+        "execute_plan": False,
+        "model_id": None,
+    }
+
+    result = graph._classify(state)
+
+    assert result["task_type"] == "code_mod"
+    assert result["need_code"] is True
+
+
+def test_manager_only_writes_long_term_memory_on_explicit_request(tmp_path) -> None:
+    memory = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    graph = AgentGraph(ModelStore(), memory)
+    state = {
+        "session_id": "s1",
+        "workdir": workdir,
+        "text": "请记住我以后都使用中文文档",
+        "plan_mode": False,
+        "execute_plan": False,
+        "model_id": None,
+        "changes": [],
+        "commands": [],
+        "tests": [],
+        "tests_ok": True,
+        "retry": 0,
+        "tokens": 0,
+    }
+
+    next_state = graph.manager(state)
+
+    assert next_state["route"] == "final"
+    assert "使用中文文档" in memory.project_memory(workdir)
+    assert "我以后都" not in memory.project_memory(workdir)
