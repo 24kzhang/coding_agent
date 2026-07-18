@@ -10,12 +10,11 @@ build/
 node_modules/
 frontend/node_modules/
 frontend/dist/
-kefu/.venv/
-kefu/node_modules/
 .idea
 .jbeval
 .playwright-cli
-kefu
+run_test/kefu
 se_tes
 se_test
 /.jbeval/
+/run_test/exercises/exercises-dataset-main.zip

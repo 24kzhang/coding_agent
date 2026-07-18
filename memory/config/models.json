@@ -29,16 +29,6 @@
       "ctx": 1000000,
       "enabled": true,
       "timeout": 120
-    },
-    {
-      "id": "gpt-5.6-terra",
-      "name": "gpt-5.6-terra",
-      "base_url": "https://api.closeai-proxy.xyz/anthropic/v1",
-      "api_key": "sk-Aft81kk1aC2CGURkBUdlwGxUBv7IPVCH9CR8MNjCv68dC0uI",
-      "model": "gpt-5.6-terra",
-      "ctx": 128000,
-      "enabled": true,
-      "timeout": 120
     }
   ],
   "agent_models": {
