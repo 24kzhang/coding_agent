@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from backend.agents.graph import AgentGraph
+from backend.agents.verifier import verifier
 from backend.memory import MemoryStore
 from backend.tools import FsTool
 from llm import ModelStore
@@ -30,7 +31,8 @@ def test_verifier_keeps_coding_failure_as_a_failure(tmp_path) -> None:
     workdir.mkdir()
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
 
-    result = graph.verifier(
+    result = verifier(
+        graph,
         {
             "session_id": "s1",
             "workdir": str(workdir),

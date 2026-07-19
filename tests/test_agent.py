@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.agents.graph import AgentGraph
+from backend.agents.manager import manager
 from backend.memory import MemoryStore
 from llm import ModelStore
 
@@ -55,7 +56,7 @@ def test_code_task_with_doc_routes_to_coder_then_doc(tmp_path) -> None:
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "repo"
     assert next_state["after_repo"] == "coder"
@@ -79,7 +80,7 @@ def test_doc_task_routes_to_repo_then_doc_without_coder(tmp_path) -> None:
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "repo"
     assert next_state["after_repo"] == "doc"
@@ -176,7 +177,7 @@ def test_manager_continues_pending_plan_from_option_reply(tmp_path) -> None:
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "planner"
     assert next_state["task_type"] == "plan_gen"
@@ -205,7 +206,7 @@ def test_manager_can_cancel_pending_plan(tmp_path) -> None:
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "final"
     assert "已取消" in next_state["final"]
@@ -228,7 +229,8 @@ def test_pending_plan_does_not_hijack_a_new_greeting(tmp_path) -> None:
     )
     graph = AgentGraph(ModelStore(), memory)
 
-    next_state = graph.manager(
+    next_state = manager(
+        graph,
         {
             "session_id": "s1",
             "workdir": workdir,
@@ -279,7 +281,7 @@ def test_manager_executes_latest_saved_plan(tmp_path) -> None:
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "repo"
     assert next_state["after_repo"] == "coder"
@@ -323,7 +325,7 @@ def test_manager_only_writes_long_term_memory_on_explicit_request(tmp_path) -> N
         "tokens": 0,
     }
 
-    next_state = graph.manager(state)
+    next_state = manager(graph, state)
 
     assert next_state["route"] == "final"
     assert "使用中文文档" in memory.project_memory(workdir)
