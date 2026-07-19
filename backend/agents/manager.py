@@ -12,12 +12,9 @@ if TYPE_CHECKING:
 def manager(graph: AgentGraph, state: AgentState) -> AgentState:
     """上下文管理智能体：分类任务、处理 Plan 状态、构造 Context Package。"""
 
-    # workdir 是当前会话对应的项目目录。
     workdir = state["workdir"]
-    # session_id 是当前会话 id。
     session_id = state["session_id"]
-    # interrupted 是 HTTP 层在本轮开始前计算出的上次运行状态。
-    interrupted = bool(state.get("resuming"))
+    interrupted = bool(state.get("resuming")) # 上次会话是否可能中断
     graph._emit(state, "manager", "start", "管理者正在分类任务并构造上下文包")
 
     # pending_plan 是上一轮 Plan 选择题状态；存在时用户本轮可能是在回复选项。
@@ -134,13 +131,12 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
         task_type=task_type,
         workdir=workdir,
         plan_mode=bool(state.get("plan_mode")),
-        project_memory=graph._trim(graph.memory.project_memory(workdir), 5000),
-        global_memory=graph._trim(graph.memory.global_memory(), 3000),
+        project_memory=graph._trim(graph.memory.project_memory(workdir), 2000),
+        global_memory=graph._trim(graph.memory.global_memory(), 2000),
         constraints=[
             "代码文件名使用简短英文",
             "面向用户内容、注释和文档使用简体中文",
             "优先最小改动，避免无关重构",
-            "危险命令需要用户确认",
             "当前用户明确指令优先于项目记忆和全局记忆",
             "项目事实优先于默认偏好，安全规则优先级最高",
         ],
