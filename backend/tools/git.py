@@ -24,6 +24,9 @@ class GitTool:
     def status(self) -> str:
         """读取简短 Git 状态，不修改仓库。"""
 
+        if not (self.root / ".git").exists():
+            # Git 默认会向父目录查找仓库；这里必须阻止读取用户未选择的父项目状态。
+            return "当前项目目录未初始化 Git 仓库"
         # --short 让输出更短，适合作为事件或模型上下文。
         proc = subprocess.run(["git", "status", "--short"], cwd=self.root, text=True, capture_output=True)
         return (proc.stdout + proc.stderr).strip()
@@ -31,6 +34,9 @@ class GitTool:
     def diff(self, max_chars: int = 20000) -> str:
         """读取当前工作区 diff，最多返回 max_chars 个字符。"""
 
+        if not (self.root / ".git").exists():
+            # 未在所选目录显式初始化时不向上穿透父仓库，确保 Git 观察也遵守工作目录边界。
+            return "当前项目目录未初始化 Git 仓库"
         # 限制 diff 长度，防止大文件变化把上下文撑爆。
         proc = subprocess.run(["git", "diff", "--", "."], cwd=self.root, text=True, capture_output=True)
         return (proc.stdout + proc.stderr)[-max_chars:]

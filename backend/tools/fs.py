@@ -57,6 +57,31 @@ class FsTool:
         ".yaml",
         ".yml",
     }
+    # binary_suffixes 不进入代码文件索引；Coding 无法直接修改这些资源，枚举它们只会浪费上下文。
+    binary_suffixes = {
+        ".7z",
+        ".avi",
+        ".db",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".pdf",
+        ".png",
+        ".sqlite",
+        ".tar",
+        ".webm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".zip",
+    }
+    # ignored_names 是系统自动生成、对代码理解没有价值的文件。
+    ignored_names = {".DS_Store", "Thumbs.db"}
     # sensitive_names 是不应发送给模型或由 Coding 工具改写的常见凭据文件名。
     sensitive_names = {".env", "credentials.json", "models.json", "secrets.json"}
     # sensitive_suffixes 覆盖私钥、证书容器等二进制或文本凭据。
@@ -79,7 +104,7 @@ class FsTool:
         return path
 
     def list(self, max_files: int = 1200) -> list[str]:
-        """列出项目内文件，返回相对路径，最多返回 max_files 个。"""
+        """列出项目内可读代码和文本文件，返回相对路径，最多返回 max_files 个。"""
 
         # files 保存相对于 root 的文件路径，避免把用户机器的绝对路径塞进模型上下文。
         files: list[str] = []
@@ -90,6 +115,8 @@ class FsTool:
             for name in sorted(names):
                 # path 是当前文件绝对路径；只把项目相对路径交给模型。
                 path = Path(current) / name
+                if name in self.ignored_names or path.suffix.lower() in self.binary_suffixes:
+                    continue
                 files.append(str(path.relative_to(self.root)))
                 if len(files) >= max_files:
                     return files
@@ -151,6 +178,29 @@ class FsTool:
         updated = text.replace(old, new, expected)
         return self.write(rel, updated)
 
+    def replace_block(self, rel: str, start_marker: str, end_marker: str, content: str) -> str:
+        """从唯一开始标记替换到结束标记之前；结束标记为空时替换到文件末尾。"""
+
+        # path/text 是受工作目录约束的目标文件及当前完整内容，所有定位都在真实磁盘版本上完成。
+        path = self.safe(rel)
+        self._ensure_not_sensitive(path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # start_marker 必须唯一，避免同名函数或重复标题让工具替换到错误代码块。
+        if not start_marker or text.count(start_marker) != 1:
+            raise ValueError(f"代码块替换失败：开始标记必须唯一，实际匹配 {text.count(start_marker)} 处")
+        start_index = text.index(start_marker)
+        if end_marker:
+            # end_marker 从开始标记之后查找，且在剩余文本中也必须唯一；边界本身会保留。
+            tail = text[start_index + len(start_marker) :]
+            if tail.count(end_marker) != 1:
+                raise ValueError(f"代码块替换失败：结束标记在开始标记后必须唯一，实际匹配 {tail.count(end_marker)} 处")
+            end_index = start_index + len(start_marker) + tail.index(end_marker)
+        else:
+            # 空结束标记明确表示替换到 EOF，适合安全更新文件最后一个函数或章节。
+            end_index = len(text)
+        updated = text[:start_index] + content + text[end_index:]
+        return self.write(rel, updated)
+
     def search(self, query: str, max_results: int = 50) -> list[dict[str, object]]:
         """在项目文本文件中搜索字符串并返回路径、行号和行内容。"""
 
@@ -175,6 +225,28 @@ class FsTool:
                     if len(results) >= max(1, min(max_results, 200)):
                         return results
         return results
+
+    def find_text(self, paths: list[str], texts: list[str]) -> list[dict[str, object]]:
+        """在指定文件中查找禁用文本，供“不存在”断言返回结构化命中。"""
+
+        # clean_paths/clean_texts 去除空值并限制数量，避免模型用断言工具批量读取整个仓库。
+        clean_paths = list(dict.fromkeys(str(path).strip() for path in paths if str(path).strip()))[:20]
+        clean_texts = list(dict.fromkeys(str(text) for text in texts if str(text)))[:20]
+        if not clean_paths or not clean_texts:
+            raise ValueError("文本不存在断言必须提供 paths 和 texts")
+        # hits 只返回命中位置和禁用文本，不回传整份文件内容。
+        hits: list[dict[str, object]] = []
+        for rel in clean_paths:
+            path = self.safe(rel)
+            self._ensure_not_sensitive(path)
+            if not path.is_file():
+                raise FileNotFoundError(f"文件不存在：{rel}")
+            content = path.read_text(encoding="utf-8", errors="replace")
+            for text in clean_texts:
+                index = content.find(text)
+                if index >= 0:
+                    hits.append({"path": rel, "text": text, "line": content.count("\n", 0, index) + 1})
+        return hits
 
     def is_sensitive(self, path: Path) -> bool:
         """判断文件是否可能包含模型密钥、访问凭据或私钥。"""

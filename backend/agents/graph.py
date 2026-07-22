@@ -154,7 +154,7 @@ class AgentGraph:
         graph.add_conditional_edges(
             "repo",
             self.route_after_repo,
-            {"coder": "coder", "doc": "doc", "answer": "answer", "final": "final"},
+            {"coder": "coder", "doc": "doc", "answer": "answer", "verifier": "verifier", "final": "final"},
         )
         # answer 是只读答疑节点，结束后直接 final。
         graph.add_edge("answer", "final")
@@ -483,8 +483,14 @@ class AgentGraph:
     def route_after_verifier(self, state: AgentState) -> str:
         """返回 verifier 节点之后的下一跳。"""
 
-        # 测试失败且重试次数不足时回到 coder 修复。
-        if not state.get("tests_ok", True) and int(state.get("retry", 0)) < 3:
+        # verify 是用户明确要求的只读验收任务。即使发现代码问题，也只能报告结果，不能越权进入 Coding 修改项目。
+        if state.get("task_type") == "verify":
+            return "final"
+        # 只有代码或测试本身的失败才回到 coder；模型超时等基础设施失败无法靠改项目代码解决。
+        actionable_failures = [
+            item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
+        ]
+        if actionable_failures and int(state.get("retry", 0)) < 3:
             return "coder"
         # 测试通过且任务需要文档时进入 doc。
         if state.get("tests_ok", True) and state.get("after_verify") == "doc":
@@ -518,6 +524,47 @@ class AgentGraph:
         product_intent = any(word in lower for word in ["代码", "项目", "系统", "应用", "app", "网页", "页面", "接口", "功能", "模块", "工具", "agent"])
         # doc_intent 表示用户明确要求文档。
         doc_intent = any(word in lower for word in ["文档", "readme", "说明文档", "教程", "部署说明", "接口说明"])
+        # doc_only 捕获“恢复/更新 README”这类以文档本身为目标的任务，避免被项目背景词误判成代码生成。
+        doc_only = doc_intent and bool(re.search(r"(?:生成|更新|修改|恢复|完善).{0,24}(?:readme|文档)", lower))
+        # verify_only 由“验证意图”和“明确只读限制”组合判定，覆盖自然表达但不把
+        # “修改 README，不要修改其他文件”这类限定写入范围的任务误判为只读。
+        verify_intent = any(word in lower for word in ["验收", "验证", "运行测试", "重新测试", "检查测试"])
+        read_only_intent = any(
+            word in lower
+            for word in [
+                "不要修改任何文件",
+                "不要修改文件",
+                "禁止修改任何文件",
+                "禁止修改文件",
+                "不再修改文件",
+                "无需修改文件",
+                "只读验证",
+                "只读验收",
+                "只验证",
+                "只验收",
+                "仅验证",
+                "仅验收",
+            ]
+        )
+        verify_only = verify_intent and read_only_intent
+        if verify_only:
+            return {
+                "task_type": "verify",
+                "need_repo": True,
+                "need_code": False,
+                "need_doc": False,
+                "need_clarify": False,
+                "reason": "用户要求只读验收当前项目",
+            }
+        if doc_only:
+            return {
+                "task_type": "doc_gen",
+                "need_repo": True,
+                "need_code": False,
+                "need_doc": True,
+                "need_clarify": False,
+                "reason": "用户要求直接生成或更新项目文档",
+            }
         # modify_intent 覆盖真实迭代中常见的完善、优化、添加和更新表达。
         modify_intent = any(
             word in lower
@@ -578,7 +625,7 @@ class AgentGraph:
         """把规则或模型分类规范化为受控路由字段。"""
 
         # allowed 是 LangGraph 已实现的全部任务类型，未知值不能直接参与路由。
-        allowed = {"direct", "general_answer", "code_gen", "code_mod", "code_explain", "doc_gen", "plan_gen"}
+        allowed = {"direct", "general_answer", "code_gen", "code_mod", "code_explain", "doc_gen", "verify", "plan_gen"}
         # data 是输入副本，避免修改模型响应原对象。
         data = dict(raw) if isinstance(raw, dict) else {}
         # task_type 无效时回退到只读回答，避免误写代码或无声结束。
@@ -591,7 +638,9 @@ class AgentGraph:
         normalized = {
             **data,
             "task_type": task_type,
-            "need_repo": self._as_bool(data.get("need_repo"), task_type in {"code_gen", "code_mod", "code_explain", "doc_gen"}),
+            "need_repo": self._as_bool(
+                data.get("need_repo"), task_type in {"code_gen", "code_mod", "code_explain", "doc_gen", "verify"}
+            ),
             "need_code": self._as_bool(data.get("need_code"), task_type in {"code_gen", "code_mod"}),
             "need_doc": self._as_bool(data.get("need_doc"), task_type == "doc_gen"),
             "need_clarify": self._as_bool(data.get("need_clarify"), False),
@@ -669,6 +718,8 @@ class AgentGraph:
             return "answer", "final", "final"
         if task_type == "doc_gen":
             return "repo", "doc", "final"
+        if task_type == "verify":
+            return "repo", "verifier", "final"
         if task_type == "code_explain":
             return ("repo", "answer", "final") if classification.get("need_repo", True) else ("answer", "final", "final")
         if task_type in {"code_gen", "code_mod"}:
@@ -783,26 +834,33 @@ class AgentGraph:
         # allowed 是 Coding 智能体当前真实实现的工具协议。
         allowed = {
             "append_file",
+            "assert_text_absent",
             "git_diff",
             "git_status",
             "list_files",
             "read_file",
+            "replace_block",
             "replace_file",
             "run_command",
             "search_files",
             "write_file",
         }
-        # actions 不是列表时视为无动作；每轮最多执行 6 个，避免模型一次失控调用。
+        # actions 不是列表时视为无动作；协议层最多保留 3 个，强制 Coding 分批推进。
         actions = raw if isinstance(raw, list) else []
         normalized: list[dict[str, Any]] = []
-        for item in actions[:6]:
+        for item in actions[:3]:
             if not isinstance(item, dict):
                 continue
             # tool 必须命中白名单，未知工具会作为无效动作被忽略。
             tool = str(item.get("tool") or "")
             if tool not in allowed:
                 continue
-            normalized.append({**item, "tool": tool})
+            action = {**item, "tool": tool}
+            if tool == "read_file" and int(action.get("start", 0) or 0) == 0:
+                # Coding prompt 的普通源码快照上限是 24K。部分模型仍会沿用较小的读取值，
+                # 在首段读取时统一抬高，避免 13K~24K 的常见前端文件被截断后反复重读。
+                action["max_chars"] = max(int(action.get("max_chars", 0) or 0), 24_000)
+            normalized.append(action)
         return normalized
 
     def _verification_commands(self, fs: FsTool, files: list[str]) -> list[str]:
@@ -810,6 +868,15 @@ class AgentGraph:
 
         # commands 按轻量检查、测试、构建的顺序保存，并在返回前去重。
         commands: list[str] = []
+        # 没有 package.json 的静态 JavaScript 项目通常没有 npm 脚本，仍应对主入口执行原生语法检查。
+        javascript_files = [rel for rel in files if rel.endswith((".js", ".mjs"))]
+        if javascript_files and "package.json" not in files:
+            # primary_js 优先常见入口名；只选择一个入口以免占满最多四条验证命令的预算。
+            primary_js = sorted(
+                javascript_files,
+                key=lambda rel: (Path(rel).name not in {"app.js", "main.js", "index.js"}, len(Path(rel).parts), rel),
+            )[0]
+            commands.append(f"node --check {primary_js}")
         # python_files 用于判断是否存在 Python 代码和测试目录。
         python_files = [rel for rel in files if rel.endswith(".py")]
         if python_files:
@@ -818,8 +885,12 @@ class AgentGraph:
             root_files = [rel for rel in python_files if len(Path(rel).parts) == 1]
             compile_targets = top_dirs[:8] + root_files[:12]
             if compile_targets:
-                prefix = "uv run " if "pyproject.toml" in files else ""
+                # 语法编译不需要安装目标项目，--no-project 避免坏打包配置掩盖真实语法结果。
+                prefix = "uv run --no-project " if "pyproject.toml" in files else ""
                 commands.append(prefix + "python -m compileall -q " + " ".join(compile_targets))
+            # dry-run 单独验证依赖解析和项目打包配置，不修改目标项目环境。
+            if "pyproject.toml" in files:
+                commands.append("uv sync --dry-run")
             # 只有仓库确实存在 pytest 风格测试时才运行 pytest，避免“无测试”被当成失败。
             has_pytest = any("tests" in Path(rel).parts or Path(rel).name.startswith("test_") for rel in python_files)
             if has_pytest:
@@ -844,6 +915,20 @@ class AgentGraph:
         # tool 是模型请求调用的工具名称。
         tool = action.get("tool")
         try:
+            # required 保存每种工具不可缺少的参数。先做协议校验，避免把 KeyError('path')
+            # 这类无语义异常反馈给模型，导致它无法判断应该补哪个字段。
+            required = {
+                "append_file": ("path", "content"),
+                "read_file": ("path",),
+                "replace_block": ("path", "start_marker", "end_marker", "content"),
+                "replace_file": ("path", "old", "new"),
+                "run_command": ("cmd",),
+                "search_files": ("query",),
+                "write_file": ("path", "content"),
+            }
+            missing = [key for key in required.get(str(tool), ()) if key not in action]
+            if missing:
+                return {"ok": False, "text": f"工具参数缺失：{tool} 需要 {', '.join(missing)}"}
             if tool == "write_file":
                 # rel 是实际写入文件的项目相对路径。
                 rel = fs.write(str(action["path"]), str(action.get("content", "")))
@@ -862,6 +947,15 @@ class AgentGraph:
                     expected=expected,
                 )
                 return {"ok": True, "text": f"精确修改文件：{rel}", "file": rel}
+            if tool == "replace_block":
+                # start_marker/end_marker 只负责定位边界；content 是替换后的完整代码块。
+                rel = fs.replace_block(
+                    str(action["path"]),
+                    str(action.get("start_marker", "")),
+                    str(action.get("end_marker", "")),
+                    str(action.get("content", "")),
+                )
+                return {"ok": True, "text": f"按锚点修改代码块：{rel}", "file": rel}
             if tool == "read_file":
                 # rel 是模型要求读取的项目相对路径。
                 rel = str(action["path"])
@@ -873,8 +967,24 @@ class AgentGraph:
                 # results 是结构化内容命中列表，方便模型继续精确读取目标文件。
                 results = fs.search(str(action.get("query", "")), int(action.get("max_results", 50)))
                 return {"ok": True, "text": "搜索结果：\n" + json.dumps(results, ensure_ascii=False, indent=2)}
+            if tool == "assert_text_absent":
+                # paths/texts 是模型明确给出的目标文件和禁用文本，避免用 shell 表达“无匹配即成功”。
+                paths = action.get("paths") if isinstance(action.get("paths"), list) else []
+                texts = action.get("texts") if isinstance(action.get("texts"), list) else []
+                hits = fs.find_text([str(path) for path in paths], [str(text) for text in texts])
+                if hits:
+                    return {
+                        "ok": False,
+                        "text": "文本不存在断言失败：\n" + json.dumps(hits, ensure_ascii=False, indent=2),
+                    }
+                return {"ok": True, "text": "文本不存在断言通过"}
             if tool == "list_files":
-                return {"ok": True, "text": "文件列表：\n" + self._trim("\n".join(fs.list()), 30_000)}
+                # 列表只保留开头，项目入口通常位于前部；二进制媒体已由 FsTool 过滤。
+                files = fs.list(max_files=400)
+                listing = "\n".join(files)
+                if len(listing) > 12_000:
+                    listing = listing[:12_000] + f"\n... 其余文件已省略，共索引 {len(files)} 个文件"
+                return {"ok": True, "text": "文件列表：\n" + listing}
             if tool == "run_command":
                 # cmd 是模型要求执行的命令字符串，ShellTool 会做危险命令检查。
                 cmd = str(action.get("cmd", ""))
@@ -895,10 +1005,12 @@ class AgentGraph:
         它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、
         以及内联 `onclick` 调用未定义函数这类高频错误。
         """
-        if "index.html" not in files:
+        # html_files 同时覆盖静态站点入口、Flask static 目录和常见模板入口。
+        html_files = [file for file in ["index.html", "static/index.html", "templates/index.html"] if file in files]
+        if not html_files:
             return None
-        # html 是入口 HTML 内容。
-        html = fs.read("index.html", 40000)
+        # html 合并所有可识别入口模板，便于检查前端脚本引用的元素。
+        html = "\n".join(fs.read(file, 40000) for file in html_files)
         # js_text 是所有 JS 文件拼接后的内容，用于静态搜索 DOM 引用和函数定义。
         js_text = "\n".join(fs.read(file, 40000) for file in files if file.endswith(".js"))
         # ids 收集 HTML 和 JS 动态创建出的元素 id。
@@ -919,18 +1031,37 @@ class AgentGraph:
         # missing_funcs 是 HTML 调用了但 JS 中没有定义的函数。
         missing_funcs = sorted(inline_calls - defined_funcs)
 
+        # used_classes 收集 HTML 和 JS 静态片段中明确使用的类名。
+        class_values = re.findall(r'class=["\']([^"\']+)["\']', html + "\n" + js_text)
+        class_values.extend(re.findall(r'className\s*=\s*["\'`]([^"\'`]+)["\'`]', js_text))
+        used_classes = {
+            name
+            for value in class_values
+            for name in re.split(r"\s+", value.strip())
+            if name and "${" not in name
+        }
+        # styled_classes 提取 CSS 中出现的普通类选择器；状态类可依赖组合选择器，同样会被命中。
+        css_text = "\n".join(fs.read(file, 60_000) for file in files if file.endswith(".css"))
+        styled_classes = set(re.findall(r"\.([A-Za-z_-][\w-]*)", css_text))
+        # active 等纯状态类通常只和其他类组合使用；若 CSS 完全不存在则不做类名覆盖检查。
+        ignored_classes = {"active", "assistant", "disabled", "hidden", "selected", "streaming", "user"}
+        missing_classes = sorted((used_classes - styled_classes) - ignored_classes) if css_text else []
+
         # issues 保存所有静态检查问题文本。
         issues = []
         if missing_ids:
             issues.append("缺失元素 id：" + "、".join(missing_ids))
         if missing_funcs:
             issues.append("缺失内联事件函数：" + "、".join(missing_funcs))
+        # class 也可能只用于 JS 定位或继承父选择器，未单独声明不能可靠证明功能故障。
+        # missing_classes 作为诊断信息返回，但不参与静态接线成败判定。
         return {
             "cmd": "静态 Web 接线检查",
             "ok": not issues,
             "out": "通过" if not issues else "；".join(issues),
             "missing_ids": missing_ids,
             "missing_funcs": missing_funcs,
+            "missing_classes": missing_classes,
         }
 
     def _client(self, agent: str, state: AgentState) -> LlmClient:
