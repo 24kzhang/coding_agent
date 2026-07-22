@@ -64,10 +64,25 @@ class ShellTool:
             return {"ok": False, "code": 2, "out": "", "err": "命令不能为空", "cmd": clean, "argv": []}
         # program_name 去掉绝对路径，只按可执行文件名检查危险程序。
         program_name = Path(argv[0]).name.lower()
+        # uv init 默认会向上寻找 workspace，并可能修改所选目录之外的父级 pyproject.toml。
+        # Agent 的文件边界必须以用户选择目录为准，因此初始化时强制创建独立项目。
+        if program_name == "uv" and len(argv) > 1 and argv[1] == "init" and "--no-workspace" not in argv[2:]:
+            argv.insert(2, "--no-workspace")
         if program_name in self.dangerous_programs:
             return {"ok": False, "code": 126, "out": "", "err": f"高风险命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
         if program_name == "git" and len(argv) > 1 and argv[1].lower() in self.dangerous_git:
             return {"ok": False, "code": 126, "out": "", "err": f"高风险 Git 命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
+        if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not (self.root / ".git").is_dir():
+            # Git 默认向父目录查找仓库。用户选择的项目若没有自己的 .git，直接执行 status/diff
+            # 会泄露或误判父仓库内容，因此除 git init 外全部拒绝跨项目继承。
+            return {
+                "ok": False,
+                "code": 126,
+                "out": "",
+                "err": "当前项目没有独立 .git 目录，已阻止 Git 命令访问父级仓库；需要版本管理时先执行 git init",
+                "cmd": clean,
+                "argv": argv,
+            }
         # 解释器内联代码可以绕过文件和命令工具边界，要求模型改为项目内脚本文件。
         # interpreter_names 同时用于识别直接调用和 `uv run python -c` 这类嵌套调用。
         interpreter_names = {"node", "python", "python3", "ruby", "perl"}
@@ -97,8 +112,14 @@ class ShellTool:
         if not executable:
             return {"ok": False, "code": 127, "out": "", "err": f"找不到命令：{argv[0]}", "cmd": clean, "argv": argv}
         argv[0] = executable
-        # env 复制当前环境，保留用户已有 PATH、虚拟环境等配置。
+        # env 复制当前环境，保留用户已有 PATH 等配置。
         env = os.environ.copy()
+        # Agent 自身虚拟环境不应污染另一个所选项目；仅保留位于当前项目内的 VIRTUAL_ENV。
+        active_venv = env.get("VIRTUAL_ENV")
+        if active_venv:
+            venv_path = Path(active_venv).expanduser().resolve()
+            if self.root != venv_path and self.root not in venv_path.parents:
+                env.pop("VIRTUAL_ENV", None)
         # PYTHONUTF8 让 Python 子进程默认使用 UTF-8，减少中文输出乱码。
         env.setdefault("PYTHONUTF8", "1")
         # CI 避免部分测试运行器进入交互观察模式。

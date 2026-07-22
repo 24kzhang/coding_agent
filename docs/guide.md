@@ -540,13 +540,16 @@ Coding 智能体是 ReAct 循环。
 
 每一轮：
 
-1. 组装系统 prompt、Context Package、仓库摘要、已有观察。
-2. 调用 `client.chat_json()`。
-3. 读取 `thought` 和 `actions`。
-4. 对每个 action 调用 `_do_action()`。
-5. 把工具结果写入 observations。
-6. 最多执行 10 步；每轮结构化输出失败时允许一次格式纠正重试。
-7. 任一工具失败都会保留在 observations 中，模型不能仅凭 `done=true` 把失败任务报告为成功。
+1. 组装任务摘要、仓库清单、失败清单、当前文件快照和最近工具观察。
+2. 普通兼容模型调用 `client.chat_json()`；LongCat 直接使用普通文本请求和原生工具标签，避免 `response_format` 返回空对象。
+3. 读取统一后的 `thought`、`actions`、`done` 和 `summary`。
+4. 对每个 action 校验必填参数，再调用 `_do_action()`。
+5. 把工具结果压缩成带成功状态、退出码和关键输出的权威 observation。
+6. 单次 Coding 最多执行 16 步；连续三次无法得到可执行结构才结束本次尝试。
+7. 去重已经执行或拒绝过的动作；修改文件后由编排器立即从磁盘刷新快照，下一轮可直接继续修改，不再额外请求 `read_file`。
+8. 任一工具失败都会保留在 observations 中，模型不能仅凭 `done=true` 把失败任务报告为成功。
+
+为了避免长任务上下文反复膨胀，单个当前文件快照最多保留 24,000 字符，全部快照共用 48,000 字符预算；普通工具观察只保留最近六条精简结果。Coding 单轮输出最多 6,000 token；模型超时后只保留任务明确点名的文件快照。验证失败重试时，Coder 会从磁盘重新读取错误涉及的文件，而不是重新发送最初的旧仓库片段。
 
 模型返回格式：
 
@@ -555,8 +558,9 @@ Coding 智能体是 ReAct 循环。
   "thought": "本轮判断，中文",
   "actions": [
     {"tool": "search_files", "query": "旧函数名"},
-    {"tool": "read_file", "path": "src/app.py", "start": 0, "max_chars": 12000},
+    {"tool": "read_file", "path": "src/app.py", "start": 0, "max_chars": 24000},
     {"tool": "replace_file", "path": "src/app.py", "old": "旧文本", "new": "新文本", "expected": 1},
+    {"tool": "replace_block", "path": "src/app.py", "start_marker": "唯一开始标记", "end_marker": "下一个边界或空字符串", "content": "新的完整代码块"},
     {"tool": "run_command", "cmd": "python -m py_compile app.py"}
   ],
   "done": false,
@@ -565,6 +569,8 @@ Coding 智能体是 ReAct 循环。
 ```
 
 注意：Coding 智能体必须真实写磁盘，不是只输出代码片段。
+
+LongCat 模型不会被强迫伪装成 JSON 工具调用。`LONGCAT_CODER_SUFFIX` 要求它返回 `<longcat_tool_call>`、`<longcat_arg_key>` 和 `<longcat_arg_value>` 标签，`LlmClient` 再把这些标签转换成上面的统一 actions。这样模型差异只停留在封装层，`coder()` 和 `_do_action()` 仍使用同一种内部协议。
 
 ### 7.10 工具执行：`_do_action()`
 
@@ -575,6 +581,7 @@ Coding 智能体是 ReAct 循环。
 | `write_file` | `FsTool.write()` | 写完整文件 |
 | `append_file` | `FsTool.append()` | 追加文件 |
 | `replace_file` | `FsTool.replace()` | 按预期匹配次数精确替换，避免覆盖整文件 |
+| `replace_block` | `FsTool.replace_block()` | 用唯一边界替换长函数或章节，不复制整段旧内容 |
 | `read_file` | `FsTool.read()` | 按起始行和行数分段读取文件 |
 | `list_files` | `FsTool.list()` | 列文件 |
 | `search_files` | `FsTool.search()` | 搜索文本并返回文件、行号和片段 |
@@ -597,15 +604,18 @@ Coding 智能体是 ReAct 循环。
 | --- | --- |
 | 有 Python 文件 | 对源码目录运行 `python -m compileall -q` |
 | 存在 Python 测试 | `uv run pytest -q` |
+| 无 `package.json` 的静态 JavaScript | 对主入口运行 `node --check` |
 | 有 `package.json` | 读取 scripts 后依次选择 `lint`、`test`、`typecheck`、`build` |
 | 有静态 Web 文件 | 静态 Web 接线检查 |
 
-如果 Coding 自己失败，验证状态不会被默认值覆盖成成功。验证失败且总尝试次数不足 3 次时，会把结构化失败结果交回 `coder` 修复。
+如果 Coding 自己失败，验证状态不会被默认值覆盖成成功。代码任务验证失败且总尝试次数不足 3 次时，会把结构化失败结果交回 `coder` 修复；用户明确要求的 `verify` 只读任务无论成功或失败都直接返回，绝不会进入 Coding。语义审查在 60,000 字符总预算内优先完整读取普通源码，不能把提示词截断误判成磁盘文件损坏。
 
 这段逻辑在：
 
 ```python
 def route_after_verifier(self, state: AgentState) -> str:
+    if state.get("task_type") == "verify":
+        return "final"
     if not state.get("tests_ok", True) and int(state.get("retry", 0)) < 3:
         return "coder"
 ```
@@ -811,12 +821,16 @@ https://api.longcat.chat/openai
 
 ### 9.3 `chat()` 和 `chat_json()`
 
-`chat()` 返回普通文本，并在网络错误、限流或可恢复的 5xx 响应上做一次短重试。候选 URL 共用同一个连接池。
+`chat()` 返回普通文本，并在连接错误、限流或可恢复的 5xx 响应上做有限重试。候选 URL 共用同一个连接池，并缓存已经成功的接口地址。
+
+当模型名称包含 `longcat` 时，请求自动启用 `stream=true`。客户端逐行读取 OpenAI-compatible SSE 分片，把 `delta.content` 拼成完整文本，并忽略只携带 usage、心跳或空 `choices` 的分片。流式读取仍有总时长和 100,000 字符正文上限，防止服务持续发心跳导致任务永不结束。这里的流式只用于模型客户端稳定接收长响应，前端最终消息仍由 Agent 节点完成后统一返回。
 
 `chat_json()` 做了额外容错：
 
 - 去掉 ```json 代码块。
 - 使用字符串感知的括号平衡扫描，提取第一个完整 JSON 对象。
+- 识别 LongCat 原生工具标签并转换成统一 ReAct actions。
+- 当接口不支持 `response_format` 或省略标准 content 时，退回普通文本请求。
 - `json.loads()` 解析。
 - 失败就抛 `LlmError`。
 
@@ -865,6 +879,8 @@ dangerous = {
 4. 用户确认后继续执行。
 
 如果你要做这个功能，主要改 `ShellTool.run()`、`AgentGraph._do_action()`、前端流式任务状态。
+
+此外，`ShellTool` 会移除不属于所选项目的 `VIRTUAL_ENV`，给 `uv init` 自动补 `--no-workspace`。如果所选目录没有自己的 `.git`，除 `git init` 外的 Git 命令会被拒绝，防止 Git 向上找到 Coding Agent 自身仓库并把父项目状态误当成用户项目状态。
 
 ## 11. 前端：`frontend/src/main.tsx`
 
@@ -1282,7 +1298,9 @@ flowchart TB
 - 依赖目录不会进入仓库摘要。
 - 精确替换、文本搜索和敏感文件拦截。
 - 复合 shell、直接或嵌套解释器内联代码会被拒绝。
+- 子项目中的 uv、虚拟环境和 Git 不会越过用户选择的项目边界。
 - 模型解释文字中的 JSON 能正确处理字符串内部花括号。
+- LongCat 原生工具标签、完成标签、SSE 空 choices 和流式正文拼接能够正确处理。
 
 ### 15.4 建议每次修改后跑什么
 

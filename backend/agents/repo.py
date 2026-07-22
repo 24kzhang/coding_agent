@@ -22,7 +22,7 @@ def repo(graph: AgentGraph, state: AgentState) -> AgentState:
     # candidates 根据入口文件、依赖清单、任务关键词和文件类型计算相关性。
     candidates = graph._repo_candidates(fs, files, state["text"])
     # budget 控制仓库摘要总字符数，避免一开始就把模型窗口塞满。
-    budget = 60_000
+    budget = 24_000
     for rel in candidates:
         if budget <= 0:
             break

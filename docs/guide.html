@@ -655,7 +655,7 @@
             </div>
             <div class="card">
               <h3>真实代码上下文</h3>
-              <p>Repo Reader 按任务相关性选文件；Coder 可以搜索、分段读取、精确替换和查看 Git diff。</p>
+              <p>Repo Reader 按任务相关性选文件；Coder 保存 24K 当前文件快照、精确替换，并在失败重试时重新读取磁盘事实。</p>
             </div>
             <div class="card">
               <h3>完成必须有证据</h3>
@@ -667,11 +667,15 @@
             </div>
             <div class="card">
               <h3>安全在执行层</h3>
-              <p>文件工具拒绝目录越界和敏感配置；Shell 不经过 shell 解释，并拒绝复合命令和内联代码。</p>
+              <p>文件工具拒绝目录越界；Shell 拒绝复合命令和内联代码，还阻止 uv、虚拟环境和 Git 越过所选项目。</p>
             </div>
             <div class="card">
               <h3>单用户取舍</h3>
               <p>不实现多人队列和分布式锁，只保留进程内文件完整性保护与前端运行态防重复发送。</p>
+            </div>
+            <div class="card">
+              <h3>模型协议适配</h3>
+              <p>普通模型使用 JSON；LongCat 使用原生工具标签和 SSE 流式接收，统一转换成同一种 ReAct actions，并受单轮输出预算保护。</p>
             </div>
           </div>
         </div>
@@ -833,11 +837,11 @@
             </div>
             <div class="card">
               <h3>coder()</h3>
-              <p>ReAct 循环调用模型，读取 actions，再通过工具真实写文件或跑命令。</p>
+              <p>最多 16 步 ReAct，写入后自动刷新磁盘快照；短改动用精确替换，长函数用锚点代码块替换。</p>
             </div>
             <div class="card">
               <h3>verifier()</h3>
-              <p>读取项目已有脚本选择检查，初始状态继承 Coding 是否完成，失败时最多完成三次 Coding 尝试。</p>
+              <p>自动选择测试和静态 JS 语法检查，完整审查普通源码；只读验收失败只报告，不回流 Coding。</p>
             </div>
           </div>
 

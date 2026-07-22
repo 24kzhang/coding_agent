@@ -350,24 +350,21 @@ else:
 
 ### 3.2 `chat()` 的执行过程
 
-核心代码：
+普通兼容模型走标准 JSON 响应；模型名包含 `longcat` 时走 SSE 流式响应。简化后的分支如下：
 
 ```python
-for url in self._urls():
-    try:
-        with httpx.Client(timeout=self.cfg.timeout) as client:
-            resp = client.post(url, headers=headers, json=payload)
-        if resp.status_code in {404, 405}:
-            last_error = f"{url} 返回 {resp.status_code}"
-            continue
-        if resp.status_code >= 400:
-            raise LlmError(...)
+use_stream = "longcat" in self.cfg.model.lower()
+if use_stream:
+    payload["stream"] = True
+
+with httpx.Client(timeout=self.cfg.timeout) as client:
+    for url in self._urls():
+        if use_stream:
+            with client.stream("POST", url, headers=headers, json=payload) as resp:
+                return self._stream_text(resp, messages)
+        resp = client.post(url, headers=headers, json=payload)
         data = resp.json()
-        self.last_usage = self._usage(data, messages)
-        return data["choices"][0]["message"]["content"]
-    except (...):
-        last_error = ...
-raise LlmError(...)
+        return self._content_text(data["choices"][0]["message"]["content"])
 ```
 
 按执行顺序：
@@ -377,9 +374,10 @@ raise LlmError(...)
 3. 依次尝试候选 URL。
 4. 如果是 404 或 405，说明可能 URL 拼错，继续试下一个。
 5. 如果是其他错误码，认为模型接口失败。
-6. 成功时解析 JSON。
-7. 记录 token 用量。
-8. 返回 `choices[0].message.content`。
+6. 普通响应解析 `choices[0].message.content`。
+7. LongCat 响应逐行解析 `data:` 分片，跳过心跳、usage 和空 `choices`，拼接 `delta.content`。
+8. 记录接口返回或估算的 token 用量。
+9. 对流式总时长和正文长度设置硬上限后返回文本。
 
 这里的设计重点是“兼容性”：不同供应商 URL 规则不同，代码尽量自动适配。
 
@@ -405,6 +403,8 @@ if start >= 0 and end >= start:
     text = text[start : end + 1]
 return json.loads(text)
 ```
+
+上面的片段只展示 JSON 提取主线。当前实现还会调用 `_parse_longcat_tool_calls()`：当 LongCat 返回 `<longcat_tool_call>` 标签时，把工具名和参数转换成统一 `actions`；`finish` 或 `done` 标签转换成统一完成状态。Coder 因此可以使用供应商稳定支持的原生协议，下游执行层不需要出现 LongCat 专用分支。
 
 它能处理这类模型输出：
 
@@ -1424,41 +1424,40 @@ commands = list(state.get("commands", []))
 | `shell` | 在项目目录内执行命令 |
 | `git` | 查看 Git 状态 |
 | `client` | coder 模型 |
-| `observations` | 工具执行结果，反馈给下一轮模型 |
+| `observations` | 最近的精简工具结果，反馈给下一轮模型 |
+| `file_observations` | 最近读取且仍有效的当前文件快照 |
+| `seen_actions` | 已执行或已拒绝的动作签名，用于阻止原地重复 |
+| `progress_items` | 本轮已经产生的有效进展账本 |
+| `read_paths` | 当前已经读取、允许精确修改的文件 |
+| `unchecked_rewrites` | 已整体重写但尚未通过命令验证的文件 |
 | `changes` | 已修改文件 |
 | `commands` | 已执行命令 |
 
-如果上一轮测试失败：
-
-```python
-observations.append("上一轮测试失败：\n" + json.dumps(state["tests"], ...))
-```
-
-这样 coder 能根据测试失败信息修复。
+如果上一轮测试失败，`_test_brief()` 会把失败压缩成可执行清单，`_repair_paths()` 从错误和变更中选择最多六个相关文件重新读取。这样 Coder 根据当前磁盘修复，不会携带完整 traceback，也不会用第一次读取的旧代码覆盖已经正确的修改。
 
 ### 16.2 ReAct 循环
 
 ```python
-for step in range(1, 11):
+for step in range(1, 17):
     messages = [...]
-    data = client.chat_json(messages)  # 格式失败时最多纠正重试一次
+    data = client.chat_json(messages, plain_text=is_longcat)
     actions = self._normalize_actions(data.get("actions"))
     for action in actions:
         obs = self._do_action(action, fs, shell, git)
         observations.append(obs["text"])
 ```
 
-最多 10 轮。每轮做：
+最多 16 轮。每轮做：
 
 1. 把上下文、仓库摘要、已有观察发给模型。
-2. 模型返回 JSON。
+2. 普通模型返回 JSON；LongCat 返回原生工具标签，由模型封装层转换成同一结构。
 3. 读取 `thought` 和 `actions`。
 4. 执行每个 action。
 5. 把工具结果追加到 observations。
 6. 如果工具动作失败，把失败写回 observations，不能接受本轮 `done`。
 7. 只有模型明确完成且本批动作全部成功，才设置 `coding_ok=True`。
 
-连续两次拿不到合法 JSON，或达到最大步数仍未完成时，`coding_ok=False`。这个字段会进入 verifier 和 final，避免“模型没完成但空测试把任务判成功”。
+连续三次拿不到可执行结构，或达到最大步数仍未完成时，`coding_ok=False`。每轮最多执行三个紧密相关动作；重复动作会被拒绝，写入后必须运行命令验证，临近上限时会强制收尾。这个字段会进入 verifier 和 final，避免“模型没完成但空测试把任务判成功”。
 
 ### 16.3 模型必须返回什么
 
@@ -1469,8 +1468,9 @@ for step in range(1, 11):
   "thought": "本轮判断，中文",
   "actions": [
     {"tool": "search_files", "query": "目标符号"},
-    {"tool": "read_file", "path": "相对路径", "start": 0, "max_chars": 12000},
+    {"tool": "read_file", "path": "相对路径", "start": 0, "max_chars": 24000},
     {"tool": "replace_file", "path": "相对路径", "old": "旧文本", "new": "新文本", "expected": 1},
+    {"tool": "replace_block", "path": "相对路径", "start_marker": "唯一开始标记", "end_marker": "结束边界或空字符串", "content": "新代码块"},
     {"tool": "run_command", "cmd": "命令"}
   ],
   "done": false,
@@ -1484,6 +1484,8 @@ for step in range(1, 11):
 - 再决定工具动作。
 - 工具返回观察。
 - 再进入下一轮。
+
+单个当前文件快照最多 24,000 字符，全部快照最多 48,000 字符，单轮模型输出最多 6,000 token。工具 observation 只保留成功状态、目标、退出码和首尾关键输出；写入成功后由编排器从磁盘自动刷新快照，模型不需要再读一次。超时后还会丢弃任务未点名的快照，因此 16 步并不等于把 16 轮完整日志全部重复塞给模型。
 
 ### 16.4 `_do_action()`：工具动作怎么落地
 
@@ -1500,6 +1502,7 @@ if tool == "write_file":
 | `write_file` | `FsTool.write()` |
 | `append_file` | `FsTool.append()` |
 | `replace_file` | `FsTool.replace()`，要求匹配次数符合 `expected` |
+| `replace_block` | `FsTool.replace_block()`，要求开始和结束边界唯一；空结束边界表示到 EOF |
 | `read_file` | `FsTool.read()`，支持 `start` 和 `max_chars` |
 | `search_files` | `FsTool.search()`，返回文件、行号和片段 |
 | `list_files` | `FsTool.list()` |
@@ -1584,6 +1587,8 @@ proc = subprocess.run(argv, cwd=self.root, shell=False, ...)
 
 当前版本会直接拒绝复合 shell、重定向、命令替换、项目目录外参数、直接或经 `uv run` 转交的解释器内联代码。它不是完整容器隔离，但比字符串前缀黑名单更难绕过。
 
+还有三个容易忽略的项目边界：`uv init` 自动补 `--no-workspace`，外部 `VIRTUAL_ENV` 不会传入用户项目；所选目录没有独立 `.git` 时，除 `git init` 外的 Git 命令都会被拒绝，避免 Git 向上读取父仓库。
+
 ### 17.3 `GitTool`
 
 只做非破坏性操作：
@@ -1627,8 +1632,11 @@ if static_check:
 
 - JS 里 `getElementById("xxx")` 的 id 是否存在。
 - HTML 内联事件 `onclick="foo()"` 调用的函数是否在 JS 中定义。
+- HTML/JS 使用的业务 CSS class 是否能在样式表中找到；状态类和动态类按白名单处理。
 
 这不是浏览器测试，但能抓住很多静态页面常见错误。
+
+无 `package.json` 的静态 JavaScript 项目还会自动选择一个常见入口执行 `node --check`。语义审查在 60,000 字符总预算内让单个普通源码最多占 48,000 字符；只有真的超出预算时才追加“审查上下文截断”标记，模型不能把这个标记误判成磁盘文件损坏。`verify` 只读任务无论成功或失败都直接进入 Final，不会回流 Coding。
 
 ### 18.3 Python 项目
 
@@ -1672,7 +1680,7 @@ def route_after_verifier(self, state):
 - 测试成功且需要文档：去 doc。
 - 其他情况：final。
 
-注意 `retry` 是完整 Coding 尝试次数，不是内部 10 步 ReAct 的 step。最多进行 3 次 Coding 尝试。
+注意 `retry` 是完整 Coding 尝试次数，不是内部 16 步 ReAct 的 step。最多进行 3 次 Coding 尝试；标记为 `infra` 的模型或网络故障不会错误地交给 Coder 修改用户代码。
 
 ## 19. 文档智能体：`doc()`
 

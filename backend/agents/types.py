@@ -18,13 +18,15 @@ class AgentState(TypedDict, total=False):
     plan_mode: bool
     # 是否强制执行已保存计划。
     execute_plan: bool
+    # executing_plan 表示本轮正在执行已保存计划，成功后 final 才结束计划生命周期。
+    executing_plan: bool
     # 临时覆盖模型 id；为空时按每个智能体自己的模型映射选择。
     model_id: str | None
     # resuming 表示开始本轮前检测到上一轮异常中断。
     resuming: bool
     # started_at 保存单调时钟起点，用于计算本轮执行耗时。
     started_at: float
-    # 管理者分类出的任务类型，例如 direct、code_gen、doc_gen。
+    # 管理者分类出的任务类型，例如 direct、code_gen、doc_gen、verify。
     task_type: str
     # 管理者之后的下一跳节点名。
     route: str

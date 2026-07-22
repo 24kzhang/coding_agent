@@ -84,6 +84,12 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
             **state,
             "text": graph._compose_saved_plan_text(saved_plan, state["text"]),
             "plan": saved_plan,
+            # 自然语言“执行计划”与旧 execute_plan 按钮具有相同语义，必须进入执行态。
+            "execute_plan": True,
+            # 即使前端 Plan 开关仍保持开启，也不能再次路由回 planner 重复生成计划。
+            "plan_mode": False,
+            # 最终节点仅在 Coding 和验证均成功后才把计划标记为已执行。
+            "executing_plan": True,
         }
         classification = {
             "task_type": "code_gen",
@@ -93,16 +99,6 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
             "need_clarify": False,
             "reason": "用户确认执行已保存计划",
         }
-        # plan_executed 使同一计划不会在后续一句“执行计划”时被重复执行。
-        graph.memory.append(
-            workdir,
-            session_id,
-            "planner",
-            "state",
-            "plan_executed",
-            "用户已确认执行计划",
-            {"path": saved_plan.get("path")},
-        )
     elif pending_plan:
         # 用户输入明显是新任务时终止旧 pending_plan，避免它在以后劫持普通短回复。
         graph.memory.append(
@@ -155,5 +151,6 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
         "after_verify": after_verify,
         "need_doc": after_verify == "doc" or after_repo == "doc",
         "context": ctx,
-        "final": classification.get("direct_reply") or classification.get("reason", ""),
+        # final 只保存真正要回复用户的文本；分类 reason 是内部路由依据，不能覆盖后续执行结果。
+        "final": classification.get("direct_reply") or "",
     }
