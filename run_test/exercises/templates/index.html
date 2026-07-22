@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>健身动作库</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💪</text></svg>">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>💪 健身动作库</h1>
+            <p class="subtitle">共 <span id="total-count">0</span> 个动作</p>
+        </header>
+
+        <div class="filters">
+            <select id="filter-category">
+                <option value="">全部分类</option>
+            </select>
+            <select id="filter-muscle">
+                <option value="">全部目标肌肉</option>
+            </select>
+            <select id="filter-equipment">
+                <option value="">全部器材</option>
+            </select>
+            <button id="btn-reset" class="btn-reset">重置筛选</button>
+        </div>
+
+        <div id="exercise-grid" class="exercise-grid"></div>
+
+        <div class="pagination">
+            <button id="btn-prev" class="btn-page" disabled>上一页</button>
+            <span id="page-info">第 1 页</span>
+            <button id="btn-next" class="btn-page">下一页</button>
+        </div>
+    </div>
+
+    <!-- 详情弹窗 -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+        <div class="modal-content">
+            <button id="modal-close" class="modal-close-btn">&times;</button>
+            <div class="modal-body">
+                <div class="exercise-detail">
+                    <img id="detail-gif" src="" alt="动作演示">
+                    <h2 id="detail-name"></h2>
+                    <div id="detail-info" class="detail-info">
+                        <p><strong>分类：</strong><span id="detail-category"></span></p>
+                        <p><strong>身体部位：</strong><span id="detail-body-part"></span></p>
+                        <p><strong>目标肌肉：</strong><span id="detail-target"></span></p>
+                        <p><strong>肌群：</strong><span id="detail-muscle-group"></span></p>
+                        <p><strong>辅助肌群：</strong><span id="detail-secondary"></span></p>
+                        <p><strong>器材：</strong><span id="detail-equipment"></span></p>
+                    </div>
+                    <div class="instructions">
+                        <h3>动作说明</h3>
+                        <p id="detail-instructions"></p>
+                    </div>
+                    <div class="steps">
+                        <h3>步骤</h3>
+                        <ol id="detail-steps"></ol>
+                    </div>
+                </div>
+
+                <!-- 对话区域 -->
+                <div class="chat-section">
+                    <h3>🤖 健身助手</h3>
+                    <div id="chat-messages" class="chat-messages"></div>
+                    <div class="chat-input">
+                        <input type="text" id="chat-input" placeholder="输入你的问题..." />
+                        <button id="chat-send">发送</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
