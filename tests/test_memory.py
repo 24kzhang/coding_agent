@@ -58,14 +58,14 @@ def test_memory_lists_history_messages(tmp_path) -> None:
     ]
 
 
-def test_memory_history_restores_only_latest_run_events(tmp_path) -> None:
-    """恢复会话时应返回最近一轮事件，不把旧任务事件混入当前运行状态。"""
+def test_memory_history_restores_all_session_events(tmp_path) -> None:
+    """恢复会话时应按顺序返回整个会话的全部事件。"""
 
     store = MemoryStore(tmp_path / "mem")
     workdir = str(tmp_path / "proj")
     store.append(workdir, "s1", "manager", "session", "start", "新会话：s1")
     store.append(workdir, "s1", "manager", "run", "start", "第一轮开始")
-    store.append(workdir, "s1", "coder", "event", "tool", "旧事件", {"tokens": 12})
+    old = store.append(workdir, "s1", "coder", "event", "tool", "旧事件", {"tokens": 12})
     store.append(workdir, "s1", "manager", "run", "done", "第一轮结束")
     store.append(workdir, "s1", "manager", "run", "start", "第二轮开始")
     latest = store.append(workdir, "s1", "verifier", "event", "test", "最新验证通过", {"tokens": 34})
@@ -77,6 +77,15 @@ def test_memory_history_restores_only_latest_run_events(tmp_path) -> None:
     assert events == [
         {
             "id": 1,
+            "ts": old["ts"],
+            "agent": "coder",
+            "kind": "tool",
+            "msg": "旧事件",
+            "tokens": 12,
+            "data": {},
+        },
+        {
+            "id": 2,
             "ts": latest["ts"],
             "agent": "verifier",
             "kind": "test",
@@ -85,7 +94,7 @@ def test_memory_history_restores_only_latest_run_events(tmp_path) -> None:
             "data": {},
         }
     ]
-    assert response.projects[0].sessions[0].events[0].msg == "最新验证通过"
+    assert [event.msg for event in response.projects[0].sessions[0].events] == ["旧事件", "最新验证通过"]
 
 
 def test_memory_uses_session_id_without_custom_title(tmp_path) -> None:

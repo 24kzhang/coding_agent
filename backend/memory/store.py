@@ -467,7 +467,7 @@ class MemoryStore:
             return None
         # messages 是可恢复到对话窗口的用户消息和最终回复。
         messages = self._history_messages(records)
-        # events 是最近一次运行产生的事件摘要，恢复会话时重新显示在右侧事件流。
+        # events 是整个会话产生的事件摘要，恢复会话时重新显示在右侧事件流。
         events = self._history_events(records)
         # title 是会话展示名；没有自定义名时用文件名也就是 session_id。
         title = self._session_title(records) or path.stem
@@ -525,16 +525,11 @@ class MemoryStore:
                 )
         return messages
 
-    def _history_events(self, records: list[dict[str, Any]], limit: int = 300) -> list[dict[str, Any]]:
-        """从会话记录中恢复最近一次运行的事件流摘要。"""
+    def _history_events(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """从会话记录中恢复全部事件流摘要。"""
 
-        # start_index 指向最后一个 manager/run/start；会话可能执行多轮，只恢复最新一轮最符合右侧运行状态语义。
-        start_index = 0
-        for index, rec in enumerate(records):
-            if rec.get("ag") == "manager" and rec.get("tl") == "run" and rec.get("k") == "start":
-                start_index = index + 1
-        # event_records 只保留 AgentGraph._emit 写入的 event 记录，排除用户消息、最终回复和工具原始状态。
-        event_records = [rec for rec in records[start_index:] if rec.get("tl") == "event"][-max(int(limit), 1) :]
+        # event_records 保留整个会话中 AgentGraph._emit 写入的事件，排除用户消息、最终回复和工具原始状态。
+        event_records = [rec for rec in records if rec.get("tl") == "event"]
         events: list[dict[str, Any]] = []
         for event_id, rec in enumerate(event_records, start=1):
             # memory 为控制体积只保存事件摘要和 token，因此 data 恢复为空对象。

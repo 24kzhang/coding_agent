@@ -558,7 +558,7 @@ if rec.get("ag") == "manager" and rec.get("tl") == "final" and rec.get("k") == "
 - 用户输入
 - agent 最终回复
 
-中间事件不会混进对话框。右侧事件流由 `_history_events()` 单独恢复：它从最后一个 `manager/run/start` 开始提取 `tl=event` 的记录，最多返回最近 300 条，并重新生成连续事件编号。这样恢复会话后能看到最近一轮运行过程，又不会把多轮任务的全部事件塞进历史接口。
+中间事件不会混进对话框。右侧事件流由 `_history_events()` 单独恢复：它提取整个会话中全部 `tl=event` 的记录，保持 JSONL 原始顺序并重新生成连续事件编号。因此多轮任务恢复后仍能查看完整执行过程。
 
 ### 4.5 中断判断为什么这么写
 
@@ -1798,7 +1798,7 @@ if self.emit_cb:
     self.emit_cb(event)
 ```
 
-所以事件既能出现在前端事件流，也会保存在会话 jsonl。memory 只记录精简消息和 token 等必要元数据，不再重复保存完整命令输出；实时 NDJSON 流包含完整结构化事件，历史恢复则从精简记录重建最近一轮事件，`data` 字段为空对象。
+所以事件既能出现在前端事件流，也会保存在会话 jsonl。memory 只记录精简消息和 token 等必要元数据，不再重复保存完整命令输出；实时 NDJSON 流包含完整结构化事件，历史恢复则从精简记录重建整个会话的事件，`data` 字段为空对象。
 
 `_add_tokens()` 是特殊事件：
 
@@ -1946,7 +1946,7 @@ def test_memory_lists_history_messages(tmp_path):
     assert history[0]["sessions"][0]["messages"] == [...]
 ```
 
-它保证对话窗口只恢复用户输入和最终回复。`test_memory_history_restores_only_latest_run_events()` 另外保证右侧事件流只恢复最近一轮，不混入旧任务事件。
+它保证对话窗口只恢复用户输入和最终回复。`test_memory_history_restores_all_session_events()` 另外保证右侧事件流按顺序恢复整个会话的全部事件。
 
 ## 25. 如果你要新增功能，按这个思路改
 
