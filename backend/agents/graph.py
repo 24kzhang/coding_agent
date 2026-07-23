@@ -184,9 +184,8 @@ class AgentGraph:
         route = state.get("route", "final")
         return route if route in {"repo", "final"} else "final"
 
+    """把模型返回的 Plan 问题清洗成稳定格式。"""
     def _normalize_plan_questions(self, raw: Any) -> list[dict[str, Any]]:
-        """把模型返回的 Plan 问题清洗成稳定格式。"""
-
         # questions 是模型返回的原始问题列表；不是列表就按空列表处理。
         questions = raw if isinstance(raw, list) else []
         # normalized 保存清洗后的问题，每个问题都包含 question/options/recommended/reason/allow_custom。
@@ -231,9 +230,8 @@ class AgentGraph:
             }
         ]
 
+    """把结构化 Plan 问题格式化成用户可读文本。"""
     def _format_plan_questions(self, questions: list[dict[str, Any]]) -> str:
-        """把结构化 Plan 问题格式化成用户可读文本。"""
-
         # lines 保存最终输出的每一行。
         lines = [
             "Plan 模式需要你先做几个选择：",
@@ -255,9 +253,8 @@ class AgentGraph:
                 lines.append("   允许自定义回答。")
         return "\n".join(lines)
 
+    """清洗 Plan 问题中的单个文本字段。"""
     def _clean_plan_text(self, value: Any, fallback: str) -> str:
-        """清洗 Plan 问题中的单个文本字段。"""
-
         # text 是模型返回字段转成字符串后的内容。
         text = str(value or "").strip()
         # bad_markers 是不应该展示给用户的错误或 JSON 残片特征。
@@ -268,9 +265,8 @@ class AgentGraph:
         text = re.sub(r"\s+", " ", text)
         return self._trim(text, 120)
 
+    """从会话记忆中查找最近仍未完成的 pending_plan。"""
     def _latest_pending_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
-        """从会话记忆中查找最近仍未完成的 pending_plan。"""
-
         # 倒序查找最近 200 条记录，优先看到最新 Plan 状态。
         for rec in reversed(self.memory.read_session(workdir, session_id, limit=200)):
             # 如果已经有 plan_done 或 plan_cancelled，说明旧 pending_plan 不再有效。
@@ -297,23 +293,20 @@ class AgentGraph:
                 return meta
         return None
 
+    """判断用户是否想取消当前 Plan 流程。"""
     def _is_plan_cancel(self, text: str) -> bool:
-        """判断用户是否想取消当前 Plan 流程。"""
-
         # cleaned 去掉空白并转小写，兼容“取消 plan”等写法。
         cleaned = re.sub(r"\s+", "", text).lower()
         return any(word in cleaned for word in ["取消plan", "取消计划", "退出plan", "退出计划", "不做了", "重新开始"])
 
+    """判断用户是否在用自然语言确认执行计划。"""
     def _is_execute_plan_text(self, text: str) -> bool:
-        """判断用户是否在用自然语言确认执行计划。"""
-
         # cleaned 去掉空白并转小写，兼容中文和英文触发词。
         cleaned = re.sub(r"\s+", "", text).lower()
-        return cleaned in {"执行计划", "开始执行", "按计划执行", "executeplan", "runplan"}
+        return cleaned in {"执行计划", "开始执行", "按计划执行", "execute plan", "run plan"}
 
+    """判断用户输入是否应该视为上一轮 Plan 问题的回答。"""
     def _should_treat_as_plan_reply(self, text: str, pending: dict[str, Any], state: AgentState) -> bool:
-        """判断用户输入是否应该视为上一轮 Plan 问题的回答。"""
-
         # Plan 模式仍开启或显式执行计划时，优先认为它属于 Plan 流程。
         if state.get("plan_mode") or state.get("execute_plan"):
             return True
