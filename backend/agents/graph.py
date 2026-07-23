@@ -172,14 +172,12 @@ class AgentGraph:
         graph.add_edge("final", END)
         return graph.compile()
 
+    """返回 manager 后的下一跳节点。"""
     def route_after_manager(self, state: AgentState) -> str:
-        """返回 manager 后的下一跳节点。"""
-
         return state.get("route", "repo")
 
+    """返回 planner 后的下一跳，只允许 repo 或 final。"""
     def route_after_planner(self, state: AgentState) -> str:
-        """返回 planner 后的下一跳，只允许 repo 或 final。"""
-
         # route 是 planner 节点写入的下一跳。
         route = state.get("route", "final")
         return route if route in {"repo", "final"} else "final"
@@ -280,9 +278,8 @@ class AgentGraph:
                 return meta
         return None
 
+    """从会话记忆中查找最近生成的计划。"""
     def _latest_saved_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
-        """从会话记忆中查找最近生成的计划。"""
-
         for rec in reversed(self.memory.read_session(workdir, session_id, limit=200)):
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") in {"plan_executed", "plan_cancelled"}:
                 return None
@@ -322,9 +319,8 @@ class AgentGraph:
         # 短输入一般更可能是回答上一轮选择题。
         return len(text.strip()) <= 500
 
+    """用规则判断文本是否像 Plan 选择题回答。"""
     def _looks_like_plan_answer(self, text: str, pending: dict[str, Any]) -> bool:
-        """用规则判断文本是否像 Plan 选择题回答。"""
-
         # cleaned 是去除两端空白后的原始输入。
         cleaned = text.strip()
         if re.search(r"(?<!\d)\d+\s*[\.\-:：]?\s*[A-Za-z]", cleaned):
@@ -337,18 +333,16 @@ class AgentGraph:
         options = [str(option) for item in questions if isinstance(item, dict) for option in item.get("options", [])]
         return any(option and option in cleaned for option in options)
 
+    """判断输入是否更像一个新任务，而不是 Plan 选项回答。"""
     def _looks_like_new_task(self, text: str) -> bool:
-        """判断输入是否更像一个新任务，而不是 Plan 选项回答。"""
-
         # lower 是小写文本，兼容英文关键词。
         lower = text.lower()
         # keywords 是创建、修改、解释等新任务常见动词。
         keywords = ["创建", "实现", "开发", "新建", "编写", "修改", "修复", "解释", "生成文档", "重构", "build", "create", "fix"]
         return len(text.strip()) > 8 and any(word in lower for word in keywords)
 
+    """把用户 Plan 回复解析成结构化答案。"""
     def _build_plan_reply(self, text: str, pending: dict[str, Any]) -> dict[str, Any]:
-        """把用户 Plan 回复解析成结构化答案。"""
-
         # questions 是上一轮保存的 Plan 问题列表。
         questions = pending.get("questions") or []
         # answers 保存每个问题解析出的答案。
@@ -389,9 +383,8 @@ class AgentGraph:
             answers.append({"question": "自定义补充", "answer": text.strip(), "source": "custom"})
         return {"raw": text, "answers": answers}
 
+    """把原始需求、上一轮问题和用户答案合成新的 Plan 输入。"""
     def _compose_pending_plan_text(self, pending: dict[str, Any], reply: dict[str, Any]) -> str:
-        """把原始需求、上一轮问题和用户答案合成新的 Plan 输入。"""
-
         # lines 保存最终拼接给 Plan 模型的多行文本。
         lines = [
             "原始需求：",
@@ -415,9 +408,8 @@ class AgentGraph:
         lines.append("请基于原始需求和用户回答继续 Plan 流程；信息足够时生成可执行计划。")
         return "\n".join(lines)
 
+    """把已保存计划和用户确认输入合并成 Coding 可执行任务文本。"""
     def _compose_saved_plan_text(self, saved_plan: dict[str, Any], text: str) -> str:
-        """把已保存计划和用户确认输入合并成 Coding 可执行任务文本。"""
-
         return "\n".join(
             [
                 "用户确认执行已保存计划。",
@@ -428,9 +420,8 @@ class AgentGraph:
             ]
         )
 
+    """获取当前 Plan 流程的原始目标。"""
     def _plan_goal(self, state: AgentState) -> str:
-        """获取当前 Plan 流程的原始目标。"""
-
         # pending 是当前状态里的 pending_plan，优先使用它保存的原始 goal。
         pending = state.get("pending_plan") or {}
         if pending.get("goal"):
@@ -441,9 +432,8 @@ class AgentGraph:
             return ctx.goal
         return state["text"]
 
+    """生成模型异常时使用的兜底 Markdown 计划。"""
     def _fallback_plan_markdown(self, state: AgentState) -> str:
-        """生成模型异常时使用的兜底 Markdown 计划。"""
-
         # answers 是用户已确认的 Plan 选项。
         answers = state.get("plan_answers", [])
         # answer_lines 是写入计划中的“已确认选择”列表。
@@ -468,14 +458,12 @@ class AgentGraph:
 6. 生成或更新中文文档，说明启动方式、主要功能和验证结果。
 """
 
+    """返回 repo 节点之后的下一跳。"""
     def route_after_repo(self, state: AgentState) -> str:
-        """返回 repo 节点之后的下一跳。"""
-
         return state.get("after_repo", "coder")
 
+    """返回 verifier 节点之后的下一跳。"""
     def route_after_verifier(self, state: AgentState) -> str:
-        """返回 verifier 节点之后的下一跳。"""
-
         # verify 是用户明确要求的只读验收任务。即使发现代码问题，也只能报告结果，不能越权进入 Coding 修改项目。
         if state.get("task_type") == "verify":
             return "final"
@@ -490,9 +478,8 @@ class AgentGraph:
             return "doc"
         return "final"
 
+    """对用户输入进行任务分类，优先用确定性规则，兜底才调用模型。"""
     def _classify(self, state: AgentState) -> dict[str, Any]:
-        """对用户输入进行任务分类，优先用确定性规则，兜底才调用模型。"""
-
         # text 是当前任务文本。
         text = state["text"]
         # lower 是小写文本，便于英文关键词匹配。
@@ -614,9 +601,8 @@ class AgentGraph:
             # 管理者模型异常时降级为普通回答，避免误触发仓库读取和写代码。
             return {"task_type": "general_answer", "need_repo": False, "need_code": False, "need_doc": False, "need_clarify": False, "reason": "我在，可以继续告诉我你要处理的代码任务或问题。"}
 
+    """把规则或模型分类规范化为受控路由字段。"""
     def _normalize_classification(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """把规则或模型分类规范化为受控路由字段。"""
-
         # allowed 是 LangGraph 已实现的全部任务类型，未知值不能直接参与路由。
         allowed = {"direct", "general_answer", "code_gen", "code_mod", "code_explain", "doc_gen", "verify", "plan_gen"}
         # data 是输入副本，避免修改模型响应原对象。
