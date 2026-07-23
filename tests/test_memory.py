@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 
+from api.schema import HistoryResponse
 from backend.memory import MemoryStore
 
 
@@ -55,6 +56,36 @@ def test_memory_lists_history_messages(tmp_path) -> None:
         {"id": "3", "role": "user", "content": "你好"},
         {"id": "4", "role": "agent", "content": "你好，我在。"},
     ]
+
+
+def test_memory_history_restores_only_latest_run_events(tmp_path) -> None:
+    """恢复会话时应返回最近一轮事件，不把旧任务事件混入当前运行状态。"""
+
+    store = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    store.append(workdir, "s1", "manager", "session", "start", "新会话：s1")
+    store.append(workdir, "s1", "manager", "run", "start", "第一轮开始")
+    store.append(workdir, "s1", "coder", "event", "tool", "旧事件", {"tokens": 12})
+    store.append(workdir, "s1", "manager", "run", "done", "第一轮结束")
+    store.append(workdir, "s1", "manager", "run", "start", "第二轮开始")
+    latest = store.append(workdir, "s1", "verifier", "event", "test", "最新验证通过", {"tokens": 34})
+    store.append(workdir, "s1", "manager", "run", "done", "第二轮结束")
+
+    events = store.list_history()[0]["sessions"][0]["events"]
+    response = HistoryResponse(projects=store.list_history())
+
+    assert events == [
+        {
+            "id": 1,
+            "ts": latest["ts"],
+            "agent": "verifier",
+            "kind": "test",
+            "msg": "最新验证通过",
+            "tokens": 34,
+            "data": {},
+        }
+    ]
+    assert response.projects[0].sessions[0].events[0].msg == "最新验证通过"
 
 
 def test_memory_uses_session_id_without_custom_title(tmp_path) -> None:

@@ -253,7 +253,8 @@ function App() {
     setSessionId(session.id);
     setSessionTitle(session.title);
     setMessages(session.messages);
-    setEvents([]);
+    // 历史接口携带最近一次运行的事件摘要，恢复后右侧事件流和 token 统计同步还原。
+    setEvents(session.events ?? []);
     setResult(null);
     setHistoryModalOpen(false);
     setNotice(`已恢复会话：${session.title || session.id}`);

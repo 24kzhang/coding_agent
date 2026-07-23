@@ -543,7 +543,7 @@ def append(...):
 3. 遍历该项目的 `sessions/*.jsonl`。
 4. 把每个会话变成摘要。
 
-关键函数是 `_history_messages()`：
+对话窗口由 `_history_messages()` 恢复：
 
 ```python
 if rec.get("ag") == "user" and rec.get("tl") == "input" and rec.get("k") == "message":
@@ -553,12 +553,12 @@ if rec.get("ag") == "manager" and rec.get("tl") == "final" and rec.get("k") == "
     messages.append({"role": "agent", "content": self._format_result(rec)})
 ```
 
-注意：历史恢复只恢复两类消息：
+对话窗口只恢复两类消息：
 
 - 用户输入
 - agent 最终回复
 
-它不会把所有中间事件恢复到对话框里。事件流只是调试信息，不是对话历史。
+中间事件不会混进对话框。右侧事件流由 `_history_events()` 单独恢复：它从最后一个 `manager/run/start` 开始提取 `tl=event` 的记录，最多返回最近 300 条，并重新生成连续事件编号。这样恢复会话后能看到最近一轮运行过程，又不会把多轮任务的全部事件塞进历史接口。
 
 ### 4.5 中断判断为什么这么写
 
@@ -1798,7 +1798,7 @@ if self.emit_cb:
     self.emit_cb(event)
 ```
 
-所以事件既能出现在前端事件流，也会保存在会话 jsonl。memory 只记录精简消息和 token 等必要元数据，不再重复保存完整命令输出；完整结构化事件只在当前 NDJSON 流中发送。
+所以事件既能出现在前端事件流，也会保存在会话 jsonl。memory 只记录精简消息和 token 等必要元数据，不再重复保存完整命令输出；实时 NDJSON 流包含完整结构化事件，历史恢复则从精简记录重建最近一轮事件，`data` 字段为空对象。
 
 `_add_tokens()` 是特殊事件：
 
@@ -1946,7 +1946,7 @@ def test_memory_lists_history_messages(tmp_path):
     assert history[0]["sessions"][0]["messages"] == [...]
 ```
 
-它保证历史会话恢复只包含用户输入和最终回复。
+它保证对话窗口只恢复用户输入和最终回复。`test_memory_history_restores_only_latest_run_events()` 另外保证右侧事件流只恢复最近一轮，不混入旧任务事件。
 
 ## 25. 如果你要新增功能，按这个思路改
 
