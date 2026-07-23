@@ -75,7 +75,7 @@ export interface HistorySession {
   interrupted: boolean;
   // 可恢复到对话窗口的消息。
   messages: HistoryMessage[];
-  // 最近一次运行的事件流摘要。
+  // 整个会话的事件流摘要。
   events: AgentEvent[];
 }
 

@@ -121,7 +121,7 @@ class HistorySession(BaseModel):
     interrupted: bool = False
     # 可恢复到前端对话窗口的用户消息和 agent 最终回复。
     messages: list[HistoryMessage] = Field(default_factory=list)
-    # 最近一次运行的事件流；历史恢复时显示在右侧事件面板，最多保留末尾 300 条。
+    # 整个会话的事件流；历史恢复时按 JSONL 中的原始顺序显示在右侧事件面板。
     events: list[AgentEvent] = Field(default_factory=list)
 
 
