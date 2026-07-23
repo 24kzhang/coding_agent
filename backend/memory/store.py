@@ -467,6 +467,8 @@ class MemoryStore:
             return None
         # messages 是可恢复到对话窗口的用户消息和最终回复。
         messages = self._history_messages(records)
+        # events 是最近一次运行产生的事件摘要，恢复会话时重新显示在右侧事件流。
+        events = self._history_events(records)
         # title 是会话展示名；没有自定义名时用文件名也就是 session_id。
         title = self._session_title(records) or path.stem
         # last 是最后一条记录，用于更新时间和中断判断。
@@ -478,6 +480,7 @@ class MemoryStore:
             "updated_at": str(last.get("ts", "")),
             "interrupted": self._records_interrupted(records),
             "messages": messages,
+            "events": events,
         }
 
     def _read_session_file(self, path: Path) -> list[dict[str, Any]]:
@@ -521,6 +524,33 @@ class MemoryStore:
                     }
                 )
         return messages
+
+    def _history_events(self, records: list[dict[str, Any]], limit: int = 300) -> list[dict[str, Any]]:
+        """从会话记录中恢复最近一次运行的事件流摘要。"""
+
+        # start_index 指向最后一个 manager/run/start；会话可能执行多轮，只恢复最新一轮最符合右侧运行状态语义。
+        start_index = 0
+        for index, rec in enumerate(records):
+            if rec.get("ag") == "manager" and rec.get("tl") == "run" and rec.get("k") == "start":
+                start_index = index + 1
+        # event_records 只保留 AgentGraph._emit 写入的 event 记录，排除用户消息、最终回复和工具原始状态。
+        event_records = [rec for rec in records[start_index:] if rec.get("tl") == "event"][-max(int(limit), 1) :]
+        events: list[dict[str, Any]] = []
+        for event_id, rec in enumerate(event_records, start=1):
+            # memory 为控制体积只保存事件摘要和 token，因此 data 恢复为空对象。
+            meta = rec.get("m") if isinstance(rec.get("m"), dict) else {}
+            events.append(
+                {
+                    "id": event_id,
+                    "ts": str(rec.get("ts", "")),
+                    "agent": str(rec.get("ag", "manager")),
+                    "kind": str(rec.get("k", "event")),
+                    "msg": str(rec.get("out", "")),
+                    "tokens": int(meta.get("tokens", 0) or 0),
+                    "data": {},
+                }
+            )
+        return events
 
     def _session_title(self, records: list[dict[str, Any]]) -> str:
         """从会话记录中计算展示名称，最新 rename 优先。"""
