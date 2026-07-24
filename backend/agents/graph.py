@@ -30,12 +30,11 @@ from llm import LlmClient, ModelStore
 # Emit 是事件回调类型，AgentGraph 通过它把 AgentEvent 推给 FastAPI 流式接口。
 Emit = Callable[[AgentEvent], None]
 
-
+"""
+多智能体编排图。
+每次任务创建一个实例，这样事件回调、token 统计和重试次数不会串到别的会话。
+"""
 class AgentGraph:
-    """多智能体编排图。
-
-    每次任务创建一个实例，这样事件回调、token 统计和重试次数不会串到别的会话。
-    """
 
     def __init__(self, model_store: ModelStore, memory: MemoryStore, emit: Emit | None = None):
         # model_store 负责根据智能体名称找到对应模型配置。
@@ -833,9 +832,8 @@ class AgentGraph:
             normalized.append(action)
         return normalized
 
+    """读取项目配置，选择已有且适合非交互执行的验证命令。"""
     def _verification_commands(self, fs: FsTool, files: list[str]) -> list[str]:
-        """读取项目配置，选择已有且适合非交互执行的验证命令。"""
-
         # commands 按轻量检查、测试、构建的顺序保存，并在返回前去重。
         commands: list[str] = []
         # 没有 package.json 的静态 JavaScript 项目通常没有 npm 脚本，仍应对主入口执行原生语法检查。
@@ -879,9 +877,8 @@ class AgentGraph:
                         commands.append(f"npm run {script}")
         return list(dict.fromkeys(commands))[:4]
 
+    """执行 Coding 智能体返回的单个工具动作。"""
     def _do_action(self, action: dict[str, Any], fs: FsTool, shell: ShellTool, git: GitTool) -> dict[str, Any]:
-        """执行 Coding 智能体返回的单个工具动作。"""
-
         # tool 是模型请求调用的工具名称。
         tool = action.get("tool")
         try:
@@ -969,12 +966,12 @@ class AgentGraph:
         except Exception as exc:
             return {"ok": False, "text": f"工具执行失败：{tool} -> {exc}"}
 
+    """轻量检查静态 Web 项目中常见的 HTML/JS 接线错误。
+    它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、
+    以及内联 `onclick` 调用未定义函数这类高频错误。
+    """
     def _static_web_check(self, fs: FsTool, files: list[str]) -> dict[str, Any] | None:
-        """轻量检查静态 Web 项目中常见的 HTML/JS 接线错误。
 
-        它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、
-        以及内联 `onclick` 调用未定义函数这类高频错误。
-        """
         # html_files 同时覆盖静态站点入口、Flask static 目录和常见模板入口。
         html_files = [file for file in ["index.html", "static/index.html", "templates/index.html"] if file in files]
         if not html_files:
@@ -1034,23 +1031,20 @@ class AgentGraph:
             "missing_classes": missing_classes,
         }
 
+    """根据智能体名称创建对应模型客户端。"""
     def _client(self, agent: str, state: AgentState) -> LlmClient:
-        """根据智能体名称创建对应模型客户端。"""
-
         return LlmClient(self.model_store.for_agent(agent, state.get("model_id")))
 
+    """把当前上下文包序列化成模型输入文本。"""
     def _ctx_text(self, state: AgentState) -> str:
-        """把当前上下文包序列化成模型输入文本。"""
-
         # ctx 是管理者构造的 ContextPackage。
         ctx = state.get("context")
         if not ctx:
             return state["text"]
         return ctx.model_dump_json(indent=2)
 
+    """模型文档生成失败时使用的基础 README 内容。"""
     def _fallback_doc(self, state: AgentState) -> dict[str, str]:
-        """模型文档生成失败时使用的基础 README 内容。"""
-
         # files 是变更文件列表的 Markdown 项。
         files = "\n".join(f"- `{file}`" for file in state.get("changes", [])) or "- 暂无文件变更"
         # tests 是验证结果列表的 Markdown 项。
