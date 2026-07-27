@@ -4,6 +4,8 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.jbeval" />
+      <excludeFolder url="file://$MODULE_DIR$/.playwright-cli" />
     </content>
     <orderEntry type="jdk" jdkName="uv (coding_agent)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
