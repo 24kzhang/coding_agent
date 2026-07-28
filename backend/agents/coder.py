@@ -84,7 +84,15 @@ def _task_brief(state: AgentState) -> str:
     if not ctx:
         return _middle_trim(str(state.get("text", "")), 18_000)
     constraints = "\n".join(f"- {item}" for item in ctx.constraints)
-    return _middle_trim(f"任务目标：\n{ctx.goal}\n\n约束：\n{constraints}", 20_000)
+    # skill_sections 只包含用户本轮手动选择的 Skill，不自动加载整个 skills 目录。
+    skill_sections = "\n\n".join(
+        f"### Skill: {item.name}\n{item.content}"
+        for item in ctx.skills
+    )
+    text = f"任务目标：\n{ctx.goal}\n\n约束：\n{constraints}"
+    if skill_sections:
+        text += "\n\n必须遵循的用户选定 Skills：\n" + skill_sections
+    return _middle_trim(text, 100_000)
 
 
 def _repo_brief(repo: dict, *, include_snippets: bool) -> str:
@@ -156,6 +164,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     git = GitTool(state["workdir"])
     # client 是 coder 智能体对应的模型客户端。
     client = graph._client("coder", state)
+    # mcp_tools 在 Coding 真正开始时按需发现；答疑节点也有独立的 MCP ReAct 入口。
+    mcp_tools = graph._ensure_mcp_tools(state)
+    # mcp_prompt 是动态工具名、用途和输入 Schema 的模型协议说明。
+    mcp_prompt = graph._mcp_prompt(state)
     # model_name 用于选择供应商稳定支持的输出协议，不改变用户配置的模型映射。
     model_name = str(getattr(getattr(client, "cfg", None), "model", "")).lower()
     # observations 只保存精简后的工具结果，避免把完整文件和 traceback 每一步重复发送。
@@ -270,7 +282,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         messages = [
             {
                 "role": "system",
-                "content": CODER_PROMPT + (LONGCAT_CODER_SUFFIX if "longcat" in model_name else ""),
+                "content": CODER_PROMPT
+                + (LONGCAT_CODER_SUFFIX if "longcat" in model_name else "")
+                + (f"\n\n{mcp_prompt}" if mcp_prompt else ""),
             },
             {
                 "role": "user",
@@ -339,7 +353,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         if thought:
             graph._emit(state, "coder", "thought", thought)
         # actions 是模型请求执行的工具动作列表。
-        actions = graph._normalize_actions(data.get("actions"))
+        actions = graph._normalize_actions(data.get("actions"), mcp_tools)
         if len(actions) > 3:
             # 只执行前 3 个动作，剩余动作留到下一轮，避免一个错误批次破坏多个文件。
             observations.append(f"模型本轮返回 {len(actions)} 个动作，只执行前 3 个；其余动作请下一轮继续。")
@@ -420,7 +434,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             else:
                 # observation 是工具执行后的结构化观察。
-                observation = graph._do_action(action, fs, shell, git)
+                observation = graph._do_action(action, fs, shell, git, state)
             seen_actions.add(signature)
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and path:
@@ -434,7 +448,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if observation.get("ok"):
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
-                if tool in {"append_file", "assert_text_absent", "replace_block", "replace_file", "run_command", "write_file"}:
+                if tool in {"append_file", "assert_text_absent", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__"):
                     batch_progress = True
                 if tool == "write_file" and path:
                     unchecked_rewrites.add(path)
@@ -448,7 +462,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     mutated_paths.add(path)
                     if path not in current_files:
                         current_files.append(path)
-                if tool in {"append_file", "replace_block", "replace_file", "write_file", "run_command"}:
+                if tool in {"append_file", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__"):
                     mutation_count += 1
             if observation.get("file"):
                 changes.append(str(observation["file"]))

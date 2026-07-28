@@ -11,7 +11,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from api.schema import AgentEvent, TaskResult
+from api.schema import AgentEvent, SkillContext, TaskResult
 from backend.agents.answer import answer
 from backend.agents.coder import coder
 from backend.agents.doc import doc
@@ -22,6 +22,7 @@ from backend.agents.prompts import MANAGER_PROMPT
 from backend.agents.repo import repo
 from backend.agents.types import AgentState
 from backend.agents.verifier import verifier
+from backend.capabilities import McpClient, McpServerConfig
 from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.tools import FsTool, GitTool, ShellTool
@@ -36,13 +37,21 @@ Emit = Callable[[AgentEvent], None]
 """
 class AgentGraph:
 
-    def __init__(self, model_store: ModelStore, memory: MemoryStore, emit: Emit | None = None):
+    def __init__(
+        self,
+        model_store: ModelStore,
+        memory: MemoryStore,
+        emit: Emit | None = None,
+        mcp_client: McpClient | None = None,
+    ):
         # model_store 负责根据智能体名称找到对应模型配置。
         self.model_store = model_store
         # memory 负责读写会话记忆、项目长期记忆和全局长期记忆。
         self.memory = memory
         # emit_cb 是外部传入的事件回调；CLI 和 Web 流式接口都会用它实时显示事件。
         self.emit_cb = emit
+        # mcp_client 只在用户选择 MCP 且任务进入答疑或 Coding 节点时连接外部服务。
+        self.mcp_client = mcp_client or McpClient()
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
         # graph 是编译后的 LangGraph 状态机。
@@ -57,6 +66,8 @@ class AgentGraph:
         execute_plan: bool = False,
         model_id: str | None = None,
         resuming: bool = False,
+        skills: list[SkillContext] | None = None,
+        mcp_servers: list[dict[str, Any]] | None = None,
     ) -> TaskResult:
         """运行一次用户任务，并返回最终 TaskResult。"""
 
@@ -75,6 +86,14 @@ class AgentGraph:
             "model_id": model_id,
             # resuming 由 HTTP 层在写入本轮 run/start 前计算，避免把当前任务误判成旧中断。
             "resuming": resuming,
+            # skills 只包含用户本轮手动选择的 SKILL.md，不会默认加载整个目录。
+            "skills": list(skills or []),
+            # mcp_servers 已在 HTTP 层按配置白名单校验，工具发现仍会再次绑定服务 id。
+            "mcp_servers": list(mcp_servers or []),
+            # mcp_tools 在 Coding 首次执行时通过 tools/list 懒加载。
+            "mcp_tools": [],
+            # mcp_errors 保存初始化失败摘要，使模型不会反复尝试不存在的动态工具。
+            "mcp_errors": [],
             # started_at 使用单调时钟，只用于计算耗时，不受系统时间调整影响。
             "started_at": time.monotonic(),
             # changes 保存本轮修改过的文件。
@@ -496,6 +515,43 @@ class AgentGraph:
                 "reason": "普通对话，不需要调用仓库、Coding、验证或文档智能体",
                 "direct_reply": direct_reply,
             }
+        # selected_mcp_terms 用于识别“检查 GitHub MCP”“这个 MCP 能用吗”等能力任务。
+        selected_mcp_terms = {"mcp"}
+        for item in state.get("mcp_servers", []):
+            if not isinstance(item, dict):
+                continue
+            selected_mcp_terms.update(
+                str(item.get(field) or "").strip().lower()
+                for field in ("id", "name")
+                if str(item.get(field) or "").strip()
+            )
+        # explicit_code_task 防止“使用 GitHub MCP 修复项目代码”被答疑路由吞掉。
+        explicit_code_task = any(
+            phrase in lower
+            for phrase in [
+                "修改代码",
+                "修复代码",
+                "重构代码",
+                "编写代码",
+                "修改项目",
+                "修复项目",
+                "创建项目",
+                "新建项目",
+                "实现功能",
+                "开发功能",
+            ]
+        )
+        if state.get("mcp_servers") and not explicit_code_task and any(
+            term and term in lower for term in selected_mcp_terms
+        ):
+            return {
+                "task_type": "general_answer",
+                "need_repo": False,
+                "need_code": False,
+                "need_doc": False,
+                "need_clarify": False,
+                "reason": "用户正在查询或使用本轮选择的 MCP 服务，由答疑 MCP ReAct 处理",
+            }
         # code_intent 表示用户有从零创建或实现可交付物的倾向。
         code_intent = any(word in lower for word in ["创建", "实现", "开发", "新建", "编写", "做一个", "搭建", "build", "create"])
         # product_intent 表示用户目标是代码、系统、页面、接口或其他工程交付物。
@@ -799,7 +855,11 @@ class AgentGraph:
         return ordered[:50]
     
     """过滤并限制 Coding 模型返回的工具动作。"""
-    def _normalize_actions(self, raw: Any) -> list[dict[str, Any]]:
+    def _normalize_actions(
+        self,
+        raw: Any,
+        mcp_tools: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         # allowed 是 Coding 智能体当前真实实现的工具协议。
         allowed = {
             "append_file",
@@ -814,6 +874,13 @@ class AgentGraph:
             "search_files",
             "write_file",
         }
+        # dynamic_allowed 来自本轮已选择服务的 tools/list 结果，模型不能自行拼接 MCP 工具名。
+        dynamic_allowed = {
+            str(item.get("action"))
+            for item in (mcp_tools or [])
+            if isinstance(item, dict) and item.get("action")
+        }
+        allowed.update(dynamic_allowed)
         # actions 不是列表时视为无动作；协议层最多保留 3 个，强制 Coding 分批推进。
         actions = raw if isinstance(raw, list) else []
         normalized: list[dict[str, Any]] = []
@@ -878,10 +945,19 @@ class AgentGraph:
         return list(dict.fromkeys(commands))[:4]
 
     """执行 Coding 智能体返回的单个工具动作。"""
-    def _do_action(self, action: dict[str, Any], fs: FsTool, shell: ShellTool, git: GitTool) -> dict[str, Any]:
+    def _do_action(
+        self,
+        action: dict[str, Any],
+        fs: FsTool,
+        shell: ShellTool,
+        git: GitTool,
+        state: AgentState | None = None,
+    ) -> dict[str, Any]:
         # tool 是模型请求调用的工具名称。
         tool = action.get("tool")
         try:
+            if isinstance(tool, str) and tool.startswith("mcp__"):
+                return self._call_mcp_action(action, state or {})
             # required 保存每种工具不可缺少的参数。先做协议校验，避免把 KeyError('path')
             # 这类无语义异常反馈给模型，导致它无法判断应该补哪个字段。
             required = {
@@ -965,6 +1041,169 @@ class AgentGraph:
             return {"ok": False, "text": f"未知工具：{tool}"}
         except Exception as exc:
             return {"ok": False, "text": f"工具执行失败：{tool} -> {exc}"}
+
+    def _ensure_mcp_tools(self, state: AgentState) -> list[dict[str, Any]]:
+        """懒连接用户选择的 MCP 服务并缓存本轮 tools/list 结果。"""
+
+        # existing 非空说明当前 Coding 重试轮次已完成工具发现，无需重复启动服务。
+        existing = list(state.get("mcp_tools") or [])
+        if existing or not state.get("mcp_servers"):
+            return existing
+
+        # descriptors 是传给模型的安全工具定义；used_actions 防止规范化名称碰撞。
+        descriptors: list[dict[str, Any]] = []
+        errors: list[str] = []
+        used_actions: set[str] = set()
+        for raw_config in state.get("mcp_servers", []):
+            try:
+                # config 再次经过 Pydantic 校验，防止 LangGraph state 被测试或其他入口直接伪造。
+                config = McpServerConfig.model_validate(raw_config)
+                tools = self.mcp_client.list_tools(config, state["workdir"])
+                for item in tools:
+                    # base_action 只包含稳定安全字符；原始 MCP 工具名另存用于 tools/call。
+                    safe_tool = re.sub(r"[^A-Za-z0-9._-]+", "_", item.name).strip("_") or "tool"
+                    base_action = f"mcp__{config.id}__{safe_tool}"
+                    action_name = base_action
+                    suffix = 2
+                    while action_name in used_actions:
+                        action_name = f"{base_action}_{suffix}"
+                        suffix += 1
+                    used_actions.add(action_name)
+                    descriptors.append(
+                        {
+                            "action": action_name,
+                            "server_id": config.id,
+                            "name": item.name,
+                            "description": item.description,
+                            "input_schema": item.input_schema,
+                        }
+                    )
+                self._emit(
+                    state,
+                    "mcp",
+                    "ready",
+                    f"MCP「{config.name}」已连接，发现 {len(tools)} 个工具",
+                )
+            except Exception as exc:
+                # error 不包含完整配置，避免 env 或 header 随异常文本进入记忆。
+                server_id = str(raw_config.get("id") or "未命名") if isinstance(raw_config, dict) else "未命名"
+                error = f"MCP「{server_id}」连接失败：{self._trim(str(exc), 240)}"
+                errors.append(error)
+                self._emit(state, "mcp", "error", error)
+        state["mcp_tools"] = descriptors
+        state["mcp_errors"] = errors
+        return descriptors
+
+    def _mcp_prompt(self, state: AgentState) -> str:
+        """把已发现 MCP 工具转换成答疑或 Coding 模型可执行的动态协议说明。"""
+
+        tools = list(state.get("mcp_tools") or [])
+        errors = list(state.get("mcp_errors") or [])
+        if not tools and not errors:
+            return ""
+        lines = [
+            "本轮用户手动启用的 MCP 工具如下。只有列表中的动态工具名可以调用。",
+            "JSON 模式把参数放入 arguments 对象；LongCat 标签模式把每个输入字段直接作为参数标签传入。",
+        ]
+        for item in tools:
+            schema = json.dumps(item.get("input_schema") or {}, ensure_ascii=False, separators=(",", ":"))
+            lines.append(
+                f"- {item['action']}：{item.get('description') or item.get('name')}"
+                f"；输入 Schema：{self._trim(schema, 3000)}"
+            )
+        if errors:
+            lines.append("不可用服务：" + "；".join(errors))
+        return "\n".join(lines)
+
+    def _call_mcp_action(self, action: dict[str, Any], state: AgentState) -> dict[str, Any]:
+        """校验动态工具名、服务和参数后执行一次 MCP tools/call。"""
+
+        # descriptor 必须来自当前 state 的 tools/list 结果，未知动态工具直接拒绝。
+        descriptor = next(
+            (
+                item
+                for item in state.get("mcp_tools", [])
+                if isinstance(item, dict) and item.get("action") == action.get("tool")
+            ),
+            None,
+        )
+        if not descriptor:
+            return {"ok": False, "text": f"未授权或不存在的 MCP 工具：{action.get('tool')}"}
+        # raw_config 必须同时来自当前用户选择的 MCP 配置。
+        raw_config = next(
+            (
+                item
+                for item in state.get("mcp_servers", [])
+                if isinstance(item, dict) and item.get("id") == descriptor.get("server_id")
+            ),
+            None,
+        )
+        if not raw_config:
+            return {"ok": False, "text": f"MCP 服务未被本轮选择：{descriptor.get('server_id')}"}
+
+        # JSON 协议优先使用 arguments；LongCat 标签协议会把每个字段直接放在 action 顶层。
+        raw_arguments = action.get("arguments")
+        if isinstance(raw_arguments, str):
+            try:
+                raw_arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "text": f"MCP arguments 不是合法 JSON：{exc}"}
+        if raw_arguments is None:
+            raw_arguments = {key: value for key, value in action.items() if key != "tool"}
+        if not isinstance(raw_arguments, dict):
+            return {"ok": False, "text": "MCP arguments 必须是 JSON 对象"}
+        # LongCat 原生标签把参数值解析为字符串；按 MCP inputSchema 恢复基础 JSON 类型。
+        arguments = self._coerce_mcp_arguments(
+            raw_arguments,
+            descriptor.get("input_schema") if isinstance(descriptor.get("input_schema"), dict) else {},
+        )
+
+        config = McpServerConfig.model_validate(raw_config)
+        result = self.mcp_client.call_tool(
+            config,
+            state["workdir"],
+            str(descriptor["name"]),
+            arguments,
+        )
+        return {
+            **result,
+            "text": f"MCP {config.name}/{descriptor['name']}：\n{result.get('text', '')}",
+        }
+
+    def _coerce_mcp_arguments(
+        self,
+        arguments: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按 MCP 输入 Schema 恢复 LongCat 标签协议丢失的基础 JSON 类型。"""
+
+        # properties 是对象每个字段的子 Schema；不存在时保留原参数。
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        converted: dict[str, Any] = {}
+        for key, value in arguments.items():
+            field_schema = properties.get(key) if isinstance(properties.get(key), dict) else {}
+            field_type = field_schema.get("type")
+            if not isinstance(value, str):
+                converted[key] = value
+                continue
+            try:
+                if field_type == "integer":
+                    converted[key] = int(value)
+                elif field_type == "number":
+                    converted[key] = float(value)
+                elif field_type == "boolean" and value.strip().lower() in {"true", "false"}:
+                    converted[key] = value.strip().lower() == "true"
+                elif field_type in {"array", "object"}:
+                    parsed = json.loads(value)
+                    # JSON 解析成功但根类型不符合 Schema 时仍保留字符串，让 MCP 返回标准校验错误。
+                    expected = list if field_type == "array" else dict
+                    converted[key] = parsed if isinstance(parsed, expected) else value
+                else:
+                    converted[key] = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # 无法转换时不猜测，保留原值交给 MCP 服务的 Schema 校验。
+                converted[key] = value
+        return converted
 
     """轻量检查静态 Web 项目中常见的 HTML/JS 接线错误。
     它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、

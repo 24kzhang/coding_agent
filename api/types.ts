@@ -44,6 +44,10 @@ export interface SessionInfo {
   title: string;
   // 是否疑似中断。
   interrupted: boolean;
+  // 会话最近一次任务选择的 Skills。
+  skills: string[];
+  // 会话最近一次任务选择的 MCP 服务。
+  mcps: string[];
 }
 
 export interface SessionUpdate {
@@ -77,6 +81,10 @@ export interface HistorySession {
   messages: HistoryMessage[];
   // 整个会话的事件流摘要。
   events: AgentEvent[];
+  // 会话最近一次任务选择的 Skills。
+  skills: string[];
+  // 会话最近一次任务选择的 MCP 服务。
+  mcps: string[];
 }
 
 export interface HistoryProject {
@@ -118,6 +126,63 @@ export interface ChatRequest {
   execute_plan: boolean;
   // 临时覆盖模型 id。
   model_id?: string | null;
+  // 本轮手动启用的 Skill id。
+  skills: string[];
+  // 本轮手动启用的 MCP 服务 id。
+  mcps: string[];
+}
+
+export interface SkillInfo {
+  // Skill 唯一 id。
+  id: string;
+  // Skill 展示名。
+  name: string;
+  // SKILL.md 中的用途摘要。
+  description: string;
+  // Skill 在本 Agent 项目中的相对路径。
+  path: string;
+}
+
+export interface McpInfo {
+  // MCP 服务唯一 id。
+  id: string;
+  // MCP 服务展示名。
+  name: string;
+  // MCP 服务用途说明。
+  description: string;
+  // MCP 连接类型。
+  transport: "stdio" | "streamable_http";
+  // 服务是否启用。
+  enabled: boolean;
+  // 是否需要并支持通过浏览器完成独立授权。
+  auth: boolean;
+}
+
+export interface McpAuthStatus {
+  // 当前授权流程状态。
+  status: "starting" | "authorization_required" | "authorized" | "error" | "idle";
+  // 可直接展示给用户的状态说明。
+  msg: string;
+  // 等待授权时由官方 MCP 返回的一次性 OAuth 地址。
+  url?: string | null;
+  // GitHub 设备授权页面需要输入的短期用户码。
+  code?: string | null;
+}
+
+export interface McpToolInfo {
+  // MCP 原始工具名。
+  name: string;
+  // 工具用途说明。
+  description: string;
+  // 工具输入 JSON Schema。
+  input_schema: Record<string, unknown>;
+}
+
+export interface CapabilitiesResponse {
+  // 可手动选择的 Skills。
+  skills: SkillInfo[];
+  // 可手动选择的 MCP 服务。
+  mcps: McpInfo[];
 }
 
 export interface TaskResult {

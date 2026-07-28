@@ -41,6 +41,42 @@ def test_manager_prefers_code_generation_when_doc_is_a_deliverable(tmp_path) -> 
     assert result["need_doc"] is True
 
 
+def test_manager_routes_selected_mcp_question_directly_to_answer(tmp_path) -> None:
+    """MCP 能力查询不应因“检查”二字读取用户项目仓库。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "session_id": "s1",
+        "workdir": str(tmp_path / "proj"),
+        "text": "检查当前 GitHub MCP 有哪些工具和能力",
+        "plan_mode": False,
+        "mcp_servers": [{"id": "github", "name": "GitHub（只读）"}],
+    }
+
+    result = graph._classify(state)
+
+    assert result["task_type"] == "general_answer"
+    assert result["need_repo"] is False
+
+
+def test_manager_keeps_mcp_assisted_code_change_in_coding_flow(tmp_path) -> None:
+    """选择 MCP 不能把明确的项目代码修改任务降级成普通答疑。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "session_id": "s1",
+        "workdir": str(tmp_path / "proj"),
+        "text": "使用 GitHub MCP 修复项目代码并补测试",
+        "plan_mode": False,
+        "mcp_servers": [{"id": "github", "name": "GitHub（只读）"}],
+    }
+
+    result = graph._classify(state)
+
+    assert result["task_type"] == "code_mod"
+    assert result["need_code"] is True
+
+
 def test_code_task_with_doc_routes_to_coder_then_doc(tmp_path) -> None:
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
     state = {

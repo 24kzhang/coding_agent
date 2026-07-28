@@ -1,0 +1,40 @@
+{
+  "servers": [
+    {
+      "id": "filesystem",
+      "name": "项目文件系统",
+      "description": "官方 Filesystem MCP，仅允许访问当前会话选择的项目目录。",
+      "enabled": true,
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "${agent_root}/MCP/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "${workspace}"
+      ],
+      "env": {},
+      "timeout": 60
+    },
+    {
+      "id": "github",
+      "name": "GitHub（只读）",
+      "description": "GitHub 官方 MCP，通过浏览器 OAuth 登录；当前仅开放仓库、Issue、PR 和 Actions 等只读工具。",
+      "enabled": true,
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "${agent_root}/scripts/github_mcp.py"
+      ],
+      "env": {},
+      "cwd": "${agent_root}",
+      "timeout": 900,
+      "persistent": true,
+      "auth_tool": "get_me",
+      "auth_mode": "github_device",
+      "oauth_client_id": "Ov23ctZDe8AJr0QMDiIq",
+      "oauth_scopes": "repo read:org read:user user:email",
+      "auth_token_env": "GITHUB_PERSONAL_ACCESS_TOKEN"
+    }
+  ]
+}

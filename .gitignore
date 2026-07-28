@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.cache/
 .playwright-cli/
 dist/
 build/
@@ -19,3 +20,4 @@ se_test
 /.jbeval/
 /run_test/exercises/exercises-dataset-main.zip
 /memory/config/models.json
+/MCP/auth.json

@@ -62,6 +62,10 @@ class ChatRequest(BaseModel):
     execute_plan: bool = False
     # 临时覆盖模型 id；为空时按 AgentModelMap 选择每个智能体的模型。
     model_id: str | None = None
+    # 本轮任务启用的 Skill id 列表；后端会从项目根目录 skills 中读取并校验。
+    skills: list[str] = Field(default_factory=list, max_length=20)
+    # 本轮任务启用的 MCP 服务 id 列表；后端只连接 MCP/servers.json 中已启用的服务。
+    mcps: list[str] = Field(default_factory=list, max_length=20)
 
 
 class SessionCreate(BaseModel):
@@ -93,6 +97,10 @@ class SessionInfo(BaseModel):
     title: str
     # 上次会话是否可能异常中断，判断依据是最后一条 memory 是否为 manager/final/result。
     interrupted: bool = False
+    # 该会话最近一次任务选择的 Skills，恢复历史会话时同步还原前端选择。
+    skills: list[str] = Field(default_factory=list)
+    # 该会话最近一次任务选择的 MCP 服务，恢复历史会话时同步还原前端选择。
+    mcps: list[str] = Field(default_factory=list)
 
 
 class HistoryMessage(BaseModel):
@@ -123,6 +131,10 @@ class HistorySession(BaseModel):
     messages: list[HistoryMessage] = Field(default_factory=list)
     # 整个会话的事件流；历史恢复时按 JSONL 中的原始顺序显示在右侧事件面板。
     events: list[AgentEvent] = Field(default_factory=list)
+    # 会话最近一次任务选择的 Skills。
+    skills: list[str] = Field(default_factory=list)
+    # 会话最近一次任务选择的 MCP 服务。
+    mcps: list[str] = Field(default_factory=list)
 
 
 class HistoryProject(BaseModel):
@@ -164,6 +176,82 @@ class AgentEvent(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class SkillInfo(BaseModel):
+    """前端能力选择器展示的 Skill 摘要。"""
+
+    # Skill 唯一 id，来自 SKILL.md front matter 的 name。
+    id: str
+    # Skill 展示名称。
+    name: str
+    # Skill 用途摘要，来自 SKILL.md front matter 的 description。
+    description: str
+    # Skill 在本 Agent 项目中的相对路径。
+    path: str
+
+
+class SkillContext(BaseModel):
+    """用户选择后真正传给下游智能体的 Skill 内容。"""
+
+    # Skill 唯一 id。
+    id: str
+    # Skill 展示名称。
+    name: str
+    # Skill 用途摘要。
+    description: str
+    # SKILL.md 完整正文，受能力加载器的单文件和总长度预算限制。
+    content: str
+
+
+class McpToolInfo(BaseModel):
+    """MCP 服务通过 tools/list 暴露的单个工具定义。"""
+
+    # MCP 原始工具名，调用 tools/call 时必须原样使用。
+    name: str
+    # 工具用途说明。
+    description: str = ""
+    # MCP 标准 JSON Schema 输入定义。
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpInfo(BaseModel):
+    """前端能力选择器展示的 MCP 服务安全摘要。"""
+
+    # MCP 服务唯一 id。
+    id: str
+    # MCP 服务展示名。
+    name: str
+    # MCP 服务用途说明。
+    description: str = ""
+    # 连接类型；前端只展示，不参与连接。
+    transport: Literal["stdio", "streamable_http"]
+    # 是否启用；当前接口只返回启用服务，保留字段便于后续配置管理。
+    enabled: bool = True
+    # auth 表示该服务配置了独立授权检查工具，前端据此显示授权按钮。
+    auth: bool = False
+
+
+class McpAuthStatus(BaseModel):
+    """MCP 浏览器授权流程的当前状态。"""
+
+    # status 只描述授权生命周期，不包含 OAuth token 或授权码。
+    status: Literal["starting", "authorization_required", "authorized", "error", "idle"]
+    # msg 是前端可直接展示的简短中文状态。
+    msg: str
+    # url 是官方服务提供的一次性授权地址，仅在等待浏览器操作时返回。
+    url: str | None = None
+    # code 是设备授权时需要在官方页面输入的短期用户码。
+    code: str | None = None
+
+
+class CapabilitiesResponse(BaseModel):
+    """GET /api/capabilities 返回的可选 Skills 和 MCP 服务。"""
+
+    # 当前 skills 目录中所有格式有效的 Skill。
+    skills: list[SkillInfo] = Field(default_factory=list)
+    # 当前 MCP 配置中所有已启用服务。
+    mcps: list[McpInfo] = Field(default_factory=list)
+
+
 class ContextPackage(BaseModel):
     """管理者派发给下游智能体的结构化上下文包。"""
 
@@ -185,6 +273,8 @@ class ContextPackage(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     # 最近会话摘要，不是完整历史，用于避免下游上下文过载。
     recent: list[str] = Field(default_factory=list)
+    # 用户本轮手动选择的 Skill 内容；未选择时为空，不会自动加载全部 Skill。
+    skills: list[SkillContext] = Field(default_factory=list)
 
 
 class TaskResult(BaseModel):

@@ -137,7 +137,14 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
             "项目事实优先于默认偏好，安全规则优先级最高",
         ],
         recent=graph.memory.conversation_context(workdir, session_id, limit=12, exclude_latest_user=True),
+        # skills 已由 HTTP 层从本 Agent 的 skills 目录安全读取；下游只得到用户本轮选择项。
+        skills=list(state.get("skills") or []),
     )
+    if ctx.skills or state.get("mcp_servers"):
+        # selected_names 只记录能力 id，不把 Skill 正文或 MCP 敏感配置写入事件流。
+        selected_names = [f"Skill:{item.id}" for item in ctx.skills]
+        selected_names.extend(f"MCP:{item.get('id')}" for item in state.get("mcp_servers", []))
+        graph._emit(state, "manager", "capability", "本轮已启用：" + "、".join(selected_names))
     if interrupted:
         # 会话疑似中断时，在最近上下文里提醒下游以磁盘当前状态为准。
         ctx.recent.append("检测到上次会话可能异常中断，本次会继续以当前磁盘状态为准。")

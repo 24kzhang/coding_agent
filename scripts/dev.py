@@ -58,6 +58,8 @@ def main() -> None:
     env = os.environ.copy()
     env["BACKEND_PORT"] = str(backend_port)
     env["FRONTEND_PORT"] = str(frontend_port)
+    # 使用项目内 npm 缓存，避免用户级 ~/.npm 权限损坏导致首次安装前端或 MCP 依赖失败。
+    env.setdefault("NPM_CONFIG_CACHE", str(ROOT / ".cache" / "npm"))
     # VITE_API_URL 会被 Vite 注入到前端 import.meta.env 中。
     env["VITE_API_URL"] = f"http://127.0.0.1:{backend_port}"
 
@@ -71,6 +73,11 @@ def main() -> None:
     # 首次启动没有 node_modules 时自动安装前端依赖。
     if not (frontend_dir / "node_modules").exists():
         subprocess.check_call([npm, "install"], cwd=frontend_dir, env=env)
+    # mcp_dir 保存项目内固定版本的 Node MCP 服务依赖。
+    mcp_dir = ROOT / "MCP"
+    # 配置了 MCP/package.json 且依赖未安装时自动安装，双击启动后即可直接连接正式 MCP。
+    if (mcp_dir / "package.json").exists() and not (mcp_dir / "node_modules").exists():
+        subprocess.check_call([npm, "install"], cwd=mcp_dir, env=env)
 
     # backend 是 uvicorn 后端进程。
     backend = run(

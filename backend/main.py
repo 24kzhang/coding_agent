@@ -14,8 +14,10 @@ from fastapi.responses import StreamingResponse
 
 from api.schema import (
     AgentModelMap,
+    CapabilitiesResponse,
     ChatRequest,
     HistoryResponse,
+    McpAuthStatus,
     ModelConfig,
     SessionCreate,
     SessionInfo,
@@ -23,6 +25,7 @@ from api.schema import (
     TaskResult,
 )
 from backend.agents.graph import AgentGraph, new_session_id
+from backend.capabilities import CapabilityStore, McpClient
 from backend.memory import MemoryStore
 from llm import LlmClient, LlmError, ModelStore
 
@@ -41,6 +44,10 @@ app.add_middleware(
 model_store = ModelStore()
 # memory_store 是记忆仓库，读写 memory/data 下的会话、项目和全局记忆。
 memory_store = MemoryStore()
+# capability_store 负责发现项目根目录 skills 和读取 MCP/servers.json。
+capability_store = CapabilityStore()
+# mcp_client 通过官方 MCP SDK 测试、发现和调用用户选择的服务。
+mcp_client = McpClient()
 
 
 @app.get("/api/health")
@@ -94,6 +101,59 @@ def save_model_map(model_map: AgentModelMap) -> AgentModelMap:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/capabilities")
+def list_capabilities() -> CapabilitiesResponse:
+    """返回前端可手动选择的 Skills 和已启用 MCP 服务。"""
+
+    try:
+        return CapabilitiesResponse(
+            skills=capability_store.list_skills(),
+            mcps=capability_store.list_mcps(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/mcps/{server_id}/test")
+def test_mcp(server_id: str, workdir: str) -> dict[str, Any]:
+    """测试 MCP 初始化和工具发现，不执行任何 MCP 工具。"""
+
+    # resolved 是占位符 ${workspace} 使用的真实项目目录。
+    resolved = _resolve_workdir(workdir)
+    try:
+        # config 必须来自已启用配置，不能由接口临时注入命令或 URL。
+        config = capability_store.select_mcps([server_id])[0]
+        return mcp_client.test(config, resolved)
+    except Exception as exc:
+        # 官方 MCP SDK 的异步上下文在子进程失败时可能抛出 ExceptionGroup，
+        # API 统一转成可读 400，避免前端只能看到内部服务器错误。
+        raise HTTPException(status_code=400, detail=f"MCP 连接失败：{exc}") from exc
+
+
+@app.post("/api/mcps/{server_id}/auth")
+def start_mcp_auth(server_id: str, workdir: str) -> McpAuthStatus:
+    """发起 MCP 浏览器授权，并返回官方服务提供的一次性地址。"""
+
+    resolved = _resolve_workdir(workdir)
+    try:
+        config = capability_store.select_mcps([server_id])[0]
+        return mcp_client.start_auth(config, resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"MCP 授权启动失败：{exc}") from exc
+
+
+@app.get("/api/mcps/{server_id}/auth")
+def get_mcp_auth(server_id: str, workdir: str) -> McpAuthStatus:
+    """轮询 MCP 浏览器授权状态，不返回令牌或身份工具结果。"""
+
+    resolved = _resolve_workdir(workdir)
+    try:
+        config = capability_store.select_mcps([server_id])[0]
+        return mcp_client.auth_status(config, resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"MCP 授权状态读取失败：{exc}") from exc
+
+
 @app.post("/api/sessions")
 def create_session(req: SessionCreate) -> SessionInfo:
     """创建新会话，并写入一条 session/start 记忆。"""
@@ -106,7 +166,14 @@ def create_session(req: SessionCreate) -> SessionInfo:
     title = " ".join((req.title or "").strip().split())[:60] or session_id
     # 写入会话开始记录，后续历史会话列表从这里读取初始标题。
     memory_store.append(workdir, session_id, "manager", "session", "start", f"新会话：{title}", {"title": title, "custom": bool(req.title)})
-    return SessionInfo(id=session_id, workdir=workdir, title=title, interrupted=False)
+    return SessionInfo(
+        id=session_id,
+        workdir=workdir,
+        title=title,
+        interrupted=False,
+        skills=[],
+        mcps=[],
+    )
 
 
 @app.post("/api/pick-dir")
@@ -203,11 +270,14 @@ def get_session(session_id: str, workdir: str) -> SessionInfo:
 
     # resolved 是规范化后的项目路径。
     resolved = _resolve_workdir(workdir, require_exists=False)
+    # capabilities 是该会话最近一次请求选择的 Skills 和 MCP 服务。
+    capabilities = memory_store.session_capabilities(resolved, session_id)
     return SessionInfo(
         id=session_id,
         workdir=resolved,
         title=memory_store.session_title(resolved, session_id) or session_id,
         interrupted=memory_store.interrupted(resolved, session_id),
+        **capabilities,
     )
 
 
@@ -221,11 +291,14 @@ def rename_session(session_id: str, req: SessionUpdate) -> SessionInfo:
         memory_store.rename_session(resolved, session_id, req.title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # capabilities 在重命名时保持不变，一并返回便于前端合同稳定。
+    capabilities = memory_store.session_capabilities(resolved, session_id)
     return SessionInfo(
         id=session_id,
         workdir=resolved,
         title=memory_store.session_title(resolved, session_id) or session_id,
         interrupted=memory_store.interrupted(resolved, session_id),
+        **capabilities,
     )
 
 
@@ -261,8 +334,25 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
     # workdir 通过 session_id 反查，避免前端伪造任意项目路径执行任务。
     workdir = _session_workdir(req.session_id)
+    try:
+        # skill_contexts 是受字符预算限制的 SKILL.md 正文。
+        skill_contexts = capability_store.load_skills(req.skills)
+        # mcp_configs 仅能来自 MCP/servers.json 中已启用服务。
+        mcp_configs = capability_store.select_mcps(req.mcps)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # resuming 必须在写入本轮记录前判断，否则当前用户输入会被误认为上轮中断。
     resuming = memory_store.interrupted(workdir, req.session_id)
+    # 能力选择独立写入 session memory，恢复历史会话时前端会同步还原。
+    memory_store.append(
+        workdir,
+        req.session_id,
+        "manager",
+        "capability",
+        "selection",
+        f"本轮启用 {len(skill_contexts)} 个 Skill、{len(mcp_configs)} 个 MCP",
+        {"skills": [item.id for item in skill_contexts], "mcps": [item.id for item in mcp_configs]},
+    )
     # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
     memory_store.append(workdir, req.session_id, "user", "input", "message", req.text)
     # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
@@ -278,7 +368,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 
         try:
             # graph 是本次任务的 LangGraph 编排实例，emit 用于实时输出事件。
-            graph = AgentGraph(model_store, memory_store, emit=emit)
+            graph = AgentGraph(model_store, memory_store, emit=emit, mcp_client=mcp_client)
             # result 是任务最终结果，会以 type=result 写入队列。
             result = graph.run(
                 session_id=req.session_id,
@@ -288,6 +378,8 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 execute_plan=req.execute_plan,
                 model_id=req.model_id,
                 resuming=resuming,
+                skills=skill_contexts,
+                mcp_servers=[item.model_dump() for item in mcp_configs],
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "done", "本轮任务正常结束")
             event_queue.put({"type": "result", "data": result.model_dump()})

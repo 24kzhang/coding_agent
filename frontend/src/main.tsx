@@ -7,13 +7,18 @@ import {
   Circle,
   Copy,
   Cpu,
+  ExternalLink,
   FileText,
   FolderOpen,
   GitBranch,
   History,
+  KeyRound,
   Loader2,
+  PlugZap,
   Plus,
+  Puzzle,
   RadioTower,
+  RefreshCw,
   Save,
   Send,
   Settings,
@@ -26,16 +31,23 @@ import type {
   AgentEvent,
   AgentModelMap,
   AgentName,
+  CapabilitiesResponse,
   HistoryMessage,
   HistoryProject,
   HistorySession,
+  McpAuthStatus,
+  McpInfo,
   ModelConfig,
+  SkillInfo,
   TaskResult
 } from "../../api/types";
 import "./style.css";
 
 // ChatMessage 与后端历史消息合同一致，单独起别名用于组件状态语义。
 type ChatMessage = HistoryMessage;
+
+// McpAuthPrompt 为设备授权弹窗补充当前服务 id，便于隔离并发或已取消的轮询。
+type McpAuthPrompt = McpAuthStatus & { id: string };
 
 // API 是后端地址，启动脚本会通过 VITE_API_URL 注入动态端口。
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8710";
@@ -91,8 +103,22 @@ function App() {
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   // historyProjects 保存历史弹窗中的项目和会话树。
   const [historyProjects, setHistoryProjects] = useState<HistoryProject[]>([]);
+  // skills 保存后端从项目根目录 skills 发现的可选 Skill 摘要。
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  // mcps 保存 MCP/servers.json 中已启用服务的安全摘要。
+  const [mcps, setMcps] = useState<McpInfo[]>([]);
+  // selectedSkills 是本轮请求要注入结构化上下文的 Skill id。
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  // selectedMcps 是本轮请求允许连接和调用的 MCP 服务 id。
+  const [selectedMcps, setSelectedMcps] = useState<string[]>([]);
+  // capabilityModalOpen 控制 Skills/MCP 多选弹窗。
+  const [capabilityModalOpen, setCapabilityModalOpen] = useState(false);
+  // mcpAuthPrompt 保存设备码、官方授权地址和当前状态，避免信息只出现在短提示中。
+  const [mcpAuthPrompt, setMcpAuthPrompt] = useState<McpAuthPrompt | null>(null);
   // copiedId 保存刚复制成功的消息 id，用于短暂显示勾选反馈。
   const [copiedId, setCopiedId] = useState("");
+  // authAttemptRef 标识当前授权轮询；关闭弹窗后旧轮询不会再次把弹窗打开。
+  const authAttemptRef = useRef(0);
   // chatRef 指向对话滚动容器，新消息到达后自动滚到最新位置。
   const chatRef = useRef<HTMLDivElement>(null);
   // eventRef 指向事件流滚动容器，新事件到达后自动滚到底部。
@@ -101,6 +127,7 @@ function App() {
   // 组件首次挂载时加载模型配置。
   useEffect(() => {
     void loadModels();
+    void loadCapabilities();
   }, []);
 
   // 只在消息数量变化时滚动，用户阅读长消息内部滚动条时不会被持续抢焦点。
@@ -127,6 +154,100 @@ function App() {
       setDraft(data.models[0] ?? emptyModel());
     } catch (error) {
       setNotice(errorMessage(error));
+    }
+  }
+
+  async function loadCapabilities() {
+    try {
+      // data 只包含 Skill 摘要和 MCP 安全字段，不包含完整 Skill 正文、env 或 headers。
+      const data = await requestJson<CapabilitiesResponse>(`${API}/api/capabilities`);
+      setSkills(data.skills ?? []);
+      setMcps(data.mcps ?? []);
+      // 配置文件删除能力后同步清理旧选择，避免发送时由后端拒绝未知 id。
+      const skillIds = new Set((data.skills ?? []).map((item) => item.id));
+      const mcpIds = new Set((data.mcps ?? []).map((item) => item.id));
+      setSelectedSkills((current) => current.filter((id) => skillIds.has(id)));
+      setSelectedMcps((current) => current.filter((id) => mcpIds.has(id)));
+    } catch (error) {
+      setNotice(`能力列表读取失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function testMcp(id: string) {
+    // MCP 的 ${workspace} 占位符依赖当前项目，未选择项目时不允许测试。
+    if (!workdir) {
+      setNotice("请先选择项目目录，再测试 MCP");
+      return;
+    }
+    setNotice(`正在测试 MCP：${id}`);
+    try {
+      const data = await requestJson<{ ok: boolean; msg: string }>(
+        `${API}/api/mcps/${encodeURIComponent(id)}/test?workdir=${encodeURIComponent(workdir)}`,
+        { method: "POST" }
+      );
+      setNotice(data.ok ? data.msg : `MCP 测试失败：${id}`);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  }
+
+  async function authorizeMcp(id: string) {
+    // OAuth 必须绑定当前项目对应的持久 MCP 进程，未选目录时不能发起。
+    if (!workdir) {
+      setNotice("请先选择项目目录，再授权 MCP");
+      return;
+    }
+    // attemptId 用于识别本次轮询，用户关闭弹窗或重新授权后立即废弃旧任务。
+    const attemptId = ++authAttemptRef.current;
+    setMcpAuthPrompt({
+      id,
+      status: "starting",
+      msg: "正在生成 GitHub 设备码",
+      url: null,
+      code: null
+    });
+    setNotice(`正在准备 MCP 授权：${id}`);
+    try {
+      let state = await requestJson<McpAuthStatus>(
+        `${API}/api/mcps/${encodeURIComponent(id)}/auth?workdir=${encodeURIComponent(workdir)}`,
+        { method: "POST" }
+      );
+      if (authAttemptRef.current !== attemptId) return;
+      setMcpAuthPrompt({ id, ...state });
+      setNotice(state.msg);
+
+      // GitHub 设备码最长等待十五分钟；轮询只读取后端状态，不重复启动授权流程。
+      for (let attempt = 0; attempt < 450 && !["authorized", "error"].includes(state.status); attempt += 1) {
+        await delay(2000);
+        if (authAttemptRef.current !== attemptId) return;
+        state = await requestJson<McpAuthStatus>(
+          `${API}/api/mcps/${encodeURIComponent(id)}/auth?workdir=${encodeURIComponent(workdir)}`
+        );
+        setMcpAuthPrompt({ id, ...state });
+        setNotice(state.msg);
+      }
+    } catch (error) {
+      if (authAttemptRef.current !== attemptId) return;
+      const msg = errorMessage(error);
+      setMcpAuthPrompt({ id, status: "error", msg, url: null, code: null });
+      setNotice(msg);
+    }
+  }
+
+  function closeMcpAuth() {
+    // 递增标识使等待中的旧轮询在下一次检查时退出，不会重新显示已关闭弹窗。
+    authAttemptRef.current += 1;
+    setMcpAuthPrompt(null);
+  }
+
+  async function copyMcpCode() {
+    // code 是短期设备码，不包含持久 token；复制后仍不写入会话或事件流。
+    if (!mcpAuthPrompt?.code) return;
+    try {
+      await navigator.clipboard.writeText(mcpAuthPrompt.code);
+      setNotice("设备码已复制");
+    } catch (error) {
+      setNotice(`复制设备码失败：${errorMessage(error)}`);
     }
   }
 
@@ -255,6 +376,9 @@ function App() {
     setMessages(session.messages);
     // 历史接口携带整个会话的事件摘要，恢复后右侧事件流和 token 统计同步还原。
     setEvents(session.events ?? []);
+    // 能力选择属于会话最近一次任务状态，恢复后下一轮默认延续相同选择。
+    setSelectedSkills(session.skills ?? []);
+    setSelectedMcps(session.mcps ?? []);
     setResult(null);
     setHistoryModalOpen(false);
     setNotice(`已恢复会话：${session.title || session.id}`);
@@ -375,7 +499,14 @@ function App() {
       const res = await fetch(`${API}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: id, text: trimmedTask, plan_mode: planMode, execute_plan: false })
+        body: JSON.stringify({
+          session_id: id,
+          text: trimmedTask,
+          plan_mode: planMode,
+          execute_plan: false,
+          skills: selectedSkills,
+          mcps: selectedMcps
+        })
       });
       if (!res.ok) {
         // errorData 可能是 FastAPI detail，也可能是 Pydantic 校验错误数组。
@@ -620,6 +751,19 @@ function App() {
             <button className="ghost" type="button" disabled={!workdir || running} onClick={() => void createSession()}>
               <GitBranch size={16} /> 新建会话
             </button>
+            <button
+              className={selectedSkills.length + selectedMcps.length > 0 ? "ghost capability-button active" : "ghost capability-button"}
+              type="button"
+              disabled={running}
+              onClick={() => setCapabilityModalOpen(true)}
+              title="选择 Skills 和 MCP"
+            >
+              <Puzzle size={16} />
+              能力
+              {selectedSkills.length + selectedMcps.length > 0 && (
+                <span>{selectedSkills.length + selectedMcps.length}</span>
+              )}
+            </button>
             <button className="primary send-button" disabled={running || !task.trim() || !workdir} onClick={() => void runTask()}>
               {running ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
               发送
@@ -689,6 +833,169 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* 能力弹窗：手动多选本轮使用的 Skills 和 MCP 服务。 */}
+        {capabilityModalOpen && (
+          <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="能力选择">
+            <section className="modal capability-modal">
+              <div className="modal-head">
+                <h2>
+                  <Puzzle size={18} />
+                  能力选择
+                </h2>
+                <div className="modal-head-actions">
+                  <button className="icon" type="button" onClick={() => void loadCapabilities()} title="刷新能力列表">
+                    <RefreshCw size={17} />
+                  </button>
+                  <button className="icon" type="button" onClick={() => setCapabilityModalOpen(false)} title="关闭">
+                    <XCircle size={18} />
+                  </button>
+                </div>
+              </div>
+              <div className="capability-grid">
+                <section className="capability-section">
+                  <div className="capability-section-head">
+                    <h3>
+                      <Puzzle size={16} /> Skills
+                    </h3>
+                    <span>{selectedSkills.length}/{skills.length}</span>
+                  </div>
+                  <div className="capability-list">
+                    {skills.length === 0 && <p className="muted capability-empty">skills 目录中暂无可用 Skill</p>}
+                    {skills.map((skill) => (
+                      <label className="capability-row" key={skill.id}>
+                        <input
+                          type="checkbox"
+                          checked={selectedSkills.includes(skill.id)}
+                          onChange={() => setSelectedSkills(toggleSelected(selectedSkills, skill.id))}
+                        />
+                        <span>
+                          <strong>{skill.name}</strong>
+                          <small>{skill.description}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+                <section className="capability-section">
+                  <div className="capability-section-head">
+                    <h3>
+                      <PlugZap size={16} /> MCP
+                    </h3>
+                    <span>{selectedMcps.length}/{mcps.length}</span>
+                  </div>
+                  <div className="capability-list">
+                    {mcps.length === 0 && <p className="muted capability-empty">MCP/servers.json 中暂无已启用服务</p>}
+                    {mcps.map((mcp) => (
+                      <div className="capability-row mcp-row" key={mcp.id}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={selectedMcps.includes(mcp.id)}
+                            onChange={() => setSelectedMcps(toggleSelected(selectedMcps, mcp.id))}
+                          />
+                          <span>
+                            <strong>{mcp.name}</strong>
+                            <small>{mcp.description}</small>
+                          </span>
+                        </label>
+                        <div className="mcp-actions">
+                          {mcp.auth && (
+                            <button
+                              className="icon compact-icon"
+                              type="button"
+                              disabled={!workdir}
+                              onClick={() => void authorizeMcp(mcp.id)}
+                              title={workdir ? "通过浏览器授权 MCP" : "选择项目后可授权"}
+                            >
+                              <KeyRound size={14} />
+                            </button>
+                          )}
+                          <button
+                            className="icon compact-icon"
+                            type="button"
+                            disabled={!workdir}
+                            onClick={() => void testMcp(mcp.id)}
+                            title={workdir ? "测试 MCP 连通性" : "选择项目后可测试"}
+                          >
+                            <RadioTower size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </div>
+              <div className="modal-actions capability-actions">
+                <button
+                  className="ghost"
+                  type="button"
+                  disabled={selectedSkills.length + selectedMcps.length === 0}
+                  onClick={() => {
+                    setSelectedSkills([]);
+                    setSelectedMcps([]);
+                  }}
+                >
+                  清空选择
+                </button>
+                <button className="primary" type="button" onClick={() => setCapabilityModalOpen(false)}>
+                  <Check size={16} /> 完成
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* MCP 授权弹窗始终保留设备码，用户主动点击后再打开 GitHub 官方页面。 */}
+        {mcpAuthPrompt && (
+          <div className="modal-backdrop auth-backdrop" role="dialog" aria-modal="true" aria-label="GitHub MCP 授权">
+            <section className="modal auth-modal">
+              <div className="modal-head">
+                <h2>
+                  <KeyRound size={18} />
+                  GitHub MCP 授权
+                </h2>
+                <button className="icon" type="button" onClick={closeMcpAuth} title="关闭授权窗口">
+                  <XCircle size={18} />
+                </button>
+              </div>
+              <div className={`auth-state ${mcpAuthPrompt.status}`}>
+                {mcpAuthPrompt.status === "authorized" ? <Check size={18} /> : <KeyRound size={18} />}
+                <span>{mcpAuthPrompt.msg}</span>
+              </div>
+              {mcpAuthPrompt.status === "authorization_required" && (
+                <>
+                  <div className="auth-code-block">
+                    <span>在 GitHub 页面输入此设备码</span>
+                    <code>{mcpAuthPrompt.code || "正在生成..."}</code>
+                  </div>
+                  <div className="auth-help">设备码是一次性的。GitHub 授权成功后，本机会保存登录状态。</div>
+                </>
+              )}
+              <div className="modal-actions">
+                {mcpAuthPrompt.code && (
+                  <button className="secondary" type="button" onClick={() => void copyMcpCode()}>
+                    <Copy size={16} /> 复制设备码
+                  </button>
+                )}
+                {mcpAuthPrompt.url && (
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={() => window.open(mcpAuthPrompt.url || "", "_blank", "noopener,noreferrer")}
+                  >
+                    <ExternalLink size={16} /> 打开 GitHub 授权页
+                  </button>
+                )}
+                {["authorized", "error"].includes(mcpAuthPrompt.status) && (
+                  <button className="primary" type="button" onClick={closeMcpAuth}>
+                    <Check size={16} /> 完成
+                  </button>
+                )}
+              </div>
+            </section>
           </div>
         )}
 
@@ -778,6 +1085,16 @@ function emptyModel(): ModelConfig {
     enabled: true,
     timeout: 120
   };
+}
+
+function toggleSelected(current: string[], id: string): string[] {
+  // 已选中时移除，未选中时追加；保持用户点击顺序，后端也按这个顺序注入上下文。
+  return current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+}
+
+function delay(milliseconds: number): Promise<void> {
+  // 授权状态轮询间隔使用 Promise 定时器，避免阻塞界面交互。
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function agentName(id: string) {

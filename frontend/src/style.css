@@ -774,6 +774,25 @@ select:disabled {
   min-width: 82px;
 }
 
+.capability-button {
+  position: relative;
+}
+
+.capability-button.active {
+  border-color: var(--green);
+  background: var(--mint);
+  color: #075f46;
+}
+
+.capability-button > span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #ffffff;
+  font: 800 10px/1.5 var(--mono);
+}
+
 .toggle {
   display: flex;
   grid-template-columns: auto 1fr;
@@ -842,6 +861,212 @@ select:disabled {
 .modal-actions {
   justify-content: flex-end;
   padding-top: 5px;
+}
+
+.modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.capability-modal {
+  width: min(900px, 100%);
+  height: min(650px, calc(100vh - 40px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.capability-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+  margin: 0 -16px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.capability-section {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 13px 16px;
+  overflow: hidden;
+}
+
+.capability-section + .capability-section {
+  border-left: 1px solid var(--line);
+}
+
+.capability-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+
+.capability-section-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+}
+
+.capability-section-head > span {
+  color: var(--blue);
+  font: 800 11px/1.4 var(--mono);
+}
+
+.capability-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.capability-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 11px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.capability-row:hover {
+  background: var(--paper);
+}
+
+.capability-row input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--blue);
+}
+
+.capability-row > span,
+.mcp-row label > span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.capability-row strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.capability-row small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.mcp-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: default;
+}
+
+.mcp-row > label {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.capability-empty {
+  margin: 0;
+  padding: 24px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  text-align: center;
+}
+
+.capability-actions {
+  justify-content: space-between;
+}
+
+.auth-backdrop {
+  z-index: 30;
+}
+
+.auth-modal {
+  width: min(520px, 100%);
+  gap: 14px;
+}
+
+.auth-state {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--blue);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.auth-state.authorized {
+  border-left-color: var(--green);
+  color: var(--green);
+}
+
+.auth-state.error {
+  border-left-color: var(--coral);
+  color: var(--coral);
+}
+
+.auth-code-block {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  background: #f8fbff;
+}
+
+.auth-code-block > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.auth-code-block code {
+  color: var(--blue-strong);
+  font: 800 28px/1.2 var(--mono);
+  letter-spacing: 2px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.auth-help {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 .history-modal {

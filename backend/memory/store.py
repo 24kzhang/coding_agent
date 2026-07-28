@@ -145,6 +145,17 @@ class MemoryStore:
             return ""
         return self._session_title(self._read_session_file(path)) or session_id
 
+    def session_capabilities(self, workdir: str, session_id: str) -> dict[str, list[str]]:
+        """读取会话最近一次任务选择的 Skills 和 MCP 服务。"""
+
+        # safe_id 保证外部 session_id 不能构造越界路径。
+        safe_id = self._safe_session_id(session_id)
+        # path 直接定位已有会话，不因读取不存在会话而创建 memory 目录。
+        path = self.project_path(workdir) / "sessions" / f"{safe_id}.jsonl"
+        if not path.exists():
+            return {"skills": [], "mcps": []}
+        return self._session_capabilities(self._read_session_file(path))
+
     def append(
         self,
         workdir: str,
@@ -369,7 +380,7 @@ class MemoryStore:
             for rec in records:
                 # is_critical 表示这条记录不能在第一阶段被丢弃。
                 is_critical = (
-                    rec.get("tl") in {"session", "input", "final", "state", "run"}
+                    rec.get("tl") in {"session", "input", "final", "state", "run", "capability"}
                     or rec.get("k") in {"message", "result", "pending_plan", "plan_done"}
                 )
                 if is_critical:
@@ -481,6 +492,7 @@ class MemoryStore:
             "interrupted": self._records_interrupted(records),
             "messages": messages,
             "events": events,
+            **self._session_capabilities(records),
         }
 
     def _read_session_file(self, path: Path) -> list[dict[str, Any]]:
@@ -567,6 +579,23 @@ class MemoryStore:
                     return title[:60]
                 break
         return ""
+
+    def _session_capabilities(self, records: list[dict[str, Any]]) -> dict[str, list[str]]:
+        """从会话记录倒序提取最近一次能力选择。"""
+
+        for rec in reversed(records):
+            if rec.get("ag") != "manager" or rec.get("tl") != "capability" or rec.get("k") != "selection":
+                continue
+            # meta 只接受字典，损坏或旧格式记录按空选择处理。
+            meta = rec.get("m") if isinstance(rec.get("m"), dict) else {}
+            # skills/mcps 逐项转字符串并去重，避免旧数据把非字符串传给前端。
+            skills_raw = meta.get("skills") if isinstance(meta.get("skills"), list) else []
+            mcps_raw = meta.get("mcps") if isinstance(meta.get("mcps"), list) else []
+            return {
+                "skills": list(dict.fromkeys(str(item) for item in skills_raw if str(item))),
+                "mcps": list(dict.fromkeys(str(item) for item in mcps_raw if str(item))),
+            }
+        return {"skills": [], "mcps": []}
 
     def _format_result(self, rec: dict[str, Any]) -> str:
         """把 manager/final/result 记录转换成前端历史对话中的 Agent 文本。"""

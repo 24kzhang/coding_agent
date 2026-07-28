@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from api.schema import ContextPackage
+from api.schema import ContextPackage, SkillContext
 
 
 class AgentState(TypedDict, total=False):
@@ -24,6 +24,14 @@ class AgentState(TypedDict, total=False):
     model_id: str | None
     # resuming 表示开始本轮前检测到上一轮异常中断。
     resuming: bool
+    # skills 是用户本轮手动选择并由后端安全读取的 Skill 正文。
+    skills: list[SkillContext]
+    # mcp_servers 是用户本轮手动选择的 MCP 服务配置，不向前端或模型暴露密钥字段。
+    mcp_servers: list[dict[str, Any]]
+    # mcp_tools 是连接所选 MCP 后通过 tools/list 发现的动态工具定义。
+    mcp_tools: list[dict[str, Any]]
+    # mcp_errors 保存 MCP 服务初始化失败摘要，答疑和 Coding 模型都可据此返回真实状态。
+    mcp_errors: list[str]
     # started_at 保存单调时钟起点，用于计算本轮执行耗时。
     started_at: float
     # 管理者分类出的任务类型，例如 direct、code_gen、doc_gen、verify。

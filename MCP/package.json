@@ -1,0 +1,12 @@
+{
+  "name": "coding-agent-mcp-servers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Coding Agent 本地 MCP 服务依赖",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.7.10"
+  },
+  "overrides": {
+    "glob": "13.0.6"
+  }
+}
