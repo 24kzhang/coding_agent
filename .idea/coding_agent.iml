@@ -6,6 +6,11 @@
       <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.jbeval" />
       <excludeFolder url="file://$MODULE_DIR$/.playwright-cli" />
+      <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/server" />
+      <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/static/css" />
+      <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/static/js" />
+      <excludeFolder url="file://$MODULE_DIR$/run_test/exercises1" />
+      <excludeFolder url="file://$MODULE_DIR$/run_test/exercises1/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="uv (coding_agent)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
