@@ -309,6 +309,33 @@ select:disabled {
   white-space: nowrap;
 }
 
+/* 模型名称使用紧凑字号并允许自然换行，窄侧栏中仍能完整阅读供应商模型名。 */
+.model-name-button {
+  min-height: 30px;
+  gap: 5px;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.model-name-button svg {
+  flex: 0 0 auto;
+}
+
+.model-name-button span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* 左侧快捷测试和删除只承担图标命令，缩小后为模型名称保留更多横向空间。 */
+.model-action-button {
+  width: 28px;
+  min-height: 28px;
+  flex-basis: 28px;
+}
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -861,6 +888,52 @@ select:disabled {
 .modal-actions {
   justify-content: flex-end;
   padding-top: 5px;
+}
+
+/* 连通性结果紧邻测试按钮展示，同时保留主页面右上角的全局状态提示。 */
+.model-test-result {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 5px;
+  background: var(--paper);
+  color: #41536a;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.model-test-result svg {
+  margin-top: 1px;
+}
+
+.model-test-result span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-test-result.testing {
+  border-left-color: var(--blue);
+  color: #285184;
+}
+
+.model-test-result.success {
+  border-color: #9bd3bd;
+  border-left-color: var(--green);
+  background: var(--mint);
+  color: #075f46;
+}
+
+.model-test-result.error {
+  border-color: #efb4a9;
+  border-left-color: var(--coral);
+  background: var(--coral-soft);
+  color: #9e3526;
 }
 
 .modal-head-actions {

@@ -3,10 +3,21 @@ from __future__ import annotations
 import json
 
 from backend.agents.graph import AgentGraph
-from backend.agents.verifier import _reject_critical_warnings, verifier
+from backend.agents.prompts import CODER_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
+from backend.agents.verifier import _reject_critical_warnings, _typescript_project_checks, verifier
 from backend.memory import MemoryStore
 from backend.tools import FsTool
 from llm import ModelStore
+
+
+def test_agent_prompts_require_durable_stateless_chat_context() -> None:
+    """Plan、Coding、Verifier 必须一致要求首轮上下文进入后续完整历史。"""
+
+    assert "返回包含该 system、user、assistant 的完整 messages" in PLANNER_PROMPT
+    assert "客户端保存但不渲染 system" in CODER_PROMPT
+    assert "不得要求把正确的可持续 system 历史删除" in VERIFIER_PROMPT
+    assert "客户端请求体、查询参数和响应类型要与服务端模型完全一致" in CODER_PROMPT
+    assert "逐字段比较客户端实际发送的请求体" in VERIFIER_PROMPT
 
 
 def test_static_web_check_detects_missing_dom_wiring(tmp_path) -> None:
@@ -114,6 +125,29 @@ def test_verifier_uses_only_existing_node_scripts(tmp_path) -> None:
     assert commands == ["npm run test", "npm run typecheck", "npm run build"]
 
 
+def test_typescript_project_requires_config_and_typecheck_script(tmp_path) -> None:
+    """Vite 构建不做类型检查，TS 项目必须显式提供类型检查配置与脚本。"""
+
+    fs = FsTool(str(tmp_path / "project"))
+    fs.write("web/package.json", json.dumps({"scripts": {"build": "vite build"}}))
+    fs.write("web/src/app.tsx", "export default function App() { return null }\n")
+
+    checks = _typescript_project_checks(fs, fs.list())
+
+    assert len(checks) == 1
+    assert checks[0]["ok"] is False
+    assert "缺少 tsconfig.json" in checks[0]["out"]
+    assert "缺少可执行的 typecheck 脚本" in checks[0]["out"]
+
+    fs.write("web/tsconfig.json", json.dumps({"compilerOptions": {"strict": True}}))
+    fs.write(
+        "web/package.json",
+        json.dumps({"scripts": {"typecheck": "tsc --noEmit", "build": "vite build"}}),
+    )
+
+    assert _typescript_project_checks(fs, fs.list())[0]["ok"] is True
+
+
 def test_python_verification_separates_compile_and_uv_project_check(tmp_path) -> None:
     """Python 语法检查不触发安装，uv 配置另用 dry-run 验证。"""
 
@@ -127,6 +161,76 @@ def test_python_verification_separates_compile_and_uv_project_check(tmp_path) ->
     assert commands == [
         "uv run --no-project python -m compileall -q server.py",
         "uv sync --dry-run",
+    ]
+
+
+def test_fastapi_entry_gets_real_import_smoke_check(tmp_path) -> None:
+    """compileall 无法发现错误导入，常见 Web 入口还必须真实执行一次。"""
+
+    fs = FsTool(str(tmp_path / "project"))
+    fs.write(
+        "api/pyproject.toml",
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["fastapi"]\n',
+    )
+    fs.write("api/app.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+
+    commands = graph._verification_commands(fs, fs.list())
+
+    assert "uv run --project api python api/app.py" in commands
+
+
+def test_packaged_fastapi_entry_uses_module_import_smoke_check(tmp_path) -> None:
+    """包目录中的 FastAPI 入口应通过 -m 导入，避免脚本路径破坏包搜索路径。"""
+
+    fs = FsTool(str(tmp_path / "project"))
+    fs.write(
+        "pyproject.toml",
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["fastapi"]\n',
+    )
+    fs.write("app/__init__.py", "")
+    fs.write("app/main.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+
+    commands = graph._verification_commands(fs, fs.list())
+
+    assert "uv run python -m app.main" in commands
+
+
+def test_nested_frontend_backend_verification_uses_project_scoped_commands(tmp_path) -> None:
+    """嵌套前后端项目必须在各自目录解析依赖和测试，不能误用根环境。"""
+
+    fs = FsTool(str(tmp_path / "fullstack"))
+    fs.write(
+        "backend/pyproject.toml",
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["pytest"]\n',
+    )
+    fs.write("backend/app/main.py", "READY = True\n")
+    fs.write("backend/tests/test_api.py", "def test_ready():\n    assert True\n")
+    fs.write(
+        "frontend/package.json",
+        json.dumps(
+            {
+                "scripts": {
+                    "test": "vitest run",
+                    "typecheck": "tsc --noEmit",
+                    "build": "vite build",
+                }
+            }
+        ),
+    )
+    fs.write("frontend/src/main.tsx", "export const ready = true;\n")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+
+    commands = graph._verification_commands(fs, fs.list())
+
+    assert commands == [
+        "uv run --no-project python -m compileall -q backend",
+        "uv sync --project backend --dry-run",
+        "uv run --project backend pytest -q backend/tests",
+        "npm --prefix frontend run test",
+        "npm --prefix frontend run typecheck",
+        "npm --prefix frontend run build",
     ]
 
 
@@ -184,6 +288,23 @@ def test_read_only_verify_failure_never_routes_to_coder(tmp_path) -> None:
         "tests": [{"cmd": "node --check app.js", "ok": False, "out": "SyntaxError"}],
     }
 
+    assert graph.route_after_verifier(state) == "final"
+
+
+def test_complex_project_allows_additional_repair_rounds(tmp_path) -> None:
+    """复杂项目第五轮仍有可修复问题时，应继续修复而不是提前交付失败。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "task_type": "code_gen",
+        "tests_ok": False,
+        "retry": 5,
+        "tests": [{"cmd": "需求实现审查", "ok": False, "issues": ["缺少配置文件"]}],
+    }
+
+    assert graph.route_after_verifier(state) == "coder"
+
+    state["retry"] = 7
     assert graph.route_after_verifier(state) == "final"
 
 

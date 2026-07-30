@@ -28,6 +28,9 @@ from backend.memory import MemoryStore
 from backend.tools import FsTool, GitTool, ShellTool
 from llm import LlmClient, ModelStore
 
+# MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
+MAX_CODER_ATTEMPTS = 7
+
 # Emit 是事件回调类型，AgentGraph 通过它把 AgentEvent 推给 FastAPI 流式接口。
 Emit = Callable[[AgentEvent], None]
 
@@ -171,7 +174,14 @@ class AgentGraph:
         graph.add_conditional_edges(
             "repo",
             self.route_after_repo,
-            {"coder": "coder", "doc": "doc", "answer": "answer", "verifier": "verifier", "final": "final"},
+            {
+                "planner": "planner",
+                "coder": "coder",
+                "doc": "doc",
+                "answer": "answer",
+                "verifier": "verifier",
+                "final": "final",
+            },
         )
         # answer 是只读答疑节点，结束后直接 final。
         graph.add_edge("answer", "final")
@@ -432,6 +442,9 @@ class AgentGraph:
                 "用户确认执行已保存计划。",
                 f"用户本轮输入：{text}",
                 "",
+                "原始任务目标：",
+                str(saved_plan.get("goal") or ""),
+                "",
                 "计划内容：",
                 str(saved_plan.get("markdown") or ""),
             ]
@@ -455,11 +468,12 @@ class AgentGraph:
         answers = state.get("plan_answers", [])
         # answer_lines 是写入计划中的“已确认选择”列表。
         answer_lines = "\n".join(f"- {item.get('question', '')}：{item.get('answer', '')}" for item in answers) or "- 暂无补充选择"
+        goal = self._redact_plan_secrets(self._plan_goal(state))
         return f"""# 执行计划
 
 ## 目标
 
-{self._plan_goal(state)}
+{goal}
 
 ## 已确认选择
 
@@ -475,6 +489,27 @@ class AgentGraph:
 6. 生成或更新中文文档，说明启动方式、主要功能和验证结果。
 """
 
+    """隐藏计划文档中的凭据值；原始 goal 仍单独保存在会话元数据供执行时使用。"""
+    def _redact_plan_secrets(self, text: str) -> str:
+        # quoted_or_plain 覆盖中文/英文引号包裹值和普通无空格值，但保留字段名与分隔符。
+        quoted_or_plain = r'("[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'|[^\s,，\n]+)'
+        # field_pattern 同时识别自然语言 `apikey：...` 和 JSON `"api_key": "..."`。
+        field_pattern = re.compile(
+            rf"""(?ix)
+            (
+                ["']?
+                \b(?:api[\s_-]*key|apikey|access[\s_-]*token|secret)\b
+                ["']?
+                \s*[：:=]\s*
+            )
+            {quoted_or_plain}
+            """
+        )
+        redacted = field_pattern.sub(r'\1"[已脱敏，执行时使用原始需求中的用户凭据]"', str(text))
+        # token_pattern 兜底处理模型脱离字段标签、在正文或代码块中单独复制的常见密钥格式。
+        token_pattern = re.compile(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b")
+        return token_pattern.sub("[已脱敏，执行时使用原始需求中的用户凭据]", redacted)
+
     """返回 repo 节点之后的下一跳。"""
     def route_after_repo(self, state: AgentState) -> str:
         return state.get("after_repo", "coder")
@@ -488,7 +523,9 @@ class AgentGraph:
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
         ]
-        if actionable_failures and int(state.get("retry", 0)) < 3:
+        # retry 在每次 Coding 结束后递增。复杂项目常需要多轮“实现 → 语义审查 → 精确修复”，
+        # 尤其模型接口偶发超时会消耗整轮步骤；保留五次总尝试仍有明确硬上限。
+        if actionable_failures and int(state.get("retry", 0)) < MAX_CODER_ATTEMPTS:
             return "coder"
         # 测试通过且任务需要文档时进入 doc。
         if state.get("tests_ok", True) and state.get("after_verify") == "doc":
@@ -736,9 +773,10 @@ class AgentGraph:
         # task_type 是管理者分类出的任务类型。
         task_type = classification.get("task_type", "general_answer")
         if task_type == "plan_gen":
-            return "planner", "final", "final"
+            # Plan 先经过 Repo 获取用户指定的 schema、清单和现有目录事实，再交给 Planner。
+            return "repo", "planner", "final"
         if state.get("plan_mode") and not state.get("execute_plan"):
-            return "planner", "final", "final"
+            return "repo", "planner", "final"
         if classification.get("need_clarify"):
             return "final", "final", "final"
         if task_type == "direct":
@@ -816,6 +854,9 @@ class AgentGraph:
             # path 和 name 分别用于完整路径与 basename 评分。
             path = Path(rel)
             name = path.name
+            # docs/plans 是 Planner 自己生成的历史产物，不能反过来作为下一次 Repo 事实污染新计划。
+            if len(path.parts) >= 2 and path.parts[:2] == ("docs", "plans"):
+                continue
             if fs.is_sensitive(fs.safe(rel)):
                 continue
             score = 0
@@ -844,6 +885,10 @@ class AgentGraph:
                 hits = []
             for hit in hits:
                 rel = str(hit["path"])
+                hit_path = Path(rel)
+                # 内容检索同样排除 docs/plans 生成物，与上方评分阶段保持一致。
+                if len(hit_path.parts) >= 2 and hit_path.parts[:2] == ("docs", "plans"):
+                    continue
                 scores[rel] = scores.get(rel, 0) + 90
 
         # 空项目直接返回空列表；有文件但没有得分时选择少量根级代码文件兜底。
@@ -903,9 +948,13 @@ class AgentGraph:
     def _verification_commands(self, fs: FsTool, files: list[str]) -> list[str]:
         # commands 按轻量检查、测试、构建的顺序保存，并在返回前去重。
         commands: list[str] = []
+        # python_manifests/node_manifests 同时识别根项目与常见的 backend/frontend 子项目。
+        # 过去只判断根目录清单，会在嵌套项目上错误调用系统 pytest，并完全漏掉前端构建。
+        python_manifests = sorted(rel for rel in files if Path(rel).name == "pyproject.toml")
+        node_manifests = sorted(rel for rel in files if Path(rel).name == "package.json")
         # 没有 package.json 的静态 JavaScript 项目通常没有 npm 脚本，仍应对主入口执行原生语法检查。
         javascript_files = [rel for rel in files if rel.endswith((".js", ".mjs"))]
-        if javascript_files and "package.json" not in files:
+        if javascript_files and not node_manifests:
             # primary_js 优先常见入口名；只选择一个入口以免占满最多四条验证命令的预算。
             primary_js = sorted(
                 javascript_files,
@@ -921,28 +970,95 @@ class AgentGraph:
             compile_targets = top_dirs[:8] + root_files[:12]
             if compile_targets:
                 # 语法编译不需要安装目标项目，--no-project 避免坏打包配置掩盖真实语法结果。
-                prefix = "uv run --no-project " if "pyproject.toml" in files else ""
+                prefix = "uv run --no-project " if python_manifests else ""
                 commands.append(prefix + "python -m compileall -q " + " ".join(compile_targets))
-            # dry-run 单独验证依赖解析和项目打包配置，不修改目标项目环境。
-            if "pyproject.toml" in files:
-                commands.append("uv sync --dry-run")
-            # 只有仓库确实存在 pytest 风格测试时才运行 pytest，避免“无测试”被当成失败。
-            has_pytest = any("tests" in Path(rel).parts or Path(rel).name.startswith("test_") for rel in python_files)
-            if has_pytest:
-                commands.append(("uv run " if "pyproject.toml" in files else "") + "pytest -q")
+            for manifest in python_manifests:
+                project_dir = Path(manifest).parent
+                project_arg = "" if project_dir == Path(".") else f" --project {project_dir.as_posix()}"
+                # dry-run 单独验证依赖解析和项目打包配置，不修改目标项目环境。
+                commands.append(f"uv sync{project_arg} --dry-run")
+                # 测试必须限定到该 Python 项目，避免父目录或其他子项目的测试串入。
+                project_python = [
+                    rel
+                    for rel in python_files
+                    if project_dir == Path(".") or project_dir in Path(rel).parents
+                ]
+                # FastAPI/Flask 入口即使能 compileall，也可能在真实导入时因模块遮蔽或错误
+                # import 失败。对不含自启动调用的常见 app.py/main.py 直接执行一次导入烟测。
+                entry_candidates = sorted(
+                    (
+                        rel
+                        for rel in project_python
+                        if Path(rel).name in {"app.py", "main.py"}
+                    ),
+                    key=lambda rel: (
+                        len(Path(rel).relative_to(project_dir).parts),
+                        rel,
+                    ),
+                )
+                for entry in entry_candidates[:1]:
+                    try:
+                        entry_text = fs.read(entry, 80_000)
+                    except (OSError, ValueError):
+                        entry_text = ""
+                    if (
+                        ("FastAPI(" in entry_text or "Flask(" in entry_text)
+                        and "uvicorn.run(" not in entry_text
+                        and "app.run(" not in entry_text
+                    ):
+                        entry_path = Path(entry)
+                        package_init = entry_path.parent / "__init__.py"
+                        if package_init.as_posix() in files:
+                            module = ".".join(entry_path.with_suffix("").parts)
+                            commands.append(f"uv run{project_arg} python -m {module}")
+                        else:
+                            commands.append(f"uv run{project_arg} python {entry}")
+                test_targets = sorted(
+                    {
+                        (project_dir / "tests").as_posix()
+                        for rel in project_python
+                        if "tests" in Path(rel).relative_to(project_dir).parts
+                    }
+                    | {
+                        rel
+                        for rel in project_python
+                        if Path(rel).name.startswith("test_") and len(Path(rel).relative_to(project_dir).parts) == 1
+                    }
+                )
+                if test_targets:
+                    target_text = " ".join(test_targets)
+                    commands.append(f"uv run{project_arg} pytest -q {target_text}")
+            # 没有 pyproject.toml 的 Python 脚本仓库，仅在确实存在测试时调用系统 pytest。
+            if not python_manifests:
+                test_targets = sorted(
+                    {
+                        "tests"
+                        for rel in python_files
+                        if "tests" in Path(rel).parts
+                    }
+                    | {
+                        rel
+                        for rel in python_files
+                        if Path(rel).name.startswith("test_") and len(Path(rel).parts) == 1
+                    }
+                )
+                if test_targets:
+                    commands.append("pytest -q " + " ".join(test_targets))
 
-        if "package.json" in files:
+        for manifest in node_manifests:
+            project_dir = Path(manifest).parent
             try:
                 # package_data 用结构化 JSON 读取 scripts，不猜测项目使用哪个 Node 测试框架。
-                package_data = json.loads(fs.read("package.json", 80_000))
+                package_data = json.loads(fs.read(manifest, 80_000))
                 scripts = package_data.get("scripts") if isinstance(package_data, dict) else {}
             except (json.JSONDecodeError, OSError, ValueError):
                 scripts = {}
             if isinstance(scripts, dict):
                 for script in ["lint", "test", "typecheck", "build"]:
                     if script in scripts:
-                        commands.append(f"npm run {script}")
-        return list(dict.fromkeys(commands))[:4]
+                        prefix = "npm" if project_dir == Path(".") else f"npm --prefix {project_dir.as_posix()}"
+                        commands.append(f"{prefix} run {script}")
+        return list(dict.fromkeys(commands))[:8]
 
     """执行 Coding 智能体返回的单个工具动作。"""
     def _do_action(

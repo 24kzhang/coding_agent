@@ -16,6 +16,7 @@ class FsTool:
         ".pytest_cache",
         ".ruff_cache",
         ".tox",
+        ".uv-cache",
         ".venv",
         "__pycache__",
         "build",

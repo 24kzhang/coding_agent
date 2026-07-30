@@ -14,6 +14,9 @@ def test_fs_skips_dependencies_and_supports_precise_replace(tmp_path) -> None:
     dependency = workdir / "node_modules" / "pkg" / "index.js"
     dependency.parent.mkdir(parents=True)
     dependency.write_text("ignored", encoding="utf-8")
+    uv_cache = workdir / ".uv-cache" / "archive-v0" / "pkg" / "module.py"
+    uv_cache.parent.mkdir(parents=True)
+    uv_cache.write_text("def ignored_cache_symbol(): ...\n", encoding="utf-8")
     media = workdir / "assets" / "demo.gif"
     media.parent.mkdir(parents=True)
     media.write_bytes(b"GIF89a")
@@ -21,6 +24,7 @@ def test_fs_skips_dependencies_and_supports_precise_replace(tmp_path) -> None:
     archive.write_bytes(b"zip")
 
     assert fs.list() == ["src/app.py"]
+    assert fs.search("ignored_cache_symbol") == []
     assert fs.replace("src/app.py", "'old'", "'new'") == "src/app.py"
     assert fs.read("src/app.py") == "name = 'new'\n"
 
@@ -120,6 +124,9 @@ def test_shell_drops_virtualenv_outside_selected_project(tmp_path, monkeypatch) 
 
     assert result["ok"] is True
     assert "VIRTUAL_ENV" not in captured["env"]
+    assert "coding-agent-cache" in captured["env"]["UV_CACHE_DIR"]
+    assert "coding-agent-cache" in captured["env"]["NPM_CONFIG_CACHE"]
+    assert str(tmp_path / "user-project") not in captured["env"]["UV_CACHE_DIR"]
 
 
 def test_git_does_not_walk_into_parent_repository(tmp_path) -> None:

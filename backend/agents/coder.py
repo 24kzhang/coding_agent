@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
@@ -26,6 +28,33 @@ SNAPSHOT_BUDGET = 48_000
 # CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 12000 字符，
 # 6000 token 足以容纳该动作和协议标签，同时可阻止模型失控生成超长完整文件。
 CODER_OUTPUT_TOKENS = 6_000
+# CODER_MAX_STEPS 给复杂的从零项目保留实现、验证和收尾空间。模型接口偶发重试时，
+# 不能让协议失败过早吃光真正可用于写代码的步骤。
+CODER_MAX_STEPS = 26
+# 429/5xx 与连接超时属于模型服务的瞬时故障，不应和无效 ReAct 协议共用“三次即终止”
+# 的预算。一次请求在 LlmClient 内已有短重试，这里再用较长退避跨过网关抖动窗口。
+CODER_MAX_TRANSIENT_FAILURES = 6
+CODER_TRANSIENT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 12.0)
+
+
+def _is_transient_llm_error(error_text: str) -> bool:
+    """判断错误是否可能在短暂退避后自行恢复。"""
+
+    lowered = error_text.lower()
+    markers = (
+        "模型接口错误 429",
+        "模型接口错误 500",
+        "模型接口错误 502",
+        "模型接口错误 503",
+        "模型接口错误 504",
+        "模型响应超时",
+        "模型流式响应超过总时长",
+        "调用失败",
+        "connecterror",
+        "connecttimeout",
+        "connection",
+    )
+    return any(marker.lower() in lowered for marker in markers)
 
 
 def _middle_trim(text: str, limit: int) -> str:
@@ -39,23 +68,40 @@ def _middle_trim(text: str, limit: int) -> str:
     return text[:head_len] + "\n... 中间内容已省略 ...\n" + text[-tail_len:]
 
 
-def _test_brief(tests: list[dict]) -> str:
+def _test_brief(
+    tests: list[dict],
+    addressed_paths: set[str] | None = None,
+    passed_commands: set[str] | None = None,
+) -> str:
     """把测试结果压缩成可执行的问题清单，不重复发送完整 traceback。"""
 
+    addressed = addressed_paths or set()
+    passed = passed_commands or set()
     lines: list[str] = []
     for item in tests:
         if item.get("ok"):
             continue
         # cmd 标明问题来自编译、测试、语义审查还是 Coding 状态。
         cmd = str(item.get("cmd") or "检查")
+        # 同一命令已经在修复后成功执行时，Verifier 的旧失败结果不再是当前事实。
+        if cmd in passed:
+            continue
         issues = item.get("issues")
         if isinstance(issues, list) and issues:
             for issue in issues[:12]:
-                lines.append(f"- [{cmd}] {_middle_trim(str(issue), 700)}")
+                issue_text = str(issue)
+                # 文件已在本轮成功修改后，旧审查文本只能视为“等待重新验证”，不能继续作为
+                # 当前事实反复驱动同一修复。若修改不完整，下一轮 Verifier 会基于新磁盘状态
+                # 再次给出问题；这比让 Coder 永久追逐过期描述更可靠。
+                if addressed and any(path in issue_text for path in addressed):
+                    continue
+                lines.append(f"- [{cmd}] {_middle_trim(issue_text, 700)}")
             continue
         # 普通命令失败只保留首尾，冗长调用栈不会反复污染每一步上下文。
         output = str(item.get("out") or item.get("err") or "失败但没有输出")
         lines.append(f"- [{cmd}] {_middle_trim(output, 1_400)}")
+    if not lines and (addressed or passed):
+        return ""
     return _middle_trim("\n".join(lines) or "- 暂无失败项", 8_000)
 
 
@@ -131,6 +177,23 @@ def _is_discovery_command(command: str) -> bool:
     # 仓库读取智能体已经提供稳定清单，Coding 不应再用这些命令绕过 list_files 限制。
     program = argv[0].rsplit("/", 1)[-1].lower()
     return program in {"find", "ls", "pwd", "tree"}
+
+
+def _is_dependency_mutation_command(command: str) -> bool:
+    """识别会改变依赖或锁文件、因此需要允许重跑旧验证命令的命令。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    program = Path(argv[0]).name.lower()
+    if program == "npm":
+        return "install" in argv[1:] or "ci" in argv[1:]
+    if program == "uv":
+        return any(action in argv[1:] for action in {"add", "remove", "sync", "lock"})
+    return False
 
 
 def _observation_brief(action: dict, observation: dict) -> str:
@@ -214,6 +277,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     commands = list(state.get("commands", []))
     # failed_tests 是每一步都保留的稳定修复清单，不会被后续工具观察挤出上下文。
     failed_tests = ""
+    # addressed_failure_paths 记录本轮已经成功修改的失败相关文件。对应旧反馈在本轮中
+    # 暂停展示，交给下一次 Verifier 重新判断，避免模型继续按照过期文本重复修改。
+    addressed_failure_paths: set[str] = set()
+    # passed_failure_commands 记录修复后已经成功的旧失败命令，避免原错误日志继续误导模型。
+    passed_failure_commands: set[str] = set()
     if state.get("tests") and not state.get("tests_ok", True):
         # 如果上一轮验证失败，把测试结果作为观察反馈给模型修复。
         failed_tests = _test_brief(state["tests"])
@@ -253,10 +321,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     coding_summary = ""
     # parse_failures 统计连续结构化输出失败次数，偶发格式错误不会立刻终止任务。
     parse_failures = 0
+    # transient_failures 单独统计模型网关、限流和连接故障，避免服务抖动被误判为协议失败。
+    transient_failures = 0
     # empty_steps 统计模型返回合法结构但没有动作和完成标记的次数，用于触发 LongCat 普通文本降级。
     empty_steps = 0
-    # 单轮 Coding 最多执行 16 次模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
-    max_steps = 16
+    # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
+    max_steps = CODER_MAX_STEPS
     for step in range(1, max_steps + 1):
         # recent_observations 只保留最近 6 条精简事件；文件内容由 file_observations 单独管理。
         recent_observations = [_middle_trim(item, 1_200) for item in observations[-6:]]
@@ -324,10 +394,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     data = client.chat_json(messages)
             graph._add_tokens(state, client.last_usage.total)
         except LlmError as exc:
-            parse_failures += 1
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = graph._trim(str(exc), 240)
             protocol = "LongCat 原生工具标签" if "longcat" in model_name else "约定 JSON"
+            transient_error = _is_transient_llm_error(error_text)
+            if transient_error:
+                transient_failures += 1
+                parse_failures = 0
+            else:
+                parse_failures += 1
+                transient_failures = 0
             if "响应超时" in error_text or "超过总时长" in error_text:
                 # 超时通常来自一次生成过多完整文件内容。下一轮明确缩小动作，而不是原样重放。
                 prune_snapshots_after_timeout()
@@ -335,8 +411,30 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     f"第 {step} 轮模型响应超时：{error_text}。下一轮只返回一个小动作，"
                     f"短改动使用 replace_file，长函数使用 replace_block，并严格使用{protocol}。"
                 )
+            elif transient_error:
+                observations.append(
+                    f"第 {step} 轮模型服务暂时不可用：{error_text}。退避后重试相同任务。"
+                )
             else:
                 observations.append(f"第 {step} 轮输出格式无效：{error_text}。请严格使用{protocol}。")
+            if transient_error:
+                retry_delay = CODER_TRANSIENT_RETRY_DELAYS[
+                    min(transient_failures - 1, len(CODER_TRANSIENT_RETRY_DELAYS) - 1)
+                ]
+                graph._emit(
+                    state,
+                    "coder",
+                    "error",
+                    f"模型服务暂时不可用，{retry_delay:g} 秒后重试"
+                    f"（{transient_failures}/{CODER_MAX_TRANSIENT_FAILURES}）：{error_text}",
+                )
+                if transient_failures >= CODER_MAX_TRANSIENT_FAILURES:
+                    coding_summary = (
+                        f"Coding 模型服务连续 {CODER_MAX_TRANSIENT_FAILURES} 次不可用。"
+                    )
+                    break
+                time.sleep(retry_delay)
+                continue
             graph._emit(
                 state,
                 "coder",
@@ -348,6 +446,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 break
             continue
         parse_failures = 0
+        transient_failures = 0
         # thought 是模型本轮判断，会进入事件流方便用户观察。
         thought = data.get("thought", "")
         if thought:
@@ -385,6 +484,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # mutated_paths 收集本批已经改动的文件。一个批次内的多个精确替换共享批次起始快照；
         # 批次结束后由编排器直接刷新磁盘快照，避免再消耗一次模型调用请求 read_file。
         mutated_paths: set[str] = set()
+        # dependency_mutated 表示安装、添加或同步依赖改变了运行环境，旧测试命令应允许重跑。
+        dependency_mutated = False
         for action in actions:
             # signature 用稳定 JSON 表示本次动作，相同参数和内容的动作不会重复执行。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
@@ -444,6 +545,24 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 observations.append(f"已读取当前文件：{path}")
             else:
                 observations.append(_observation_brief(action, observation))
+                if (
+                    not observation.get("ok")
+                    and tool in {"append_file", "replace_block", "replace_file", "write_file"}
+                    and path
+                    and fs.safe(path).exists()
+                ):
+                    try:
+                        # 定位失败后立即把真实磁盘内容提升为最近观察。部分模型会忽略较早的
+                        # 文件快照并继续猜旧文本，这条短观察能让下一步直接使用现有锚点。
+                        refreshed = fs.read(path, FILE_CONTEXT_LIMIT)
+                        file_observations[path] = refreshed
+                        read_paths.add(path)
+                        observations.append(
+                            f"{path} 修改定位失败，已重新加载当前磁盘内容；"
+                            "下一步必须基于下方当前快照中的真实文本修改，禁止继续猜测不存在的导入或锚点。"
+                        )
+                    except (OSError, ValueError):
+                        pass
             action_failed = action_failed or not bool(observation.get("ok"))
             if observation.get("ok"):
                 detail = path or str(action.get("cmd") or "")
@@ -455,6 +574,14 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 elif tool == "run_command":
                     # 一次成功验证后允许根据新的客观结果继续整体修复。
                     unchecked_rewrites.clear()
+                    command = str(action.get("cmd") or "")
+                    dependency_mutated = dependency_mutated or _is_dependency_mutation_command(command)
+                    passed_failure_commands.add(command)
+                    failed_tests = _test_brief(
+                        state.get("tests", []),
+                        addressed_failure_paths,
+                        passed_failure_commands,
+                    )
                 if tool == "read_file" and path:
                     read_paths.add(path)
                 elif tool in {"append_file", "replace_block", "replace_file", "write_file"} and path:
@@ -482,7 +609,19 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 read_paths.discard(mutated_path)
                 file_observations.pop(mutated_path, None)
         if mutated_paths:
-            # 文件状态变化后，之前运行过的同一测试已经不再是重复动作，必须允许重新验证修复结果。
+            addressed_failure_paths.update(mutated_paths)
+            failed_tests = _test_brief(
+                state.get("tests", []),
+                addressed_failure_paths,
+                passed_failure_commands,
+            )
+            observations.append(
+                "以下文件已成功修改，其旧验证描述已转为等待 Verifier 复验，不再作为本轮当前事实："
+                + "、".join(sorted(mutated_paths))
+                + "。请只处理仍显示的失败项；若清单为空，完成必要测试后立即结束本轮。"
+            )
+        if mutated_paths or dependency_mutated:
+            # 文件或依赖状态变化后，之前运行过的同一测试已经不再是重复动作，必须允许复验。
             seen_actions = {item for item in seen_actions if '"tool": "run_command"' not in item}
         # 同一批中只要已有真实写入或验证命令成功，就属于有效推进；
         # 另一个并行动作失败会反馈给下一轮修复，但不能把已落盘进展误算为空转。
