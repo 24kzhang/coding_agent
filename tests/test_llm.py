@@ -1,9 +1,56 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from api.schema import ModelConfig
 from llm.client import LlmClient, LlmError
+from llm.store import ModelStore
+
+
+def test_model_store_fallbacks_skip_disabled_and_prefer_structured_models(tmp_path) -> None:
+    """故障转移只能选择启用模型，且 JSON 智能体应把 LongCat 放到标准模型之后。"""
+
+    path = tmp_path / "models.json"
+    path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "longcat",
+                        "name": "LongCat",
+                        "base_url": "https://example.com",
+                        "api_key": "k",
+                        "model": "LongCat-2.0",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "qwen",
+                        "name": "Qwen",
+                        "base_url": "https://example.com",
+                        "api_key": "k",
+                        "model": "qwen",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "disabled",
+                        "name": "Disabled",
+                        "base_url": "https://example.com",
+                        "api_key": "k",
+                        "model": "disabled",
+                        "enabled": False,
+                    },
+                ],
+                "agent_models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fallbacks = ModelStore(path).fallbacks("missing")
+
+    assert [model.id for model in fallbacks] == ["qwen", "longcat"]
 
 
 def test_llm_url_candidates_for_plain_openai_base() -> None:

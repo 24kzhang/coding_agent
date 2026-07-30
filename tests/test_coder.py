@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from backend.agents.coder import _is_discovery_command, _observation_brief, _test_brief, coder
+from backend.agents.coder import (
+    _is_dependency_mutation_command,
+    _is_discovery_command,
+    _observation_brief,
+    _test_brief,
+    coder,
+)
 from backend.agents.graph import AgentGraph
 from backend.memory import MemoryStore
 from llm import LlmError, ModelStore
@@ -941,6 +947,25 @@ def test_failed_test_brief_keeps_issues_without_full_traceback() -> None:
     assert len(brief) < 3_000
 
 
+def test_failed_test_brief_drops_commands_that_now_pass() -> None:
+    brief = _test_brief(
+        [
+            {"cmd": "npm --prefix web run test", "ok": False, "out": "vitest: command not found"},
+            {"cmd": "需求实现审查", "ok": False, "issues": ["app.py 仍有错误"]},
+        ],
+        passed_commands={"npm --prefix web run test"},
+    )
+
+    assert "vitest: command not found" not in brief
+    assert "app.py 仍有错误" in brief
+
+
+def test_dependency_mutation_commands_are_detected() -> None:
+    assert _is_dependency_mutation_command("npm --prefix web install --include=dev") is True
+    assert _is_dependency_mutation_command("uv add --dev pytest") is True
+    assert _is_dependency_mutation_command("npm --prefix web run test") is False
+
+
 class RepairContextClient:
     """捕获修复轮次提示，确认模型始终看到当前文件和精简失败清单。"""
 
@@ -990,6 +1015,69 @@ def test_coder_repair_prompt_is_compact_and_grounded_in_current_files(tmp_path) 
     assert "BROKEN = True" in client.prompt
     assert "旧快照" not in client.prompt
     assert len(client.prompt) < 35_000
+
+
+class AddressedFailureClient:
+    """模拟修复验证指出的文件后，确认旧问题不会继续污染后续步骤。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_usage = SimpleNamespace(total=0)
+
+    def chat_json(self, messages, temperature=0.1):
+        self.calls += 1
+        prompt = messages[-1]["content"]
+        if self.calls == 1:
+            assert "app.tsx：缺少 getMeta 导入" in prompt
+            return {
+                "thought": "补充导入",
+                "actions": [
+                    {
+                        "tool": "replace_file",
+                        "path": "app.tsx",
+                        "old": 'import App from "./app";',
+                        "new": 'import App, { getMeta } from "./app";',
+                    }
+                ],
+                "done": False,
+            }
+        assert "app.tsx：缺少 getMeta 导入" not in prompt
+        assert "旧验证描述已转为等待 Verifier 复验" in prompt
+        return {"thought": "等待复验", "actions": [], "done": True, "summary": "修复完成"}
+
+
+def test_coder_stops_repeating_addressed_verifier_issue(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.tsx").write_text('import App from "./app";\n', encoding="utf-8")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    client = AddressedFailureClient()
+    graph._client = lambda agent, state: client
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(project),
+            "text": "修复前端",
+            "repo": {"files": ["app.tsx"], "snippets": {}, "stack": ["TypeScript"]},
+            "changes": [],
+            "commands": [],
+            "tests": [
+                {
+                    "cmd": "需求实现审查",
+                    "ok": False,
+                    "issues": ["app.tsx：缺少 getMeta 导入"],
+                }
+            ],
+            "tests_ok": False,
+            "retry": 1,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert client.calls == 2
 
 
 class TooManyActionsClient:
@@ -1127,3 +1215,47 @@ def test_coder_does_not_count_mixed_success_batch_as_idle(tmp_path) -> None:
     assert client.calls == 5
     assert result["coding_ok"] is True
     assert len(result["changes"]) == 4
+
+
+class TransientGatewayClient:
+    """模拟模型网关连续抖动后恢复。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_usage = SimpleNamespace(total=0)
+
+    def chat_json(self, messages, temperature=0.1):
+        self.calls += 1
+        if self.calls <= 4:
+            raise LlmError("模型接口错误 502: upstream temporarily unavailable")
+        return {"thought": "网关恢复", "actions": [], "done": True, "summary": "完成"}
+
+
+def test_coder_waits_for_transient_gateway_recovery(tmp_path, monkeypatch) -> None:
+    """连续三次 502 不应终止 Coding；恢复后应继续原任务。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    client = TransientGatewayClient()
+    delays: list[float] = []
+    graph._client = lambda agent, state: client
+    monkeypatch.setattr("backend.agents.coder.time.sleep", delays.append)
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(tmp_path / "project"),
+            "text": "创建应用",
+            "repo": {"files": [], "snippets": {}, "stack": []},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert client.calls == 5
+    assert delays == [1.0, 2.0, 4.0, 8.0]
+    assert result["coding_ok"] is True

@@ -84,6 +84,15 @@ class ModelStore:
         model_map = self.model_map()
         return self.get(getattr(model_map, agent, None))
 
+    def fallbacks(self, current_id: str, excluded: set[str] | None = None) -> list[ModelConfig]:
+        """返回当前模型失败后可用的启用模型，结构化任务把 LongCat 放到最后。"""
+
+        blocked = set(excluded or set())
+        blocked.add(current_id)
+        candidates = [model for model in self.all() if model.enabled and model.id not in blocked]
+        # LongCat 更适合原生工具协议；Planner/分类等 JSON 任务优先使用标准结构化输出模型。
+        return sorted(candidates, key=lambda model: "longcat" in model.model.lower())
+
     def upsert(self, cfg: ModelConfig) -> ModelConfig:
         """新增或更新一个模型配置。"""
 

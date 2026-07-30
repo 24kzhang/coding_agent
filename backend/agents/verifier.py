@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from backend.agents.prompts import VERIFIER_PROMPT
@@ -31,6 +33,48 @@ def _reject_critical_warnings(result: dict[str, Any]) -> dict[str, Any]:
         "ok": False,
         "issues": [f"检测到严重运行时警告：{marker}" for marker in matched],
     }
+
+
+def _typescript_project_checks(fs: FsTool, files: list[str]) -> list[dict[str, Any]]:
+    """确保 TypeScript 前端具备真实类型检查，而不是只依赖 Vite 转译。"""
+
+    checks: list[dict[str, Any]] = []
+    for manifest in sorted(rel for rel in files if Path(rel).name == "package.json"):
+        project_dir = Path(manifest).parent
+        ts_files = [
+            rel
+            for rel in files
+            if rel.endswith((".ts", ".tsx"))
+            and (project_dir == Path(".") or project_dir in Path(rel).parents)
+        ]
+        if not ts_files:
+            continue
+        configs = [
+            rel
+            for rel in files
+            if Path(rel).name.startswith("tsconfig")
+            and Path(rel).suffix == ".json"
+            and (project_dir == Path(".") or project_dir in Path(rel).parents)
+        ]
+        try:
+            package = json.loads(fs.read(manifest, 80_000))
+            scripts = package.get("scripts") if isinstance(package, dict) else {}
+        except (json.JSONDecodeError, OSError, ValueError):
+            scripts = {}
+        issues: list[str] = []
+        if not configs:
+            issues.append(f"{project_dir.as_posix()}：存在 TypeScript 源码，但缺少 tsconfig.json")
+        if not isinstance(scripts, dict) or "typecheck" not in scripts:
+            issues.append(f"{manifest}：缺少可执行的 typecheck 脚本")
+        checks.append(
+            {
+                "cmd": f"TypeScript 项目配置（{project_dir.as_posix()}）",
+                "ok": not issues,
+                "out": "通过" if not issues else "；".join(issues),
+                "issues": issues,
+            }
+        )
+    return checks
 
 
 def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
@@ -65,10 +109,22 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
         tests.append(static_check)
         ok = ok and bool(static_check.get("ok"))
 
-    if not commands and not static_check:
+    type_checks = _typescript_project_checks(fs, files)
+    for check in type_checks:
+        tests.append(check)
+        ok = ok and bool(check.get("ok"))
+        graph._emit(
+            state,
+            "verifier",
+            "test",
+            f"{check['cmd']} -> {'通过' if check.get('ok') else '失败'}",
+            data=check,
+        )
+
+    if not commands and not static_check and not type_checks:
         tests.append({"cmd": "静态检查", "ok": True, "out": "没有识别到可运行测试，已跳过。"})
-    # 最多执行四条项目已有验证命令，避免无限扩展任务时间。
-    for command in commands[:4]:
+    # 最多执行八条项目已有验证命令，覆盖常见的嵌套前后端测试与构建。
+    for command in commands[:8]:
         # result 是命令执行结果。
         result = shell.run(command, timeout=240)
         result = _reject_critical_warnings(result)

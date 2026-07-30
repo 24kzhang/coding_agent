@@ -181,11 +181,10 @@ def pick_dir() -> dict[str, str]:
     """拉起本机系统目录选择器，返回可供后端访问的绝对路径。"""
     # selected 是系统原生目录选择器返回的路径。
     selected = _pick_dir_by_system_dialog()
-    # 系统选择器不可用时，尝试 tkinter 兜底。
     if not selected:
-        selected = _pick_dir_by_tkinter()
-    if not selected:
-        raise HTTPException(status_code=400, detail="未选择项目目录")
+        # FastAPI 的同步路由运行在线程池中，不能在这里创建 tkinter 窗口。
+        # macOS 会因此抛出 “NSWindow should only be instantiated on the main thread” 并终止进程。
+        raise HTTPException(status_code=400, detail="未选择项目目录或系统目录选择器不可用")
     return {"workdir": str(Path(selected).expanduser().resolve())}
 
 
@@ -223,27 +222,6 @@ def _pick_dir_by_system_dialog() -> str:
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def _pick_dir_by_tkinter() -> str:
-    """使用 tkinter 目录选择器作为跨平台兜底方案。"""
-
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"当前环境无法打开系统目录选择器：{exc}") from exc
-
-    # root 是 tkinter 临时根窗口，隐藏后只显示目录选择弹窗。
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        # selected 是用户选择的目录路径，取消时为空字符串。
-        selected = filedialog.askdirectory(title="选择项目目录")
-    finally:
-        root.destroy()
-    return selected
 
 
 @app.get("/api/history")

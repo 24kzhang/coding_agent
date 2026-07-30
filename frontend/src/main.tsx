@@ -49,6 +49,14 @@ type ChatMessage = HistoryMessage;
 // McpAuthPrompt 为设备授权弹窗补充当前服务 id，便于隔离并发或已取消的轮询。
 type McpAuthPrompt = McpAuthStatus & { id: string };
 
+// ModelTestState 保存模型配置弹窗内的连通性反馈，避免结果只能在主页面状态栏观察。
+type ModelTestState = {
+  // status 区分尚未测试、请求中、测试成功和测试失败四种界面状态。
+  status: "idle" | "testing" | "success" | "error";
+  // message 是弹窗内展示的简短结果，错误信息也会保留在主页面右上角。
+  message: string;
+};
+
 // API 是后端地址，启动脚本会通过 VITE_API_URL 注入动态端口。
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8710";
 // agents 是左侧“智能体模型”和右侧状态条共享的智能体展示列表。
@@ -99,6 +107,8 @@ function App() {
   const [modelModalOpen, setModelModalOpen] = useState(false);
   // editingModelId 非空表示正在编辑已有模型，此时唯一 id 不允许改名。
   const [editingModelId, setEditingModelId] = useState("");
+  // modelTestState 是模型配置弹窗内独立的连通性结果，不替代主页面 notice。
+  const [modelTestState, setModelTestState] = useState<ModelTestState>({ status: "idle", message: "" });
   // historyModalOpen 控制历史会话弹窗是否显示。
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   // historyProjects 保存历史弹窗中的项目和会话树。
@@ -281,15 +291,27 @@ function App() {
     }
   }
 
-  async function testModel(id: string) {
+  async function testModel(id: string, showInModal = false) {
     // id 是要测试连通性的模型 id。
+    // showInModal 为 true 时同步更新弹窗反馈，左侧快捷测试仍只更新主页面状态。
+    if (showInModal) {
+      setModelTestState({ status: "testing", message: "正在连接模型接口..." });
+    }
     setNotice("正在测试模型连通性");
     try {
       // data 包含模型回复和 token，仅把简短结果放入状态条。
       const data = await requestJson<{ ok: boolean; reply: string }>(`${API}/api/models/${encodeURIComponent(id)}/test`, { method: "POST" });
-      setNotice(data.ok ? `连通成功：${data.reply}` : "模型返回异常");
+      const message = data.ok ? `连通成功：${data.reply}` : "模型返回异常";
+      setNotice(message);
+      if (showInModal) {
+        setModelTestState({ status: data.ok ? "success" : "error", message });
+      }
     } catch (error) {
-      setNotice(errorMessage(error));
+      const message = errorMessage(error);
+      setNotice(message);
+      if (showInModal) {
+        setModelTestState({ status: "error", message });
+      }
     }
   }
 
@@ -599,22 +621,23 @@ function App() {
             {models.map((model) => (
               <div className="line" key={model.id}>
                 <button
-                  className="ghost text-left"
+                  className="ghost text-left model-name-button"
                   onClick={() => {
                     setDraft(model);
                     setEditingModelId(model.id);
+                    setModelTestState({ status: "idle", message: "" });
                     setModelModalOpen(true);
                   }}
                   title="编辑模型"
                 >
-                  <Cpu size={16} />
+                  <Cpu size={14} />
                   <span>{model.name}</span>
                 </button>
-                <button className="icon" onClick={() => testModel(model.id)} title="测试连通性" disabled={running}>
-                  <RadioTower size={16} />
+                <button className="icon model-action-button" onClick={() => testModel(model.id)} title="测试连通性" disabled={running}>
+                  <RadioTower size={14} />
                 </button>
-                <button className="icon danger" onClick={() => deleteModel(model.id)} title="删除模型" disabled={running}>
-                  <Trash2 size={16} />
+                <button className="icon danger model-action-button" onClick={() => deleteModel(model.id)} title="删除模型" disabled={running}>
+                  <Trash2 size={14} />
                 </button>
               </div>
             ))}
@@ -623,6 +646,7 @@ function App() {
               onClick={() => {
                 setDraft(emptyModel());
                 setEditingModelId("");
+                setModelTestState({ status: "idle", message: "" });
                 setModelModalOpen(true);
               }}
             >
@@ -822,10 +846,28 @@ function App() {
                 <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
                 <span>启用此模型</span>
               </label>
+              {modelTestState.status !== "idle" && (
+                <div
+                  className={`model-test-result ${modelTestState.status}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {modelTestState.status === "testing" && <Loader2 className="spin" size={16} />}
+                  {modelTestState.status === "success" && <Check size={16} />}
+                  {modelTestState.status === "error" && <XCircle size={16} />}
+                  <span>{modelTestState.message}</span>
+                </div>
+              )}
               <div className="modal-actions">
                 {draft.id && (
-                  <button className="secondary" type="button" onClick={() => void testModel(draft.id)}>
-                    <RadioTower size={16} /> 测试连通性
+                  <button
+                    className="secondary"
+                    type="button"
+                    onClick={() => void testModel(draft.id, true)}
+                    disabled={modelTestState.status === "testing"}
+                  >
+                    {modelTestState.status === "testing" ? <Loader2 className="spin" size={16} /> : <RadioTower size={16} />}
+                    测试连通性
                   </button>
                 )}
                 <button className="primary" type="submit">

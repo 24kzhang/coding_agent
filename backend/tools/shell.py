@@ -4,6 +4,8 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +126,12 @@ class ShellTool:
         env.setdefault("PYTHONUTF8", "1")
         # CI 避免部分测试运行器进入交互观察模式。
         env.setdefault("CI", "1")
+        # uv/npm 的用户级缓存可能不在 Agent 沙箱写入范围内。为每个所选项目分配 /tmp 下的
+        # 稳定缓存，既避免权限错误，也不把依赖缓存写入用户项目并污染文件扫描。
+        cache_key = sha256(str(self.root).encode("utf-8")).hexdigest()[:16]
+        cache_root = Path(tempfile.gettempdir()) / "coding-agent-cache" / cache_key
+        env["UV_CACHE_DIR"] = str(cache_root / "uv")
+        env["NPM_CONFIG_CACHE"] = str(cache_root / "npm")
         try:
             # proc 不使用 shell，模型输入不会被二次解释为重定向或命令替换。
             proc = subprocess.run(
