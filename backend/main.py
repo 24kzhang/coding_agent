@@ -345,7 +345,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         """后台线程函数，负责真正运行 AgentGraph。"""
 
         try:
-            # graph 是本次任务的 LangGraph 编排实例，emit 用于实时输出事件。
+            # agent 是本次任务的 LangGraph 编排实例，emit 用于实时输出事件。
             graph = AgentGraph(model_store, memory_store, emit=emit, mcp_client=mcp_client)
             # result 是任务最终结果，会以 type=result 写入队列。
             result = graph.run(

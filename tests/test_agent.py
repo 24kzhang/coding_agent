@@ -179,6 +179,63 @@ def test_planner_switches_repair_model_when_quality_stagnates(tmp_path, monkeypa
     assert any(event.kind == "model" and "repair" in event.msg for event in events)
 
 
+def test_planner_auto_answers_questions_for_sufficient_data_site_task(tmp_path, monkeypatch) -> None:
+    """信息足够的数据集建站任务若模型返回澄清题，应同轮采用推荐项继续出计划。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+
+    class Usage:
+        total = 6
+
+    class QuestionThenPlanClient:
+        last_usage = Usage()
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "status": "questions",
+                    "questions": [
+                        {
+                            "question": "前端方案？",
+                            "options": ["原生 HTML", "React"],
+                            "recommended": "原生 HTML",
+                            "reason": "足够简单",
+                            "allow_custom": True,
+                        }
+                    ],
+                }
+            return {
+                "status": "plan",
+                "markdown": (
+                    "# 可执行计划\n\n"
+                    "配置文件包含 `api_key`、`base_url`、`model_name`。\n"
+                    "实现 `/api/exercises` 数据接口并用 pytest 测试。"
+                ),
+            }
+
+    client = QuestionThenPlanClient()
+    monkeypatch.setattr(graph, "_client", lambda *_args: client)
+    monkeypatch.setattr(graph, "_ctx_text", lambda _state: "基于数据集开发网站")
+    result = planner(
+        graph,
+        {
+            "session_id": "plan-auto-answers",
+            "workdir": str(tmp_path / "project"),
+            "text": "基于数据集开发网站，apikey、base_url、model_name 已提供，执行计划必须一次性生成。",
+            "tokens": 0,
+            "repo": {},
+        },
+    )
+
+    assert client.calls == 2
+    assert result["plan"]["status"] == "plan"
+    assert result["plan"]["markdown"].startswith("# 可执行计划")
+
+
 def test_planner_cross_reviews_after_two_improving_repairs(tmp_path, monkeypatch) -> None:
     """同一模型连续修订两次后即使持续改善，也应把最后检查交给备用模型。"""
 
@@ -285,7 +342,7 @@ def test_plan_quality_review_detects_broken_full_stack_contracts(tmp_path) -> No
         "text": (
             "基于数据集开发网站，第一次提问添加动作上下文，之后传历史对话；"
             "展示所有详细信息；api_key、base_url、model_name 写入 JSON；"
-            "只用 videos，不用 images。"
+            "只用 videos，不用 images-exercises。"
         ),
         "skills": [],
     }
@@ -294,7 +351,7 @@ def test_plan_quality_review_detects_broken_full_stack_contracts(tmp_path) -> No
 使用 React + TypeScript。配置只有 `api_key`、`base_url` 和 `model`。
 前端读取 JSON，打开弹窗时初始化 System Prompt，后续请求排除 system，并渲染 system。
 currentMessages.push({ role: 'user', content: question });
-媒体不使用 images，只使用 videos。
+媒体不使用 images-exercises，只使用 videos。
 """
 
     issues = _plan_quality_issues(graph, state, markdown)
@@ -315,14 +372,14 @@ currentMessages.push({ role: 'user', content: question });
 
 
 def test_plan_quality_accepts_explicit_video_only_contract(tmp_path) -> None:
-    """`/videos/*.gif` 与禁止 `/images/*` 的明确合同不应被审查器误报。"""
+    """`/videos/*.gif` 与禁止 `/images-exercises/*` 的明确合同不应被审查器误报。"""
 
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
     state = {
-        "text": "网页展示只用 videos 文件夹的 gif，不要用 images 文件夹的静图。",
+        "text": "网页展示只用 videos 文件夹的 gif，不要用 images-exercises 文件夹的静图。",
         "skills": [],
     }
-    markdown = "所有页面媒体请求只能指向 `/videos/*.gif`，明确禁止引用 `/images/*`。"
+    markdown = "所有页面媒体请求只能指向 `/videos/*.gif`，明确禁止引用 `/images-exercises/*`。"
 
     issues = _plan_quality_issues(graph, state, markdown)
 
@@ -370,6 +427,78 @@ def test_plan_quality_accepts_complete_detail_api_claim(tmp_path) -> None:
     assert not any("详情 API 合同遗漏" in item for item in issues)
 
 
+def test_plan_quality_accepts_generic_complete_detail_api_claim(tmp_path) -> None:
+    """详情 API 写明完整对象/记录即可，不强迫使用固定措辞或重复字段表。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "text": "详情展示所有详细信息",
+        "skills": [],
+        "repo": {
+            "snippets": {
+                "data/exercise.schema.json": json.dumps(
+                    {
+                        "$defs": {
+                            "exercise": {
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "gif_url": {"type": "string"},
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+        },
+    }
+    markdown = """字段说明表中已列出 `id`、`name`、`gif_url`。
+
+### `GET /api/exercises/{id}`
+
+提供该动作的完整对象，用于左侧详情展示。
+"""
+
+    issues = _plan_quality_issues(graph, state, markdown)
+
+    assert not any("详情 API 合同遗漏" in item for item in issues)
+
+
+def test_plan_quality_accepts_complete_left_detail_claim(tmp_path) -> None:
+    """左侧已明确展示全部原始字段时，不要求在同一区段重复列出所有字段名。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "text": "详情左侧需要展示所有详细信息",
+        "skills": [],
+        "repo": {
+            "snippets": {
+                "data/exercise.schema.json": json.dumps(
+                    {
+                        "$defs": {
+                            "exercise": {
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "image": {"type": "string"},
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+        },
+    }
+    markdown = """前端弹窗左侧展示全部原始字段，包含媒体路径字段作为文本；右侧为聊天区。
+
+字段说明表中已列出 `id`、`name`、`image`。
+"""
+
+    issues = _plan_quality_issues(graph, state, markdown)
+
+    assert not any("详情左侧的明确字段清单仍有遗漏" in item for item in issues)
+
+
 def test_repo_candidates_exclude_generated_plan_files(tmp_path) -> None:
     """历史 docs/plans 不能被下一次 Planner 当成仓库事实再次注入。"""
 
@@ -405,6 +534,49 @@ def test_chat_contract_normalizer_removes_frontend_system_contradictions() -> No
     assert "追加新 user" not in normalized
     assert "前端不创建 system、不初始化 system、不过滤 system，也不显示 system" in normalized
     assert "页面保持响应式" in normalized
+
+
+def test_plan_quality_accepts_canonical_server_owned_system_contract(tmp_path) -> None:
+    """质量门不应把“前端不初始化 system”的规范合同误报为冲突。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "text": "第一次提问添加动作上下文，之后传历史对话。",
+        "skills": [],
+    }
+    markdown = """# 聊天合同
+
+前端不创建 system、不初始化 system、不过滤 system，也不显示 system；首轮仅发送 `exercise_id`、独立问题字段和空 `messages`；客户端保存服务端返回的完整 messages（包含 system/user/assistant），后续原样回传，界面只渲染 user/assistant。
+服务端根据动作数据构造和验证 system 上下文。
+
+```json
+{"exercise_id":"abc","question":"这个动作怎么练？","messages":[]}
+```
+"""
+
+    issues = _plan_quality_issues(graph, state, markdown)
+
+    assert not any("前端初始化 system" in item for item in issues)
+
+
+def test_plan_quality_rejects_server_stored_chat_history(tmp_path) -> None:
+    """聊天历史应由客户端回传，计划不得要求服务端保存 messages 状态。"""
+
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {
+        "text": "第一次提问添加动作上下文，之后传历史对话。",
+        "skills": [],
+    }
+    markdown = """# 聊天合同
+
+服务端维护 `exercise_contexts` 字典，保存每个动作的完整 messages 历史。
+请求体固定为 {"exercise_id":"1","question":"问题","messages":[]}。
+首轮 messages 为空数组，响应返回完整 messages，客户端保存但不渲染 system。
+"""
+
+    issues = _plan_quality_issues(graph, state, markdown)
+
+    assert any("服务端不得保存 messages" in item for item in issues)
 
 
 def test_direct_greeting_does_not_read_repo_or_write_files(tmp_path) -> None:

@@ -225,7 +225,7 @@ Each record in `data/exercises.json` follows this structure. A machine-readable 
   "secondary_muscles": ["hip flexors", "lower back"],
   "target": "abs",
   "media_id": "2gPfomN",
-  "image": "images/0001-2gPfomN.jpg",
+  "image": "images-exercises/0001-2gPfomN.jpg",
   "gif_url": "videos/0001-2gPfomN.gif",
   "attribution": "© Gym visual — https://gymvisual.com/",
   "created_at": "2026-03-18T12:31:32.854798+00:00"

@@ -90,7 +90,7 @@ def main() -> None:
 
         print(json.dumps(event.model_dump(), ensure_ascii=False), flush=True)
 
-    # graph 是本次 CLI 任务的 LangGraph 编排实例。
+    # agent 是本次 CLI 任务的 LangGraph 编排实例。
     graph = AgentGraph(ModelStore(), memory, emit=emit, mcp_client=McpClient())
     # result 是最终任务结果。
     try:

@@ -759,6 +759,120 @@ def test_coder_recovers_from_longcat_timeout_with_smaller_action(tmp_path) -> No
     assert client.calls == 2
 
 
+class InvalidJsonClient:
+    """模拟一个连续裸输出源码、无法遵守 JSON 协议的模型。"""
+
+    cfg = SimpleNamespace(id="bad", model="bad-json-model")
+    last_usage = SimpleNamespace(total=0)
+
+    def chat_json(self, messages, temperature=0.1, *, plain_text=False, max_tokens=None):
+        raise LlmError("模型没有返回合法 JSON：Expecting value\nbody { color: red; }")
+
+
+class FallbackCoderClient:
+    """备用模型应接收当前任务并继续正常调用工具。"""
+
+    instances: list[FallbackCoderClient] = []
+
+    def __init__(self, cfg) -> None:
+        self.cfg = cfg
+        self.calls = 0
+        self.last_usage = SimpleNamespace(total=0)
+        self.instances.append(self)
+
+    def chat_json(self, messages, temperature=0.1, *, plain_text=False, max_tokens=None):
+        self.calls += 1
+        assert "Coding 模型因" in messages[-1]["content"]
+        return {
+            "thought": "备用模型继续写入",
+            "actions": [{"tool": "write_file", "path": "app.py", "content": "VALUE = 1\n"}],
+            "done": True,
+            "summary": "已切换模型并完成",
+        }
+
+
+def test_coder_switches_model_after_repeated_invalid_json(tmp_path, monkeypatch) -> None:
+    """连续格式错误时应切备用模型，而不是直接结束 Coding。"""
+
+    events = []
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph._client = lambda agent, state: InvalidJsonClient()
+    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
+    monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
+    FallbackCoderClient.instances = []
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(tmp_path / "project"),
+            "text": "创建入口",
+            "repo": {"files": [], "snippets": {}, "stack": ["Python"]},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert FallbackCoderClient.instances
+    assert (tmp_path / "project" / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert any(event.kind == "model" and "fallback" in event.msg for event in events)
+
+
+class RepeatedKnownReadClient:
+    """模拟模型无视当前快照，反复读取同一失败文件。"""
+
+    cfg = SimpleNamespace(id="reader", model="reader-json-model")
+    last_usage = SimpleNamespace(total=0)
+
+    def chat_json(self, messages, temperature=0.1, *, plain_text=False, max_tokens=None):
+        return {
+            "thought": "继续读取已知文件",
+            "actions": [{"tool": "read_file", "path": "app.py"}],
+            "done": False,
+        }
+
+
+def test_coder_switches_model_after_repeated_known_file_reads(tmp_path, monkeypatch) -> None:
+    """修复轮重复读取已有快照时应切备用模型，避免空转到 Verifier。"""
+
+    events = []
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph._client = lambda agent, state: RepeatedKnownReadClient()
+    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
+    monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
+    FallbackCoderClient.instances = []
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(project),
+            "text": "修复 app.py",
+            "repo": {"files": ["app.py"], "snippets": {}, "stack": ["Python"]},
+            "changes": ["app.py"],
+            "commands": [],
+            "tests": [{"cmd": "pytest", "ok": False, "out": "app.py failed"}],
+            "tests_ok": False,
+            "retry": 1,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert FallbackCoderClient.instances
+    assert any(event.kind == "model" and "重复读取已知文件" in event.msg for event in events)
+
+
 class TimeoutSnapshotClient:
     """模拟读取目标和无关文件后超时，确认下一轮只携带任务点名的目标快照。"""
 

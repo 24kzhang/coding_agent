@@ -9,8 +9,8 @@ from llm.client import LlmClient, LlmError
 from llm.store import ModelStore
 
 
-def test_model_store_fallbacks_skip_disabled_and_prefer_structured_models(tmp_path) -> None:
-    """故障转移只能选择启用模型，且 JSON 智能体应把 LongCat 放到标准模型之后。"""
+def test_model_store_fallbacks_skip_disabled_and_keep_config_order(tmp_path) -> None:
+    """故障转移只能选择启用模型，并保留 models.json 中的优先级顺序。"""
 
     path = tmp_path / "models.json"
     path.write_text(
@@ -50,7 +50,7 @@ def test_model_store_fallbacks_skip_disabled_and_prefer_structured_models(tmp_pa
 
     fallbacks = ModelStore(path).fallbacks("missing")
 
-    assert [model.id for model in fallbacks] == ["qwen", "longcat"]
+    assert [model.id for model in fallbacks] == ["longcat", "qwen"]
 
 
 def test_llm_url_candidates_for_plain_openai_base() -> None:

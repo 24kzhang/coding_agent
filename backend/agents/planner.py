@@ -165,6 +165,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         detail_section = markdown[detail_start : detail_start + 2_500]
         dynamic_complete = bool(
             re.search(r"(?:动态遍历|逐项遍历|递归渲染).{0,40}(?:所有|全部|完整).{0,20}字段", detail_section)
+            or re.search(r"左侧.{0,80}(?:所有|全部|完整).{0,20}(?:原始)?字段", detail_section)
         )
         missing_detail_fields = [] if dynamic_complete else [
             field for field in fields if not _mentions_field(detail_section, field)
@@ -184,13 +185,19 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             "全部原始字段",
             "所有原始字段",
             "原始对象完整返回",
+            "完整对象",
+            "完整详情",
+            "完整记录",
             "返回完整动作详情",
             "返回完整动作对象",
             "返回完整记录",
             "包含全部字段",
             "包含所有字段",
         )
-        if not any(phrase in detail_api_section for phrase in complete_api_claims):
+        complete_api_claim = any(phrase in detail_api_section for phrase in complete_api_claims) or bool(
+            re.search(r"(?:返回|包含|提供).{0,30}(?:所有|全部|完整).{0,20}(?:字段|对象|记录|详情)", detail_api_section)
+        )
+        if not complete_api_claim:
             missing_api_fields = [field for field in fields if not _mentions_field(detail_api_section, field)]
             if missing_api_fields:
                 issues.append("动作详情 API 合同遗漏原始字段：" + "、".join(missing_api_fields))
@@ -209,7 +216,10 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             if phrase.lower() not in plan_lower:
                 issues.append(issue)
         if any(
-            "system" in line.lower() and "前端" in line and any(word in line for word in ("初始化", "构造", "创建"))
+            "system" in line.lower()
+            and "前端" in line
+            and any(word in line for word in ("初始化", "构造", "创建"))
+            and not any(word in line for word in ("不初始化", "不构造", "不创建", "禁止初始化", "禁止构造", "禁止创建"))
             for line in markdown.splitlines()
         ):
             issues.append("计划又让前端初始化 system，与服务端可信注入方案冲突")
@@ -249,11 +259,17 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             markdown,
         ):
             issues.append("使用独立 question 字段时，客户端不得先把当前 user 再追加到 messages，避免服务端重复添加")
+        if re.search(
+            r"(?:服务端|后端).{0,20}(?:保存|维护|存储).{0,30}(?:messages|消息|历史|对话)",
+            markdown,
+            re.IGNORECASE,
+        ) or "exercise_contexts" in markdown:
+            issues.append("聊天接口必须无状态：服务端不得保存 messages 历史，应只验证并使用客户端回传的完整 messages")
 
-    if "videos" in goal_lower and "images" in goal_lower:
-        excludes_images = bool(re.search(r"(?:不使用|不引用|禁止(?:使用|引用)?).{0,24}(?:`?/?images)", plan_lower))
+    if "videos" in goal_lower and "images-exercises" in goal_lower:
+        excludes_images = bool(re.search(r"(?:不使用|不引用|禁止(?:使用|引用)?).{0,24}(?:`?/?images-exercises)", plan_lower))
         if "videos" not in plan_lower or not excludes_images:
-            issues.append("未把仅使用 videos GIF、禁止 images 静图写成明确媒体合同")
+            issues.append("未把仅使用 videos GIF、禁止 images-exercises 静图写成明确媒体合同")
 
     selected_skills = {str(item.id).lower() for item in state.get("skills") or []}
     if "web-design-guidelines" in selected_skills:
@@ -269,6 +285,29 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         issues.append("计划内嵌了过多近似成品源码；应保留合同、步骤和短示例，把完整实现交给 Coding 智能体")
 
     return issues
+
+
+def _should_auto_answer_plan_questions(graph: AgentGraph, state: AgentState) -> bool:
+    """信息足够的建站任务不应让 Plan 模式额外追问推荐选项。"""
+
+    goal = graph._plan_goal(state)
+    goal_lower = goal.lower()
+    data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
+    has_model_config = ("apikey" in goal_lower or "api_key" in goal_lower) and "base_url" in goal_lower and "model_name" in goal_lower
+    asks_one_shot = any(phrase in goal for phrase in ("一次性生成", "一次性", "直接生成", "不需要确认"))
+    return bool(data_site and (has_model_config or asks_one_shot))
+
+
+def _recommended_plan_answers(questions: list[dict]) -> str:
+    """把模型澄清题转换成推荐答案摘要，用于同轮继续生成计划。"""
+
+    lines: list[str] = []
+    for index, item in enumerate(questions, 1):
+        question = str(item.get("question") or "").strip()
+        recommended = str(item.get("recommended") or "").strip()
+        if question and recommended:
+            lines.append(f"{index}. {question} -> {recommended}")
+    return "\n".join(lines) or "全部按推荐选项执行。"
 
 
 def planner(graph: AgentGraph, state: AgentState) -> AgentState:
@@ -362,6 +401,31 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     if data.get("status") == "questions":
         # 清洗模型输出的问题，防止 JSON 错误信息或异常长文本展示给用户。
         data = {**data, "questions": graph._normalize_plan_questions(data.get("questions"))}
+        if _should_auto_answer_plan_questions(graph, state):
+            graph._emit(state, "planner", "review", "任务信息已足够，自动采用推荐选项继续生成计划")
+            current_id = str(getattr(getattr(client, "cfg", None), "id", ""))
+            next_cfg = next((cfg for cfg in fallback_configs if cfg.id != current_id), None)
+            if next_cfg is not None:
+                graph._emit(state, "planner", "model", f"Plan 问题由 {current_id} 生成，切换到 {next_cfg.id} 直接产出计划")
+                client = LlmClient(next_cfg)
+            try:
+                data = client.chat_json(
+                    [
+                        {"role": "system", "content": PLANNER_PROMPT},
+                        {
+                            "role": "user",
+                            "content": (
+                                context_text
+                                + "\n\n模型刚才生成了澄清问题，但当前用户需求已经足够执行。"
+                                "请按以下推荐答案直接生成完整可执行计划，不要再返回 questions：\n"
+                                + _recommended_plan_answers(data["questions"])
+                            ),
+                        },
+                    ]
+                )
+                graph._add_tokens(state, client.last_usage.total)
+            except LlmError as exc:
+                graph._emit(state, "planner", "error", f"自动采用推荐选项生成计划失败：{str(exc)[:120]}")
     if data.get("status") == "plan":
         # Plan 初稿必须先通过确定性合同审查；不合格时按上限自动修订，用户只看到最终计划。
         normalized_markdown = _normalize_chat_contract(

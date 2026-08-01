@@ -947,7 +947,7 @@ export async function GET(request: Request) {
   ).then(res => res.arrayBuffer())
 
   const logoData = await fetch(
-    new URL('./images/logo.png', import.meta.url)
+    new URL('./images-exercises/logo.png', import.meta.url)
   ).then(res => res.arrayBuffer())
 
   return new ImageResponse(
@@ -972,7 +972,7 @@ const fontData = fetch(
 ).then(res => res.arrayBuffer())
 
 const logoData = fetch(
-  new URL('./images/logo.png', import.meta.url)
+  new URL('./images-exercises/logo.png', import.meta.url)
 ).then(res => res.arrayBuffer())
 
 export async function GET(request: Request) {
@@ -1003,7 +1003,7 @@ const fontData = readFileSync(
 )
 
 const logoData = readFileSync(
-  join(process.cwd(), 'public/images/logo.png')
+  join(process.cwd(), 'public/images-exercises/logo.png')
 )
 
 export async function GET(request: Request) {

@@ -89,9 +89,9 @@ class ModelStore:
 
         blocked = set(excluded or set())
         blocked.add(current_id)
-        candidates = [model for model in self.all() if model.enabled and model.id not in blocked]
-        # LongCat 更适合原生工具协议；Planner/分类等 JSON 任务优先使用标准结构化输出模型。
-        return sorted(candidates, key=lambda model: "longcat" in model.model.lower())
+        # 保留配置文件顺序作为 fallback 优先级。用户可通过调整 models.json 顺序或 agent_models
+        # 明确指定 LongCat 优先；这里不再为 JSON 任务强行把 LongCat 排到最后。
+        return [model for model in self.all() if model.enabled and model.id not in blocked]
 
     def upsert(self, cfg: ModelConfig) -> ModelConfig:
         """新增或更新一个模型配置。"""

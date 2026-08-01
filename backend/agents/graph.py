@@ -57,7 +57,7 @@ class AgentGraph:
         self.mcp_client = mcp_client or McpClient()
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
-        # graph 是编译后的 LangGraph 状态机。
+        # agent 是编译后的 LangGraph 状态机。
         self.graph = self._build()
 
     def run(
@@ -137,7 +137,7 @@ class AgentGraph:
     def _build(self) -> Any:
         """构建 LangGraph 节点和条件路由。"""
 
-        # graph 是以 AgentState 为状态类型的 LangGraph 状态图。
+        # agent 是以 AgentState 为状态类型的 LangGraph 状态图。
         graph = StateGraph(AgentState)
         # manager 是入口节点，负责分类、构造 Context Package 和决定第一跳。
         graph.add_node("manager", partial(manager, self))

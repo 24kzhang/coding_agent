@@ -227,12 +227,36 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     git = GitTool(state["workdir"])
     # client 是 coder 智能体对应的模型客户端。
     client = graph._client("coder", state)
+    # fallback_configs 用于结构化输出协议连续失败时自动换模型。显式指定模型时尊重用户选择。
+    current_model_id = str(getattr(getattr(client, "cfg", None), "id", ""))
+    fallback_configs = (
+        graph.model_store.fallbacks(current_model_id) if current_model_id and not state.get("model_id") else []
+    )
+    failed_model_ids: set[str] = {current_model_id} if current_model_id else set()
     # mcp_tools 在 Coding 真正开始时按需发现；答疑节点也有独立的 MCP ReAct 入口。
     mcp_tools = graph._ensure_mcp_tools(state)
     # mcp_prompt 是动态工具名、用途和输入 Schema 的模型协议说明。
     mcp_prompt = graph._mcp_prompt(state)
     # model_name 用于选择供应商稳定支持的输出协议，不改变用户配置的模型映射。
     model_name = str(getattr(getattr(client, "cfg", None), "model", "")).lower()
+
+    def switch_coder_model(reason: str) -> bool:
+        """切到下一个备用模型；成功返回 True。"""
+
+        nonlocal client, model_name, parse_failures, empty_steps
+        next_cfg = next((cfg for cfg in fallback_configs if cfg.id not in failed_model_ids), None)
+        if next_cfg is None:
+            return False
+        failed_model_ids.add(next_cfg.id)
+        client = LlmClient(next_cfg)
+        model_name = str(next_cfg.model).lower()
+        parse_failures = 0
+        empty_steps = 0
+        observations.append(
+            f"Coding 模型因{reason}已切换到 {next_cfg.id}；继续基于当前失败清单和磁盘快照推进，禁止重新开始。"
+        )
+        graph._emit(state, "coder", "model", f"Coding 模型因{reason}自动切换到 {next_cfg.id}")
+        return True
     # observations 只保存精简后的工具结果，避免把完整文件和 traceback 每一步重复发送。
     observations: list[str] = []
     # file_observations 保存最近一次读取或写入后自动刷新的当前文件快照。
@@ -325,6 +349,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     transient_failures = 0
     # empty_steps 统计模型返回合法结构但没有动作和完成标记的次数，用于触发 LongCat 普通文本降级。
     empty_steps = 0
+    # duplicate_read_failures 统计模型连续要求读取已在提示快照中的文件，达到阈值后切换模型。
+    duplicate_read_failures = 0
     # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
     max_steps = CODER_MAX_STEPS
     for step in range(1, max_steps + 1):
@@ -441,6 +467,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "error",
                 f"模型输出格式无效，正在重试（{parse_failures}/3）：{error_text}",
             )
+            if parse_failures >= 2 and switch_coder_model("连续输出格式无效"):
+                continue
             if parse_failures >= 3:
                 coding_summary = "Coding 模型连续三次没有返回有效执行指令。"
                 break
@@ -481,6 +509,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         action_failed = False
         # batch_progress 表示本批至少有一个成功且不是纯 Git 状态查询的动作。
         batch_progress = False
+        # switched_this_step 表示本轮因工具策略失败切换了模型，应立即进入下一轮重新规划。
+        switched_this_step = False
         # mutated_paths 收集本批已经改动的文件。一个批次内的多个精确替换共享批次起始快照；
         # 批次结束后由编排器直接刷新磁盘快照，避免再消耗一次模型调用请求 read_file。
         mutated_paths: set[str] = set()
@@ -491,7 +521,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             tool = str(action.get("tool") or "")
             path = str(action.get("path") or "")
-            if signature in seen_actions and tool not in {"git_diff", "git_status"}:
+            if signature in seen_actions and tool == "read_file" and path in read_paths:
+                duplicate_read_failures += 1
+                observation = {
+                    "ok": False,
+                    "text": (
+                        f"拒绝重复读取已知文件：{path}。当前文件快照已经在提示中；"
+                        "下一步必须直接 replace_file、replace_block、write_file 或运行验证命令。"
+                    ),
+                }
+            elif signature in seen_actions and tool not in {"git_diff", "git_status"}:
                 observation = {
                     "ok": False,
                     "text": f"拒绝重复动作：{action.get('tool')} 已执行或拒绝过。下一步必须改用其他动作推进任务。",
@@ -596,6 +635,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if observation.get("cmd"):
                 commands.append(str(observation["cmd"]))
             graph._emit(state, "coder", "tool", observation["text"], data=observation)
+            if (
+                not observation.get("ok")
+                and tool == "read_file"
+                and duplicate_read_failures >= 2
+                and switch_coder_model("重复读取已知文件")
+            ):
+                switched_this_step = True
+                break
+        if switched_this_step:
+            continue
         for mutated_path in mutated_paths:
             try:
                 # 工具成功写入后，以磁盘为唯一事实源重新加载文件。下一轮模型可直接基于这个
@@ -627,6 +676,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # 另一个并行动作失败会反馈给下一轮修复，但不能把已落盘进展误算为空转。
         if batch_progress:
             idle_after_mutation = 0
+            duplicate_read_failures = 0
         elif mutation_count or changes:
             idle_after_mutation += 1
         if data.get("done"):
