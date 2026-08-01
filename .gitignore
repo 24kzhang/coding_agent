@@ -14,11 +14,7 @@ frontend/dist/
 .idea
 .jbeval
 .playwright-cli
-run_test/kefu
-se_tes
-se_test
 /.jbeval/
 /run_test/exercises/exercises-dataset-main.zip
 /memory/config/models.json
 /MCP/auth.json
-/run_test/
