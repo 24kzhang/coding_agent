@@ -10,6 +10,90 @@ from pathlib import Path
 from typing import Any
 
 
+def prepare_command(
+    root: Path,
+    cmd: str,
+    *,
+    resolve_executable: bool,
+    workspace: str | None = None,
+) -> tuple[str, list[str]] | dict[str, Any]:
+    """解析并校验一条命令；失败时直接返回 ShellTool 的结构化错误。"""
+
+    clean = str(cmd).strip()
+    if not clean:
+        return {"ok": False, "code": 2, "out": "", "err": "命令不能为空", "cmd": clean, "argv": []}
+    if len(clean) > 4000:
+        return {"ok": False, "code": 2, "out": "", "err": "命令长度超过限制", "cmd": clean, "argv": []}
+    shell_markers = ["&&", "||", ";", "|", ">", "<", "\n", "\r", "`", "$("]
+    if any(marker in clean for marker in shell_markers):
+        return {
+            "ok": False,
+            "code": 126,
+            "out": "",
+            "err": "不允许复合 shell 语法，请把命令拆成独立工具调用",
+            "cmd": clean,
+            "argv": [],
+        }
+    try:
+        argv = shlex.split(clean, posix=os.name != "nt")
+    except ValueError as exc:
+        return {"ok": False, "code": 2, "out": "", "err": f"命令参数解析失败：{exc}", "cmd": clean, "argv": []}
+    if not argv:
+        return {"ok": False, "code": 2, "out": "", "err": "命令不能为空", "cmd": clean, "argv": []}
+
+    program_name = Path(argv[0]).name.lower()
+    if program_name == "uv" and len(argv) > 1 and argv[1] == "init" and "--no-workspace" not in argv[2:]:
+        argv.insert(2, "--no-workspace")
+    if program_name in ShellTool.dangerous_programs:
+        return {"ok": False, "code": 126, "out": "", "err": f"高风险命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
+    if program_name == "git" and len(argv) > 1 and argv[1].lower() in ShellTool.dangerous_git:
+        return {"ok": False, "code": 126, "out": "", "err": f"高风险 Git 命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
+    if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not (root / ".git").is_dir():
+        return {
+            "ok": False,
+            "code": 126,
+            "out": "",
+            "err": "当前项目没有独立 .git 目录，已阻止 Git 命令访问父级仓库；需要版本管理时先执行 git init",
+            "cmd": clean,
+            "argv": argv,
+        }
+
+    interpreter_names = {"node", "python", "python3", "ruby", "perl"}
+    has_inline_script = program_name in interpreter_names and any(arg in {"-c", "-e"} for arg in argv[1:])
+    if not has_inline_script:
+        has_inline_script = any(
+            Path(argv[index]).name.lower() in interpreter_names and argv[index + 1] in {"-c", "-e"}
+            for index in range(len(argv) - 1)
+        )
+    if has_inline_script:
+        return {"ok": False, "code": 126, "out": "", "err": "不允许执行解释器内联代码，请写入项目脚本后运行", "cmd": clean, "argv": argv}
+
+    container_root = Path(workspace).resolve() if workspace else None
+    for index, arg in enumerate(argv[1:], start=1):
+        if arg.startswith(("http://", "https://")) or arg.startswith("-"):
+            continue
+        if ".." in Path(arg).parts:
+            return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
+        arg_path = Path(arg).expanduser()
+        if not arg_path.is_absolute():
+            continue
+        resolved_arg = arg_path.resolve()
+        if root == resolved_arg or root in resolved_arg.parents:
+            if container_root is not None:
+                argv[index] = str(container_root / resolved_arg.relative_to(root))
+            continue
+        if container_root is not None and (container_root == resolved_arg or container_root in resolved_arg.parents):
+            continue
+        return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
+
+    if resolve_executable:
+        executable = shutil.which(argv[0])
+        if not executable:
+            return {"ok": False, "code": 127, "out": "", "err": f"找不到命令：{argv[0]}", "cmd": clean, "argv": argv}
+        argv[0] = executable
+    return clean, argv
+
+
 class ShellTool:
     """跨平台命令执行工具。
 
@@ -40,80 +124,10 @@ class ShellTool:
     def run(self, cmd: str, timeout: int = 180) -> dict[str, Any]:
         """在项目目录内执行命令，并返回结构化 stdout/stderr/退出码。"""
 
-        # clean 是去除首尾空白后的单条命令；空命令不进入子进程。
-        clean = str(cmd).strip()
-        if not clean:
-            return {"ok": False, "code": 2, "out": "", "err": "命令不能为空", "cmd": clean, "argv": []}
-        if len(clean) > 4000:
-            return {"ok": False, "code": 2, "out": "", "err": "命令长度超过限制", "cmd": clean, "argv": []}
-        # shell_markers 会产生复合命令、重定向或命令替换；ReAct 应拆成多次独立调用。
-        shell_markers = ["&&", "||", ";", "|", ">", "<", "\n", "\r", "`", "$("]
-        if any(marker in clean for marker in shell_markers):
-            return {
-                "ok": False,
-                "code": 126,
-                "out": "",
-                "err": "不允许复合 shell 语法，请把命令拆成独立工具调用",
-                "cmd": clean,
-                "argv": [],
-            }
-        try:
-            # argv 是不经过 shell 解释的参数列表，引号只用于参数分组。
-            argv = shlex.split(clean, posix=os.name != "nt")
-        except ValueError as exc:
-            return {"ok": False, "code": 2, "out": "", "err": f"命令参数解析失败：{exc}", "cmd": clean, "argv": []}
-        if not argv:
-            return {"ok": False, "code": 2, "out": "", "err": "命令不能为空", "cmd": clean, "argv": []}
-        # program_name 去掉绝对路径，只按可执行文件名检查危险程序。
-        program_name = Path(argv[0]).name.lower()
-        # uv init 默认会向上寻找 workspace，并可能修改所选目录之外的父级 pyproject.toml。
-        # Agent 的文件边界必须以用户选择目录为准，因此初始化时强制创建独立项目。
-        if program_name == "uv" and len(argv) > 1 and argv[1] == "init" and "--no-workspace" not in argv[2:]:
-            argv.insert(2, "--no-workspace")
-        if program_name in self.dangerous_programs:
-            return {"ok": False, "code": 126, "out": "", "err": f"高风险命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
-        if program_name == "git" and len(argv) > 1 and argv[1].lower() in self.dangerous_git:
-            return {"ok": False, "code": 126, "out": "", "err": f"高风险 Git 命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
-        if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not (self.root / ".git").is_dir():
-            # Git 默认向父目录查找仓库。用户选择的项目若没有自己的 .git，直接执行 status/diff
-            # 会泄露或误判父仓库内容，因此除 git init 外全部拒绝跨项目继承。
-            return {
-                "ok": False,
-                "code": 126,
-                "out": "",
-                "err": "当前项目没有独立 .git 目录，已阻止 Git 命令访问父级仓库；需要版本管理时先执行 git init",
-                "cmd": clean,
-                "argv": argv,
-            }
-        # 解释器内联代码可以绕过文件和命令工具边界，要求模型改为项目内脚本文件。
-        # interpreter_names 同时用于识别直接调用和 `uv run python -c` 这类嵌套调用。
-        interpreter_names = {"node", "python", "python3", "ruby", "perl"}
-        # has_inline_script 表示参数中出现了“解释器 + -c/-e”组合。
-        has_inline_script = program_name in interpreter_names and any(arg in {"-c", "-e"} for arg in argv[1:])
-        if not has_inline_script:
-            # 遍历相邻参数，防止包管理器或环境工具把内联代码转交给解释器执行。
-            has_inline_script = any(
-                Path(argv[index]).name.lower() in interpreter_names and argv[index + 1] in {"-c", "-e"}
-                for index in range(len(argv) - 1)
-            )
-        if has_inline_script:
-            return {"ok": False, "code": 126, "out": "", "err": "不允许执行解释器内联代码，请写入项目脚本后运行", "cmd": clean, "argv": argv}
-        # 参数中的 ../ 或工作目录外绝对路径可能访问用户未选择的区域。
-        for arg in argv[1:]:
-            if arg.startswith(("http://", "https://")) or arg.startswith("-"):
-                continue
-            if ".." in Path(arg).parts:
-                return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
-            arg_path = Path(arg).expanduser()
-            if arg_path.is_absolute():
-                resolved_arg = arg_path.resolve()
-                if self.root != resolved_arg and self.root not in resolved_arg.parents:
-                    return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
-        # executable 使用系统 PATH 解析，Windows 下可正确找到 npm.cmd 等入口。
-        executable = shutil.which(argv[0])
-        if not executable:
-            return {"ok": False, "code": 127, "out": "", "err": f"找不到命令：{argv[0]}", "cmd": clean, "argv": argv}
-        argv[0] = executable
+        prepared = prepare_command(self.root, cmd, resolve_executable=True)
+        if isinstance(prepared, dict):
+            return prepared
+        clean, argv = prepared
         # env 复制当前环境，保留用户已有 PATH 等配置。
         env = os.environ.copy()
         # Agent 自身虚拟环境不应污染另一个所选项目；仅保留位于当前项目内的 VIRTUAL_ENV。

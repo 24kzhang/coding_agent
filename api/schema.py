@@ -66,6 +66,8 @@ class ChatRequest(BaseModel):
     skills: list[str] = Field(default_factory=list, max_length=20)
     # 本轮任务启用的 MCP 服务 id 列表；后端只连接 MCP/servers.json 中已启用的服务。
     mcps: list[str] = Field(default_factory=list, max_length=20)
+    # 是否让 Coder 和 Verifier 在本轮共享 Docker 容器；API 默认保留旧的原生行为。
+    container_shell: bool = False
 
 
 class SessionCreate(BaseModel):
@@ -101,6 +103,8 @@ class SessionInfo(BaseModel):
     skills: list[str] = Field(default_factory=list)
     # 该会话最近一次任务选择的 MCP 服务，恢复历史会话时同步还原前端选择。
     mcps: list[str] = Field(default_factory=list)
+    # 该会话最近一次任务是否使用容器 Shell；旧会话按前端新默认值开启。
+    container_shell: bool = True
 
 
 class HistoryMessage(BaseModel):
@@ -135,6 +139,8 @@ class HistorySession(BaseModel):
     skills: list[str] = Field(default_factory=list)
     # 会话最近一次任务选择的 MCP 服务。
     mcps: list[str] = Field(default_factory=list)
+    # 会话最近一次任务是否使用容器 Shell。
+    container_shell: bool = True
 
 
 class HistoryProject(BaseModel):

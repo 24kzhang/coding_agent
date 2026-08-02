@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
-from backend.tools import FsTool, GitTool, ShellTool
+from backend.tools import FsTool, GitTool
 from llm import LlmClient, LlmError
 
 if TYPE_CHECKING:
@@ -223,7 +223,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     graph._emit(state, "coder", "start", f"Coding 智能体开始 ReAct 执行，第 {retry + 1} 轮")
     # fs/shell/git 是 Coding 智能体可调用的工具集合。
     fs = FsTool(state["workdir"])
-    shell = ShellTool(state["workdir"])
+    shell = graph._shell(state)
     git = GitTool(state["workdir"])
     # client 是 coder 智能体对应的模型客户端。
     client = graph._client("coder", state)

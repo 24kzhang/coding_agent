@@ -25,7 +25,7 @@ from backend.agents.verifier import verifier
 from backend.capabilities import McpClient, McpServerConfig
 from backend.clock import utc_stamp
 from backend.memory import MemoryStore
-from backend.tools import FsTool, GitTool, ShellTool
+from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
 from llm import LlmClient, ModelStore
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
@@ -57,6 +57,8 @@ class AgentGraph:
         self.mcp_client = mcp_client or McpClient()
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
+        # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
+        self.shell_tool: ShellTool | ContainerShellTool | None = None
         # agent 是编译后的 LangGraph 状态机。
         self.graph = self._build()
 
@@ -71,6 +73,7 @@ class AgentGraph:
         resuming: bool = False,
         skills: list[SkillContext] | None = None,
         mcp_servers: list[dict[str, Any]] | None = None,
+        container_shell: bool = False,
     ) -> TaskResult:
         """运行一次用户任务，并返回最终 TaskResult。"""
 
@@ -97,6 +100,8 @@ class AgentGraph:
             "mcp_tools": [],
             # mcp_errors 保存初始化失败摘要，使模型不会反复尝试不存在的动态工具。
             "mcp_errors": [],
+            # container_shell 只控制 Coder/Verifier 的命令执行器；False 完整保留原生行为。
+            "container_shell": bool(container_shell),
             # started_at 使用单调时钟，只用于计算耗时，不受系统时间调整影响。
             "started_at": time.monotonic(),
             # changes 保存本轮修改过的文件。
@@ -118,8 +123,11 @@ class AgentGraph:
             # tokens 是本轮模型调用累计 token 估算。
             "tokens": 0,
         }
-        # final 是 LangGraph 执行完后返回的最终状态。
-        final = self.graph.invoke(state)
+        # final 是 LangGraph 执行完后返回的最终状态；无论成功失败都清理本轮容器。
+        try:
+            final = self.graph.invoke(state)
+        finally:
+            self._close_shell()
         # result 优先使用 final 节点写入的结构化结果；兜底用于异常情况下仍能返回。
         result = final.get("result") or {
             "ok": bool(final.get("tests_ok", True)),
@@ -133,6 +141,29 @@ class AgentGraph:
             "duration_ms": int((time.monotonic() - final.get("started_at", time.monotonic())) * 1000),
         }
         return TaskResult(**result)
+
+    def _shell(self, state: AgentState) -> ShellTool | ContainerShellTool:
+        """按本轮状态选择并缓存命令执行器。"""
+
+        if self.shell_tool is not None:
+            return self.shell_tool
+        if state.get("container_shell"):
+            tool = ContainerShellTool(state["workdir"])
+            # 在进入 ReAct 前完成基础设施检查，失败时直接结束，不让模型反复尝试宿主命令。
+            tool.ensure_ready()
+            self.shell_tool = tool
+        else:
+            self.shell_tool = ShellTool(state["workdir"])
+        return self.shell_tool
+
+    def _close_shell(self) -> None:
+        """释放本轮 Shell；原生执行器没有额外生命周期。"""
+
+        tool = self.shell_tool
+        self.shell_tool = None
+        close = getattr(tool, "close", None)
+        if callable(close):
+            close()
 
     def _build(self) -> Any:
         """构建 LangGraph 节点和条件路由。"""
@@ -1065,7 +1096,7 @@ class AgentGraph:
         self,
         action: dict[str, Any],
         fs: FsTool,
-        shell: ShellTool,
+        shell: ShellTool | ContainerShellTool,
         git: GitTool,
         state: AgentState | None = None,
     ) -> dict[str, Any]:

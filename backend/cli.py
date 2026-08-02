@@ -79,7 +79,11 @@ def main() -> None:
         "capability",
         "selection",
         f"本轮启用 {len(skills)} 个 Skill、{len(mcp_servers)} 个 MCP",
-        {"skills": [item.id for item in skills], "mcps": [item.id for item in mcp_servers]},
+        {
+            "skills": [item.id for item in skills],
+            "mcps": [item.id for item in mcp_servers],
+            "container_shell": False,
+        },
     )
     # CLI 与 Web 入口记录相同的用户输入和运行边界，使 Plan 上下文、历史恢复与中断判断一致。
     memory.append(workdir, session_id, "user", "input", "message", task_text)

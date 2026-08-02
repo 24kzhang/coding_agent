@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from subprocess import CompletedProcess, TimeoutExpired
 from types import SimpleNamespace
 
 import pytest
 
-from backend.tools import FsTool, GitTool, ShellTool
+from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
+from backend.tools import container as container_module
 
 
 def test_fs_skips_dependencies_and_supports_precise_replace(tmp_path) -> None:
@@ -87,6 +89,143 @@ def test_shell_rejects_compound_and_inline_commands(tmp_path) -> None:
     assert shell.run("python --version && python --version")["code"] == 126
     assert shell.run("python -c pass")["code"] == 126
     assert shell.run("uv run python -c pass")["code"] == 126
+
+
+def test_container_shell_starts_once_executes_and_cleans_up(tmp_path, monkeypatch) -> None:
+    """同一个容器执行器必须复用容器，并带上挂载和最小权限参数。"""
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        args = [str(item) for item in argv]
+        calls.append(args)
+        if args[1:3] == ["version", "--format"]:
+            return CompletedProcess(args, 0, "27.0.0\n", "")
+        if args[1:3] == ["image", "inspect"]:
+            return CompletedProcess(args, 0, "[]", "")
+        if args[1] == "run":
+            return CompletedProcess(args, 0, "container-123\n", "")
+        if args[1] == "exec":
+            return CompletedProcess(args, 0, "Python 3.12.0\n", "")
+        if args[1] == "stop":
+            return CompletedProcess(args, 0, "container-123\n", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(container_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(container_module.subprocess, "run", fake_run)
+    tool = ContainerShellTool(str(tmp_path), image="coding-agent-shell:test")
+
+    first = tool.run("python --version")
+    second = tool.run("node --version")
+    tool.close()
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    run_calls = [args for args in calls if args[1] == "run"]
+    exec_calls = [args for args in calls if args[1] == "exec"]
+    assert len(run_calls) == 1
+    assert len(exec_calls) == 2
+    assert f"{tmp_path.resolve()}:/workspace:rw" in run_calls[0]
+    assert "no-new-privileges:true" in run_calls[0]
+    assert "ALL" in run_calls[0]
+    assert "/var/run/docker.sock" not in " ".join(run_calls[0])
+    assert [args[1] for args in calls].count("stop") == 1
+
+
+def test_container_shell_builds_versioned_default_image_when_missing(tmp_path, monkeypatch) -> None:
+    """默认镜像缺失时按 Dockerfile 哈希构建，之后再启动任务容器。"""
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        args = [str(item) for item in argv]
+        calls.append(args)
+        if args[1:3] == ["version", "--format"]:
+            return CompletedProcess(args, 0, "27.0.0\n", "")
+        if args[1:3] == ["image", "inspect"]:
+            return CompletedProcess(args, 1, "", "No such image")
+        if args[1] == "build":
+            return CompletedProcess(args, 0, "built", "")
+        if args[1] == "run":
+            return CompletedProcess(args, 0, "container-123\n", "")
+        if args[1] == "stop":
+            return CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(container_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(container_module.subprocess, "run", fake_run)
+    tool = ContainerShellTool(str(tmp_path))
+
+    tool.ensure_ready()
+    tool.close()
+
+    build_calls = [args for args in calls if args[1] == "build"]
+    assert len(build_calls) == 1
+    assert tool.image.startswith("coding-agent-shell:")
+    assert build_calls[0][build_calls[0].index("--tag") + 1] == tool.image
+
+
+def test_container_shell_never_falls_back_without_docker(tmp_path, monkeypatch) -> None:
+    """Docker 缺失时返回基础设施失败，且不会执行任何宿主命令。"""
+
+    monkeypatch.setattr(container_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        container_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Docker 缺失时不应启动任何进程"),
+    )
+    result = ContainerShellTool(str(tmp_path), image="coding-agent-shell:test").run("python --version")
+
+    assert result["ok"] is False
+    assert result["code"] == 125
+    assert result["infrastructure"] is True
+    assert "未找到 Docker CLI" in result["err"]
+
+
+def test_container_shell_reuses_policy_and_maps_project_absolute_paths(tmp_path, monkeypatch) -> None:
+    """容器模式复用危险命令策略，并把宿主项目绝对路径映射到 /workspace。"""
+
+    project_file = tmp_path / "src" / "app.py"
+    project_file.parent.mkdir()
+    project_file.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(container_module.shutil, "which", lambda _name: None)
+    tool = ContainerShellTool(str(tmp_path), image="coding-agent-shell:test")
+
+    assert tool.run("rm app.py")["code"] == 126
+    assert tool.run("python -c pass")["code"] == 126
+    prepared = tool.run(f"python {project_file}")
+
+    assert prepared["code"] == 125
+    assert prepared["argv"] == ["python", "/workspace/src/app.py"]
+
+
+def test_container_shell_timeout_stops_container(tmp_path, monkeypatch) -> None:
+    """docker exec 超时后必须停止容器，不能留下后台命令。"""
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        args = [str(item) for item in argv]
+        calls.append(args)
+        if args[1:3] == ["version", "--format"]:
+            return CompletedProcess(args, 0, "27.0.0\n", "")
+        if args[1:3] == ["image", "inspect"]:
+            return CompletedProcess(args, 0, "[]", "")
+        if args[1] == "run":
+            return CompletedProcess(args, 0, "container-123\n", "")
+        if args[1] == "exec":
+            raise TimeoutExpired(args, 1, output="partial")
+        if args[1] == "stop":
+            return CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(container_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(container_module.subprocess, "run", fake_run)
+    result = ContainerShellTool(str(tmp_path), image="coding-agent-shell:test").run("pytest -q", timeout=1)
+
+    assert result["code"] == 124
+    assert "已停止任务容器" in result["err"]
+    assert [args[1] for args in calls].count("stop") == 1
 
 
 def test_shell_forces_uv_init_to_stay_out_of_parent_workspace(tmp_path, monkeypatch) -> None:

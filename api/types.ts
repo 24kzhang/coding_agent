@@ -48,6 +48,8 @@ export interface SessionInfo {
   skills: string[];
   // 会话最近一次任务选择的 MCP 服务。
   mcps: string[];
+  // 会话最近一次任务是否使用容器 Shell。
+  container_shell: boolean;
 }
 
 export interface SessionUpdate {
@@ -85,6 +87,8 @@ export interface HistorySession {
   skills: string[];
   // 会话最近一次任务选择的 MCP 服务。
   mcps: string[];
+  // 会话最近一次任务是否使用容器 Shell。
+  container_shell: boolean;
 }
 
 export interface HistoryProject {
@@ -130,6 +134,8 @@ export interface ChatRequest {
   skills: string[];
   // 本轮手动启用的 MCP 服务 id。
   mcps: string[];
+  // 是否让 Coder 和 Verifier 在本轮共享 Docker 容器。
+  container_shell: boolean;
 }
 
 export interface SkillInfo {

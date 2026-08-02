@@ -145,15 +145,15 @@ class MemoryStore:
             return ""
         return self._session_title(self._read_session_file(path)) or session_id
 
-    def session_capabilities(self, workdir: str, session_id: str) -> dict[str, list[str]]:
-        """读取会话最近一次任务选择的 Skills 和 MCP 服务。"""
+    def session_capabilities(self, workdir: str, session_id: str) -> dict[str, Any]:
+        """读取会话最近一次任务选择的 Skills、MCP 服务和 Shell 模式。"""
 
         # safe_id 保证外部 session_id 不能构造越界路径。
         safe_id = self._safe_session_id(session_id)
         # path 直接定位已有会话，不因读取不存在会话而创建 memory 目录。
         path = self.project_path(workdir) / "sessions" / f"{safe_id}.jsonl"
         if not path.exists():
-            return {"skills": [], "mcps": []}
+            return {"skills": [], "mcps": [], "container_shell": True}
         return self._session_capabilities(self._read_session_file(path))
 
     def append(
@@ -580,7 +580,7 @@ class MemoryStore:
                 break
         return ""
 
-    def _session_capabilities(self, records: list[dict[str, Any]]) -> dict[str, list[str]]:
+    def _session_capabilities(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         """从会话记录倒序提取最近一次能力选择。"""
 
         for rec in reversed(records):
@@ -594,8 +594,9 @@ class MemoryStore:
             return {
                 "skills": list(dict.fromkeys(str(item) for item in skills_raw if str(item))),
                 "mcps": list(dict.fromkeys(str(item) for item in mcps_raw if str(item))),
+                "container_shell": bool(meta.get("container_shell", True)),
             }
-        return {"skills": [], "mcps": []}
+        return {"skills": [], "mcps": [], "container_shell": True}
 
     def _format_result(self, rec: dict[str, Any]) -> str:
         """把 manager/final/result 记录转换成前端历史对话中的 Agent 文本。"""

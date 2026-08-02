@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
-from backend.tools import FsTool, ShellTool
+from backend.tools import FsTool
 from llm import LlmError
 
 if TYPE_CHECKING:
@@ -84,7 +84,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     # fs 用于列出文件并做静态 Web 检查。
     fs = FsTool(state["workdir"])
     # shell 用于执行测试命令。
-    shell = ShellTool(state["workdir"])
+    shell = graph._shell(state)
     # files 是当前项目文件列表。
     files = fs.list()
     # commands 根据项目真实配置生成，不把某个测试框架硬编码为所有项目默认值。

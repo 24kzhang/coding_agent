@@ -674,10 +674,30 @@ def test_memory_restores_latest_capability_selection(tmp_path: Path) -> None:
         "capability",
         "selection",
         "第二次选择",
-        {"skills": ["two"], "mcps": ["docs"]},
+        {"skills": ["two"], "mcps": ["docs"], "container_shell": False},
     )
 
     assert store.session_capabilities(str(project), "s1") == {
         "skills": ["two"],
         "mcps": ["docs"],
+        "container_shell": False,
     }
+
+
+def test_old_session_defaults_to_container_shell(tmp_path: Path) -> None:
+    """旧 selection 没有 Shell 字段时，前端恢复为新版本默认开启。"""
+
+    store = MemoryStore(tmp_path / "memory")
+    project = tmp_path / "project"
+    project.mkdir()
+    store.append(
+        str(project),
+        "legacy",
+        "manager",
+        "capability",
+        "selection",
+        "旧记录",
+        {"skills": [], "mcps": []},
+    )
+
+    assert store.session_capabilities(str(project), "legacy")["container_shell"] is True

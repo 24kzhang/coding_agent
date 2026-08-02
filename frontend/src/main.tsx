@@ -93,6 +93,8 @@ function App() {
   const [task, setTask] = useState("");
   // planMode 表示 Plan 模式复选框是否开启。
   const [planMode, setPlanMode] = useState(false);
+  // containerShell 表示 Coder 与 Verifier 是否在本轮共享 Docker 容器。
+  const [containerShell, setContainerShell] = useState(true);
   // running 表示当前是否正在执行任务，用于禁用发送按钮和显示 loading。
   const [running, setRunning] = useState(false);
   // events 是右侧事件流数据。
@@ -351,6 +353,7 @@ function App() {
       setEvents([]);
       setResult(null);
       setMessages([]);
+      setContainerShell(true);
       setNotice(`会话已创建：${data.title}`);
     } catch (error) {
       setNotice(errorMessage(error));
@@ -370,6 +373,7 @@ function App() {
       setEvents([]);
       setResult(null);
       setMessages([]);
+      setContainerShell(true);
       setNotice(`已选择项目：${data.workdir}`);
     } catch (error) {
       setNotice(`选择目录失败：${errorMessage(error)}`);
@@ -401,6 +405,7 @@ function App() {
     // 能力选择属于会话最近一次任务状态，恢复后下一轮默认延续相同选择。
     setSelectedSkills(session.skills ?? []);
     setSelectedMcps(session.mcps ?? []);
+    setContainerShell(session.container_shell ?? true);
     setResult(null);
     setHistoryModalOpen(false);
     setNotice(`已恢复会话：${session.title || session.id}`);
@@ -527,7 +532,8 @@ function App() {
           plan_mode: planMode,
           execute_plan: false,
           skills: selectedSkills,
-          mcps: selectedMcps
+          mcps: selectedMcps,
+          container_shell: containerShell
         })
       });
       if (!res.ok) {
@@ -792,6 +798,15 @@ function App() {
               {running ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
               发送
             </button>
+            <label className="toggle shell-toggle">
+              <input
+                type="checkbox"
+                checked={containerShell}
+                onChange={(e) => setContainerShell(e.target.checked)}
+                disabled={running}
+              />
+              <span>容器 Shell</span>
+            </label>
             <label className="toggle plan-toggle">
               <input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} disabled={running} />
               <span>Plan 模式</span>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from backend.agents import graph as graph_module
 from backend.agents.doc import doc
 from backend.agents.final import final
 from backend.agents.graph import AgentGraph
@@ -14,8 +15,35 @@ from backend.agents.planner import (
     planner,
 )
 from backend.memory import MemoryStore
-from backend.tools import FsTool
+from backend.tools import FsTool, ShellTool
 from llm import LlmError, ModelStore
+
+
+def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
+    """容器模式共享一个执行器，原生模式仍返回既有 ShellTool。"""
+
+    events: list[str] = []
+
+    class FakeContainer:
+        def __init__(self, workdir):
+            events.append(f"init:{workdir}")
+
+        def ensure_ready(self):
+            events.append("ready")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(graph_module, "ContainerShellTool", FakeContainer)
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    state = {"workdir": str(tmp_path / "project"), "container_shell": True}
+
+    assert graph._shell(state) is graph._shell(state)
+    graph._close_shell()
+
+    assert events == [f"init:{tmp_path / 'project'}", "ready", "close"]
+    native = graph._shell({"workdir": str(tmp_path / "project"), "container_shell": False})
+    assert isinstance(native, ShellTool)
 
 
 def test_planner_retries_transient_gateway_errors(tmp_path, monkeypatch) -> None:

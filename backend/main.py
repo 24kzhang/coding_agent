@@ -173,6 +173,7 @@ def create_session(req: SessionCreate) -> SessionInfo:
         interrupted=False,
         skills=[],
         mcps=[],
+        container_shell=True,
     )
 
 
@@ -321,15 +322,20 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # resuming 必须在写入本轮记录前判断，否则当前用户输入会被误认为上轮中断。
     resuming = memory_store.interrupted(workdir, req.session_id)
-    # 能力选择独立写入 session memory，恢复历史会话时前端会同步还原。
+    # 能力与 Shell 选择独立写入 session memory，恢复历史会话时前端会同步还原。
     memory_store.append(
         workdir,
         req.session_id,
         "manager",
         "capability",
         "selection",
-        f"本轮启用 {len(skill_contexts)} 个 Skill、{len(mcp_configs)} 个 MCP",
-        {"skills": [item.id for item in skill_contexts], "mcps": [item.id for item in mcp_configs]},
+        f"本轮启用 {len(skill_contexts)} 个 Skill、{len(mcp_configs)} 个 MCP，"
+        + ("容器 Shell" if req.container_shell else "原生 Shell"),
+        {
+            "skills": [item.id for item in skill_contexts],
+            "mcps": [item.id for item in mcp_configs],
+            "container_shell": req.container_shell,
+        },
     )
     # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
     memory_store.append(workdir, req.session_id, "user", "input", "message", req.text)
@@ -358,6 +364,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 resuming=resuming,
                 skills=skill_contexts,
                 mcp_servers=[item.model_dump() for item in mcp_configs],
+                container_shell=req.container_shell,
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "done", "本轮任务正常结束")
             event_queue.put({"type": "result", "data": result.model_dump()})
