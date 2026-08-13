@@ -154,6 +154,16 @@ function App() {
 
   // tokenTotal 是右侧运行状态展示的累计 token 估算。
   const tokenTotal = useMemo(() => events.reduce((sum, event) => sum + event.tokens, 0), [events]);
+  // capabilityCount 同时统计用户手动选择和后端常驻能力。
+  const capabilityCount = useMemo(
+    () =>
+      selectedSkills.length
+      + new Set([
+        ...selectedMcps,
+        ...mcps.filter((item) => item.always_on).map((item) => item.id)
+      ]).size,
+    [mcps, selectedMcps, selectedSkills]
+  );
   // activeAgent 是最后一个产生事件的智能体，没有事件时默认 manager。
   const activeAgent = events.at(-1)?.agent ?? "manager";
 
@@ -782,7 +792,7 @@ function App() {
               <GitBranch size={16} /> 新建会话
             </button>
             <button
-              className={selectedSkills.length + selectedMcps.length > 0 ? "ghost capability-button active" : "ghost capability-button"}
+              className={capabilityCount > 0 ? "ghost capability-button active" : "ghost capability-button"}
               type="button"
               disabled={running}
               onClick={() => setCapabilityModalOpen(true)}
@@ -790,8 +800,8 @@ function App() {
             >
               <Puzzle size={16} />
               能力
-              {selectedSkills.length + selectedMcps.length > 0 && (
-                <span>{selectedSkills.length + selectedMcps.length}</span>
+              {capabilityCount > 0 && (
+                <span>{capabilityCount}</span>
               )}
             </button>
             <button className="primary send-button" disabled={running || !task.trim() || !workdir} onClick={() => void runTask()}>
@@ -941,7 +951,15 @@ function App() {
                     <h3>
                       <PlugZap size={16} /> MCP
                     </h3>
-                    <span>{selectedMcps.length}/{mcps.length}</span>
+                    <span>
+                      {
+                        new Set([
+                          ...selectedMcps,
+                          ...mcps.filter((item) => item.always_on).map((item) => item.id)
+                        ]).size
+                      }
+                      /{mcps.length}
+                    </span>
                   </div>
                   <div className="capability-list">
                     {mcps.length === 0 && <p className="muted capability-empty">MCP/servers.json 中暂无已启用服务</p>}
@@ -950,11 +968,15 @@ function App() {
                         <label>
                           <input
                             type="checkbox"
-                            checked={selectedMcps.includes(mcp.id)}
+                            checked={mcp.always_on || selectedMcps.includes(mcp.id)}
+                            disabled={mcp.always_on}
                             onChange={() => setSelectedMcps(toggleSelected(selectedMcps, mcp.id))}
                           />
                           <span>
-                            <strong>{mcp.name}</strong>
+                            <strong>
+                              {mcp.name}
+                              {mcp.always_on ? " · 自动启用" : ""}
+                            </strong>
                             <small>{mcp.description}</small>
                           </span>
                         </label>

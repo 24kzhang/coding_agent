@@ -458,6 +458,54 @@ class FakeRepeatingMcpAnswerModel:
         return "已根据首次 MCP 查询结果完成回答。"
 
 
+class FakeSharedNodeModel:
+    """模拟普通智能节点自主搜索一次后恢复自身结构化输出合同。"""
+
+    def __init__(self, *, search: bool = True) -> None:
+        self.last_usage = SimpleNamespace(total=7)
+        self.calls = 0
+        self.search = search
+
+    def chat_json(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+        self.calls += 1
+        if self.search and self.calls == 1:
+            return {
+                "thought": "需要最新外部资料",
+                "actions": [
+                    {
+                        "tool": "mcp__search__lookup",
+                        "arguments": {"query": "LangGraph 最新文档"},
+                    }
+                ],
+            }
+        return {"status": "plan", "title": "计划", "markdown": "根据资料生成计划。"}
+
+
+class FakeSharedTextModel:
+    """模拟文档智能节点先搜索再返回原有纯文本。"""
+
+    def __init__(self) -> None:
+        self.last_usage = SimpleNamespace(total=5)
+        self.calls = 0
+
+    def chat(self, *_args: object, **_kwargs: object) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            return json.dumps(
+                {
+                    "thought": "先确认外部文档",
+                    "actions": [
+                        {
+                            "tool": "mcp__search__lookup",
+                            "arguments": {"query": "项目依赖文档"},
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        return "# 项目说明\n\n已结合必要的外部资料。"
+
+
 def test_graph_only_allows_discovered_mcp_tools(tmp_path: Path) -> None:
     """动态工具必须同时命中本轮服务选择和 tools/list 发现结果。"""
 
@@ -501,6 +549,154 @@ def test_graph_only_allows_discovered_mcp_tools(tmp_path: Path) -> None:
     assert rejected == []
     assert result["ok"] is True
     assert fake.calls == [("docs", "lookup", {"query": "LangGraph"})]
+
+
+def test_shared_intelligent_node_can_optionally_search(tmp_path: Path) -> None:
+    """非 Answer/Coder 智能节点可以自主调用 shared MCP，并恢复节点原有 JSON 合同。"""
+
+    fake_mcp = FakeMcpClient()
+    model = FakeSharedNodeModel(search=True)
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "memory"), mcp_client=fake_mcp)
+    project = tmp_path / "project"
+    project.mkdir()
+    config = McpServerConfig(
+        id="search",
+        name="网络搜索",
+        command=sys.executable,
+        args=["server.py"],
+        shared=True,
+    )
+    state = {
+        "session_id": "s1",
+        "workdir": str(project),
+        "mcp_servers": [config.model_dump()],
+        "mcp_tools": [],
+        "mcp_errors": [],
+        "mcp_discovered_servers": [],
+        "tokens": 0,
+    }
+
+    result = graph._model_json(
+        state,
+        "planner",
+        model,
+        [{"role": "system", "content": "返回计划 JSON。"}],
+    )
+
+    assert result["status"] == "plan"
+    assert model.calls == 2
+    assert fake_mcp.calls == [("search", "lookup", {"query": "LangGraph 最新文档"})]
+
+
+def test_shared_intelligent_node_can_skip_search(tmp_path: Path) -> None:
+    """搜索常驻只代表可选；模型不请求动作时不得额外调用 MCP。"""
+
+    fake_mcp = FakeMcpClient()
+    model = FakeSharedNodeModel(search=False)
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "memory"), mcp_client=fake_mcp)
+    project = tmp_path / "project"
+    project.mkdir()
+    config = McpServerConfig(
+        id="search",
+        name="网络搜索",
+        command=sys.executable,
+        args=["server.py"],
+        shared=True,
+    )
+    state = {
+        "session_id": "s1",
+        "workdir": str(project),
+        "mcp_servers": [config.model_dump()],
+        "mcp_tools": [],
+        "mcp_errors": [],
+        "mcp_discovered_servers": [],
+        "tokens": 0,
+    }
+
+    result = graph._model_json(
+        state,
+        "planner",
+        model,
+        [{"role": "system", "content": "返回计划 JSON。"}],
+    )
+
+    assert result["status"] == "plan"
+    assert model.calls == 1
+    assert fake_mcp.calls == []
+
+
+def test_shared_text_node_can_search_and_return_plain_text(tmp_path: Path) -> None:
+    """Doc 等纯文本智能节点搜索后仍必须返回原有文本合同。"""
+
+    fake_mcp = FakeMcpClient()
+    model = FakeSharedTextModel()
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "memory"), mcp_client=fake_mcp)
+    project = tmp_path / "project"
+    project.mkdir()
+    config = McpServerConfig(
+        id="search",
+        name="网络搜索",
+        command=sys.executable,
+        args=["server.py"],
+        shared=True,
+    )
+    state = {
+        "session_id": "s1",
+        "workdir": str(project),
+        "mcp_servers": [config.model_dump()],
+        "mcp_tools": [],
+        "mcp_errors": [],
+        "mcp_discovered_servers": [],
+        "tokens": 0,
+    }
+
+    result = graph._model_text(
+        state,
+        "doc",
+        model,
+        [{"role": "system", "content": "返回 Markdown。"}],
+    )
+
+    assert result.startswith("# 项目说明")
+    assert model.calls == 2
+    assert fake_mcp.calls == [("search", "lookup", {"query": "项目依赖文档"})]
+
+
+def test_always_on_mcp_is_merged_without_manual_selection(tmp_path: Path) -> None:
+    """常驻搜索服务应自动进入任务，但前端仍只保存用户手动选择。"""
+
+    config_path = tmp_path / "MCP" / "servers.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "id": "search",
+                        "name": "网络搜索",
+                        "transport": "streamable_http",
+                        "url": "https://example.com/mcp",
+                        "always_on": True,
+                        "shared": True,
+                    },
+                    {
+                        "id": "manual",
+                        "name": "手动服务",
+                        "command": "python",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = CapabilityStore(tmp_path / "skills", config_path)
+
+    selected = store.select_mcps([])
+    info = {item.id: item for item in store.list_mcps()}
+
+    assert [item.id for item in selected] == ["search"]
+    assert info["search"].always_on is True
+    assert info["search"].shared is True
 
 
 def test_answer_agent_discovers_and_calls_selected_mcp(

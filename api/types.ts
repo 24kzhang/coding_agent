@@ -162,6 +162,10 @@ export interface McpInfo {
   enabled: boolean;
   // 是否需要并支持通过浏览器完成独立授权。
   auth: boolean;
+  // 是否自动进入每轮任务；模型仍可选择不调用。
+  always_on: boolean;
+  // 是否可供所有调用模型的智能节点使用。
+  shared: boolean;
 }
 
 export interface McpAuthStatus {

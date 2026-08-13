@@ -15,6 +15,18 @@
       "timeout": 60
     },
     {
+      "id": "exa",
+      "name": "网络搜索（常驻）",
+      "description": "Exa 官方只读 MCP，向所有智能节点提供可选的全网搜索和网页正文读取工具。",
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": {},
+      "timeout": 90,
+      "always_on": true,
+      "shared": true
+    },
+    {
       "id": "github",
       "name": "GitHub（只读）",
       "description": "GitHub 官方 MCP，通过浏览器 OAuth 登录；当前仅开放仓库、Issue、PR 和 Actions 等只读工具。",
@@ -30,6 +42,7 @@
       "cwd": "${agent_root}",
       "timeout": 900,
       "persistent": true,
+      "shared": true,
       "auth_tool": "get_me",
       "auth_mode": "github_device",
       "oauth_client_id": "Ov23ctZDe8AJr0QMDiIq",

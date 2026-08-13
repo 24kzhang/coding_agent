@@ -73,6 +73,10 @@ class McpServerConfig(BaseModel):
     timeout: int = Field(default=60, ge=3, le=1800)
     # persistent 保持同一个 MCP 进程和会话，适用于需要连续身份状态的服务。
     persistent: bool = False
+    # always_on 表示服务无需用户每轮勾选就会进入任务，但模型仍可自行决定是否调用工具。
+    always_on: bool = False
+    # shared 表示该服务只包含可供管理者、Plan、验证和文档等智能节点使用的只读工具。
+    shared: bool = False
     # auth_tool 是无副作用的身份检查工具；配置后前端可以显式发起浏览器授权。
     auth_tool: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     # auth_mode 指定授权通道；github_device 可绕过内置浏览器无法访问本机回调的问题。
@@ -275,12 +279,19 @@ class CapabilityStore:
                 transport=config.transport,
                 enabled=config.enabled,
                 auth=bool(config.auth_tool),
+                always_on=config.always_on,
+                shared=config.shared,
             )
             for config in self.list_mcp_configs()
         ]
 
-    def select_mcps(self, selected_ids: list[str]) -> list[McpServerConfig]:
-        """按前端选择顺序返回配置，并拒绝未知或禁用的服务 id。"""
+    def select_mcps(
+        self,
+        selected_ids: list[str],
+        *,
+        include_always_on: bool = True,
+    ) -> list[McpServerConfig]:
+        """返回手动选择和常驻服务，并拒绝未知或禁用的服务 id。"""
 
         # available 仅包含启用服务，因此 disabled 配置同样不能绕过接口被执行。
         available = {item.id: item for item in self.list_mcp_configs()}
@@ -288,6 +299,12 @@ class CapabilityStore:
         unknown = [server_id for server_id in unique_ids if server_id not in available]
         if unknown:
             raise ValueError("未找到或未启用 MCP：" + "、".join(unknown))
+        if include_always_on:
+            unique_ids.extend(
+                server_id
+                for server_id, config in available.items()
+                if config.always_on and server_id not in unique_ids
+            )
         return [available[server_id] for server_id in unique_ids]
 
     def _parse_skill(self, text: str) -> tuple[dict[str, Any], str]:

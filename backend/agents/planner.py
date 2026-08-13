@@ -340,8 +340,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
             # data 应该是模型返回的 JSON，status 为 questions 或 plan。
-            data = client.chat_json(messages)
-            graph._add_tokens(state, client.last_usage.total)
+            data = graph._model_json(state, "planner", client, messages)
             break
         except LlmError as exc:
             last_error = exc
@@ -409,7 +408,10 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 graph._emit(state, "planner", "model", f"Plan 问题由 {current_id} 生成，切换到 {next_cfg.id} 直接产出计划")
                 client = LlmClient(next_cfg)
             try:
-                data = client.chat_json(
+                data = graph._model_json(
+                    state,
+                    "planner",
+                    client,
                     [
                         {"role": "system", "content": PLANNER_PROMPT},
                         {
@@ -423,7 +425,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                         },
                     ]
                 )
-                graph._add_tokens(state, client.last_usage.total)
             except LlmError as exc:
                 graph._emit(state, "planner", "error", f"自动采用推荐选项生成计划失败：{str(exc)[:120]}")
     if data.get("status") == "plan":
@@ -461,8 +462,12 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 },
             ]
             try:
-                repaired = client.chat_json(repair_messages)
-                graph._add_tokens(state, client.last_usage.total)
+                repaired = graph._model_json(
+                    state,
+                    "planner",
+                    client,
+                    repair_messages,
+                )
             except LlmError as exc:
                 next_cfg = next((cfg for cfg in fallback_configs if cfg.id not in repair_models), None)
                 if next_cfg is None:

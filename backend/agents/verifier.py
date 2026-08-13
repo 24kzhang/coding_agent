@@ -159,7 +159,10 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
             budget -= len(content)
         try:
             client = graph._client("verifier", state)
-            review = client.chat_json(
+            review = graph._model_json(
+                state,
+                "verifier",
+                client,
                 [
                     {"role": "system", "content": VERIFIER_PROMPT},
                     {
@@ -176,7 +179,6 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                 temperature=0,
                 plain_text=True,
             )
-            graph._add_tokens(state, client.last_usage.total)
             issues = [str(item).strip() for item in review.get("issues", []) if str(item).strip()][:12]
             review_ok = bool(review.get("ok")) and not issues
             review_result = {

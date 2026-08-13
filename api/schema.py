@@ -234,6 +234,10 @@ class McpInfo(BaseModel):
     enabled: bool = True
     # auth 表示该服务配置了独立授权检查工具，前端据此显示授权按钮。
     auth: bool = False
+    # always_on 表示该服务自动进入每轮任务，模型仍按需决定是否调用。
+    always_on: bool = False
+    # shared 表示服务可安全提供给所有调用模型的智能节点。
+    shared: bool = False
 
 
 class McpAuthStatus(BaseModel):

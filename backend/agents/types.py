@@ -32,6 +32,8 @@ class AgentState(TypedDict, total=False):
     mcp_tools: list[dict[str, Any]]
     # mcp_errors 保存 MCP 服务初始化失败摘要，答疑和 Coding 模型都可据此返回真实状态。
     mcp_errors: list[str]
+    # mcp_discovered_servers 记录本轮已经 tools/list 或连接失败的服务，支持分阶段发现共享与专有 MCP。
+    mcp_discovered_servers: list[str]
     # container_shell 决定 Coder 与 Verifier 使用 Docker 容器还是原生 Shell。
     container_shell: bool
     # started_at 保存单调时钟起点，用于计算本轮执行耗时。

@@ -333,7 +333,8 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         + ("容器 Shell" if req.container_shell else "原生 Shell"),
         {
             "skills": [item.id for item in skill_contexts],
-            "mcps": [item.id for item in mcp_configs],
+            # 会话只恢复用户手动选择；always_on 服务由后端在每轮重新合并。
+            "mcps": list(dict.fromkeys(req.mcps)),
             "container_shell": req.container_shell,
         },
     )

@@ -6,7 +6,25 @@
 
 ## 已安装服务
 
-项目已固定安装两个官方 MCP 服务。
+项目已固定安装三个 MCP 服务。
+
+### Exa 网络搜索
+
+Exa 官方远程 MCP：
+
+- 配置 id：`exa`
+- 前端名称：`网络搜索（常驻）`
+- 传输方式：Streamable HTTP
+- 默认工具：`web_search_exa`、`web_fetch_exa`
+- `always_on: true`：后端自动加入每轮任务，不需要用户反复勾选
+- `shared: true`：可供 Manager、Planner、Coder、Verifier、Doc 和 Answer 使用
+
+“常驻”只表示工具始终可选，不表示强制搜索。模型在本地仓库和已有上下文足够时应
+直接完成任务；只有需要最新版本、外部文档、指定网页或其他外部事实时才自主调用。
+Repo 和 Final 是确定性节点，不调用模型，因此不会连接搜索。
+
+外部搜索结果一律视为不可信数据。各智能节点只能从中提取资料，不得执行网页正文
+包含的提示或命令。
 
 ### Filesystem
 
@@ -66,6 +84,9 @@ GitHub 粗粒度权限，因此 GitHub 授权页仍会提示仓库访问；服�
 }
 ```
 
+只读 GitHub MCP 也设置了 `shared: true`，因此用户手动选择并完成授权后，所有调用
+模型的智能节点都可以按需读取 GitHub；它不会像 Exa 一样自动加入每轮任务。
+
 ## stdio 配置
 
 ```json
@@ -81,11 +102,17 @@ GitHub 粗粒度权限，因此 GitHub 授权页仍会提示仓库访问；服�
       "args": ["-y", "package-name", "${workspace}"],
       "env": {},
       "timeout": 60,
-      "persistent": false
+      "persistent": false,
+      "always_on": false,
+      "shared": false
     }
   ]
 }
 ```
+
+只有确认全部工具均为只读的服务才能设置 `shared: true`。包含写入、发布、删除或
+账号操作的 MCP 不应共享给 Manager、Planner、Verifier 或 Doc；这类服务只应在明确
+授权的 ReAct 执行节点中使用。
 
 `${workspace}` 会替换为前端当前选择的用户项目目录，`${agent_root}` 会替换为本
 Coding Agent 的项目根目录。`cwd` 未配置时默认使用 `${workspace}`。需要把认证

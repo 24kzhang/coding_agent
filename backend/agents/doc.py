@@ -24,7 +24,10 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
     client = graph._client("doc", state)
     try:
         # content 直接接收 Markdown 正文，避免长文档被 JSON 转义后触发兼容模型格式和超时问题。
-        content = client.chat(
+        content = graph._model_text(
+            state,
+            "doc",
+            client,
             [
                 {"role": "system", "content": DOC_PROMPT},
                 {
@@ -39,7 +42,6 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
                 },
             ]
         ).strip()
-        graph._add_tokens(state, client.last_usage.total)
     except LlmError as exc:
         # 文档模型不可用时绝不能用通用模板覆盖已有 README；保留磁盘并明确报告失败。
         failure = {
