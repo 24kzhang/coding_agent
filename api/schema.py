@@ -70,6 +70,26 @@ class ChatRequest(BaseModel):
     container_shell: bool = False
 
 
+class GuidanceRequest(BaseModel):
+    """Agent 运行中追加指导的请求体。"""
+
+    # 指导会在下一个安全检查点进入 Agent 上下文，不会启动第二个任务。
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class GuidanceResponse(BaseModel):
+    """指导进入当前运行队列后的确认信息。"""
+
+    # 当前运行 id，前端用它避免把旧指导发送到下一轮任务。
+    run_id: str
+    # 单条指导 id，用于事件和历史记录关联。
+    guidance_id: str
+    # queued 表示后端已接收，真正应用时会通过原任务事件流通知前端。
+    status: Literal["queued"] = "queued"
+    # 后端接收指导的 UTC 时间。
+    accepted_at: str
+
+
 class SessionCreate(BaseModel):
     """创建新会话时的请求体。"""
 
@@ -283,6 +303,8 @@ class ContextPackage(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     # 最近会话摘要，不是完整历史，用于避免下游上下文过载。
     recent: list[str] = Field(default_factory=list)
+    # Agent 执行期间用户追加的指导，越靠后优先级越高。
+    guidance: list[str] = Field(default_factory=list)
     # 用户本轮手动选择的 Skill 内容；未选择时为空，不会自动加载全部 Skill。
     skills: list[SkillContext] = Field(default_factory=list)
 

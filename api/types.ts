@@ -138,6 +138,22 @@ export interface ChatRequest {
   container_shell: boolean;
 }
 
+export interface GuidanceRequest {
+  // 指导会进入当前运行，而不是启动第二个任务。
+  text: string;
+}
+
+export interface GuidanceResponse {
+  // 当前活动运行 id。
+  run_id: string;
+  // 单条指导 id。
+  guidance_id: string;
+  // queued 表示已经排队等待 Agent 安全应用。
+  status: "queued";
+  // 后端接收时间。
+  accepted_at: string;
+}
+
 export interface SkillInfo {
   // Skill 唯一 id。
   id: string;

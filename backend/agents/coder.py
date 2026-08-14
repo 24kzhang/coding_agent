@@ -128,7 +128,14 @@ def _task_brief(state: AgentState) -> str:
 
     ctx = state.get("context")
     if not ctx:
-        return _middle_trim(str(state.get("text", "")), 18_000)
+        text = str(state.get("text", ""))
+        guidance = list(state.get("guidance") or [])
+        if guidance:
+            text += (
+                "\n\n运行中用户追加指导（优先于原任务中的冲突要求）：\n"
+                + "\n".join(f"- {item}" for item in guidance)
+            )
+        return _middle_trim(text, 18_000)
     constraints = "\n".join(f"- {item}" for item in ctx.constraints)
     # skill_sections 只包含用户本轮手动选择的 Skill，不自动加载整个 skills 目录。
     skill_sections = "\n\n".join(
@@ -136,6 +143,12 @@ def _task_brief(state: AgentState) -> str:
         for item in ctx.skills
     )
     text = f"任务目标：\n{ctx.goal}\n\n约束：\n{constraints}"
+    guidance = list(state.get("guidance") or getattr(ctx, "guidance", []))
+    if guidance:
+        text += (
+            "\n\n运行中用户追加指导（优先于原任务中的冲突要求，越靠后优先级越高）：\n"
+            + "\n".join(f"- {item}" for item in guidance)
+        )
     if skill_sections:
         text += "\n\n必须遵循的用户选定 Skills：\n" + skill_sections
     return _middle_trim(text, 100_000)
@@ -312,7 +325,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         if all(item.get("cmd") == "Coding 完成状态" for item in state["tests"] if not item.get("ok")):
             observations.append("上一轮只有 Coding 完成状态失败：当前文件若已满足需求，应直接返回 done=true，不要重新扫描或重建。")
 
-    # task_brief/repo_brief 在循环外只构造一次，保证每一步目标一致且输入体积稳定。
+    # task_brief 会在每个规划检查点刷新，以便运行中指导进入下一次模型请求。
     task_brief = _task_brief(state)
     repo_brief = _repo_brief(repo, include_snippets=retry == 0)
 
@@ -354,6 +367,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
     max_steps = CODER_MAX_STEPS
     for step in range(1, max_steps + 1):
+        state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
+        # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
+        task_brief = _task_brief(state)
+        planned_guidance_revision = int(state.get("guidance_revision", 0))
         # recent_observations 只保留最近 6 条精简事件；文件内容由 file_observations 单独管理。
         recent_observations = [_middle_trim(item, 1_200) for item in observations[-6:]]
         # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
@@ -473,6 +490,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 coding_summary = "Coding 模型连续三次没有返回有效执行指令。"
                 break
             continue
+        # 模型请求期间可能收到新指导；旧响应中的动作还没有执行，此时全部丢弃并重新规划。
+        state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步模型返回后")
+        if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
+            observations.append("模型生成动作期间收到新指导，已丢弃尚未执行的旧动作并重新规划。")
+            continue
         parse_failures = 0
         transient_failures = 0
         # thought 是模型本轮判断，会进入事件流方便用户观察。
@@ -516,7 +538,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         mutated_paths: set[str] = set()
         # dependency_mutated 表示安装、添加或同步依赖改变了运行环境，旧测试命令应允许重跑。
         dependency_mutated = False
+        # guidance_replan 表示动作批次中途收到指导，剩余旧动作必须停止。
+        guidance_replan = False
         for action in actions:
+            state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步工具动作前")
+            if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
+                guidance_replan = True
+                break
             # signature 用稳定 JSON 表示本次动作，相同参数和内容的动作不会重复执行。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             tool = str(action.get("tool") or "")
@@ -679,6 +707,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             duplicate_read_failures = 0
         elif mutation_count or changes:
             idle_after_mutation += 1
+        if guidance_replan:
+            observations.append("工具批次执行期间收到新指导，已保留完成的原子动作并取消剩余旧动作。")
+            continue
         if data.get("done"):
             if action_failed:
                 observations.append("本轮存在失败动作，不能标记完成；请根据观察修复。")
@@ -710,5 +741,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         "retry": retry + 1,
         "coding_ok": coding_ok,
         "coding_summary": coding_summary,
+        "coded_guidance_revision": int(state.get("guidance_revision", 0)),
         "error": "" if coding_ok else coding_summary,
     }

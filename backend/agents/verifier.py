@@ -81,6 +81,9 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     """验证智能体：根据项目文件选择测试命令并执行。"""
 
     graph._emit(state, "verifier", "start", "验证智能体正在选择并运行测试")
+    if graph._guidance_requires_coding(state):
+        graph._emit(state, "verifier", "guidance", "验证开始前收到新指导，返回 Coding 重新规划")
+        return state
     # fs 用于列出文件并做静态 Web 检查。
     fs = FsTool(state["workdir"])
     # shell 用于执行测试命令。
@@ -131,12 +134,16 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
         tests.append(result)
         ok = ok and bool(result.get("ok"))
         graph._emit(state, "verifier", "test", f"{command} -> {'通过' if result.get('ok') else '失败'}", data=result)
+        state = graph._apply_guidance(state, checkpoint=f"验证命令 {command} 完成后")
+        if graph._guidance_requires_coding(state):
+            graph._emit(state, "verifier", "guidance", "验证期间收到新指导，停止剩余旧检查")
+            break
 
     # 代码变更和显式只读验收都追加需求对照审查，弥补编译和静态正则无法理解业务语义的问题。
     task_type = state.get("task_type")
     needs_review = bool(state.get("changes")) and task_type in {"code_gen", "code_mod"}
     needs_review = needs_review or task_type == "verify"
-    if needs_review:
+    if needs_review and not graph._guidance_requires_coding(state):
         review_files: list[str] = []
         budget = 60_000
         # verify 没有本轮 changes，改用仓库读取智能体选择的关键文件作为只读审查依据。
@@ -201,6 +208,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             )
             ok = False
+    state = graph._apply_guidance(state, checkpoint="验证阶段结束前")
     graph.memory.append(
         state["workdir"],
         state["session_id"],

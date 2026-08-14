@@ -18,11 +18,15 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
     """文档智能体：根据任务、仓库摘要、变更和测试结果写中文文档。"""
 
     graph._emit(state, "doc", "start", "文档智能体正在生成或更新中文文档")
+    if graph._guidance_requires_coding(state):
+        graph._emit(state, "doc", "guidance", "文档生成前收到新指导，返回 Coding 重新规划")
+        return state
     # fs 是受 workdir 限制的文件写入工具。
     fs = FsTool(state["workdir"])
     # client 是 doc 智能体对应的模型客户端。
     client = graph._client("doc", state)
     try:
+        planned_guidance_revision = int(state.get("guidance_revision", 0))
         # content 直接接收 Markdown 正文，避免长文档被 JSON 转义后触发兼容模型格式和超时问题。
         content = graph._model_text(
             state,
@@ -43,6 +47,10 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
             ]
         ).strip()
     except LlmError as exc:
+        state = graph._apply_guidance(state, checkpoint="文档模型失败后")
+        if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
+            graph._emit(state, "doc", "guidance", "文档生成期间收到新指导，返回 Coding 重新规划")
+            return state
         # 文档模型不可用时绝不能用通用模板覆盖已有 README；保留磁盘并明确报告失败。
         failure = {
             "cmd": "文档生成",
@@ -53,6 +61,10 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
         tests = list(state.get("tests", [])) + [failure]
         graph._emit(state, "doc", "error", failure["out"], data=failure)
         return {**state, "tests": tests, "tests_ok": False, "error": failure["out"]}
+    state = graph._apply_guidance(state, checkpoint="文档模型返回后")
+    if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
+        graph._emit(state, "doc", "guidance", "文档生成期间收到新指导，丢弃旧文档草稿并返回 Coding")
+        return state
     if content.startswith("```") and content.endswith("```"):
         # 少数模型仍会包裹代码围栏；仅去掉最外层围栏，不改动正文内部代码块。
         content = re.sub(r"^```(?:markdown|md)?\s*\n", "", content, count=1, flags=re.IGNORECASE)
@@ -62,7 +74,11 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
         tests = list(state.get("tests", [])) + [failure]
         return {**state, "tests": tests, "tests_ok": False, "error": failure["out"]}
     # path 从用户任务中的明确 Markdown 路径确定；未指定时使用项目根目录 README.md。
-    path_match = re.search(r"(?<![\w.-])([\w./-]+\.md)(?![\w.-])", state.get("text", ""), re.IGNORECASE)
+    path_match = re.search(
+        r"(?<![\w.-])([\w./-]+\.md)(?![\w.-])",
+        graph._effective_text(state),
+        re.IGNORECASE,
+    )
     path = path_match.group(1) if path_match else "README.md"
     if Path(path).is_absolute() or ".." in Path(path).parts:
         # 绝对路径和父级跳转会被强制改为 README.md，防止模型任务文本写出项目目录。

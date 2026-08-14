@@ -33,6 +33,8 @@ MAX_CODER_ATTEMPTS = 7
 
 # Emit 是事件回调类型，AgentGraph 通过它把 AgentEvent 推给 FastAPI 流式接口。
 Emit = Callable[[AgentEvent], None]
+# GuidanceSource 非阻塞返回当前运行中尚未应用的用户指导。
+GuidanceSource = Callable[[], list[dict[str, str]]]
 
 """
 多智能体编排图。
@@ -46,6 +48,7 @@ class AgentGraph:
         memory: MemoryStore,
         emit: Emit | None = None,
         mcp_client: McpClient | None = None,
+        guidance_source: GuidanceSource | None = None,
     ):
         # model_store 负责根据智能体名称找到对应模型配置。
         self.model_store = model_store
@@ -55,6 +58,8 @@ class AgentGraph:
         self.emit_cb = emit
         # mcp_client 只在用户选择 MCP 且任务进入答疑或 Coding 节点时连接外部服务。
         self.mcp_client = mcp_client or McpClient()
+        # guidance_source 连接 HTTP 活动运行队列；CLI 和普通测试不传时保持原行为。
+        self.guidance_source = guidance_source
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
         # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
@@ -84,7 +89,16 @@ class AgentGraph:
             # 当前项目目录，文件和命令工具都受它限制。
             "workdir": workdir,
             # 用户本轮输入，Plan 流程中可能被 manager 改写。
-            "text": text,            # 是否开启 Plan 模式。
+            "text": text,
+            # original_text 不随 Plan 或运行中指导改写。
+            "original_text": text,
+            # guidance 只保存本次运行中已经应用的追加指导。
+            "guidance": [],
+            # guidance_revision 用于识别模型生成动作后是否又收到新要求。
+            "guidance_revision": 0,
+            # coded_guidance_revision 在 Coder 完成时刷新。
+            "coded_guidance_revision": 0,
+            # 是否开启 Plan 模式。
             "plan_mode": plan_mode,
             # 是否直接执行已保存计划。
             "execute_plan": execute_plan,
@@ -167,25 +181,36 @@ class AgentGraph:
         if callable(close):
             close()
 
+    def _run_node(
+        self,
+        node: Callable[[AgentGraph, AgentState], AgentState],
+        name: str,
+        state: AgentState,
+    ) -> AgentState:
+        """在 LangGraph 节点开始前应用运行中指导。"""
+
+        guided_state = self._apply_guidance(state, checkpoint=f"{name} 节点开始前")
+        return node(self, guided_state)
+
     def _build(self) -> Any:
         """构建 LangGraph 节点和条件路由。"""
 
         # agent 是以 AgentState 为状态类型的 LangGraph 状态图。
         graph = StateGraph(AgentState)
         # manager 是入口节点，负责分类、构造 Context Package 和决定第一跳。
-        graph.add_node("manager", partial(manager, self))
+        graph.add_node("manager", partial(self._run_node, manager, "manager"))
         # planner 负责 Plan 模式下的选择题和计划文件生成。
-        graph.add_node("planner", partial(planner, self))
+        graph.add_node("planner", partial(self._run_node, planner, "planner"))
         # repo 负责读取仓库结构和关键文件片段。
-        graph.add_node("repo", partial(repo, self))
+        graph.add_node("repo", partial(self._run_node, repo, "repo"))
         # answer 负责解释和普通答疑，不写磁盘。
-        graph.add_node("answer", partial(answer, self))
+        graph.add_node("answer", partial(self._run_node, answer, "answer"))
         # coder 负责 ReAct 写代码和执行工具动作。
-        graph.add_node("coder", partial(coder, self))
+        graph.add_node("coder", partial(self._run_node, coder, "coder"))
         # verifier 负责选择并运行测试。
-        graph.add_node("verifier", partial(verifier, self))
+        graph.add_node("verifier", partial(self._run_node, verifier, "verifier"))
         # doc 负责生成或更新中文文档。
-        graph.add_node("doc", partial(doc, self))
+        graph.add_node("doc", partial(self._run_node, doc, "doc"))
         # final 负责整理 TaskResult、写最终 memory、输出最终事件。
         graph.add_node("final", partial(final, self))
 
@@ -226,8 +251,12 @@ class AgentGraph:
             self.route_after_verifier,
             {"coder": "coder", "doc": "doc", "final": "final"},
         )
-        # doc 写完文档后进入 final。
-        graph.add_edge("doc", "final")
+        # doc 期间若收到更新指导则回到 coder，否则进入 final。
+        graph.add_conditional_edges(
+            "doc",
+            self.route_after_doc,
+            {"coder": "coder", "final": "final"},
+        )
         # final 是终点。
         graph.add_edge("final", END)
         return graph.compile()
@@ -552,6 +581,9 @@ class AgentGraph:
         # verify 是用户明确要求的只读验收任务。即使发现代码问题，也只能报告结果，不能越权进入 Coding 修改项目。
         if state.get("task_type") == "verify":
             return "final"
+        # 验证期间到达的指导尚未经过 Coding，必须回到 Coder 重新规划。
+        if self._guidance_requires_coding(state):
+            return "coder"
         # 只有代码或测试本身的失败才回到 coder；模型超时等基础设施失败无法靠改项目代码解决。
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
@@ -564,6 +596,10 @@ class AgentGraph:
         if state.get("tests_ok", True) and state.get("after_verify") == "doc":
             return "doc"
         return "final"
+
+    """返回 doc 节点之后的下一跳。"""
+    def route_after_doc(self, state: AgentState) -> str:
+        return "coder" if self._guidance_requires_coding(state) else "final"
 
     """对用户输入进行任务分类，优先用确定性规则，兜底才调用模型。"""
     def _classify(self, state: AgentState) -> dict[str, Any]:
@@ -1594,8 +1630,36 @@ class AgentGraph:
         # ctx 是管理者构造的 ContextPackage。
         ctx = state.get("context")
         if not ctx:
-            return state["text"]
-        return ctx.model_dump_json(indent=2)
+            text = state["text"]
+        else:
+            text = ctx.model_dump_json(indent=2)
+        guidance = list(state.get("guidance") or [])
+        if not guidance:
+            return text
+        latest = "\n".join(f"{index + 1}. {item}" for index, item in enumerate(guidance))
+        return (
+            text
+            + "\n\n运行中用户追加指导（必须优先于原任务中的冲突要求，越靠后优先级越高）：\n"
+            + latest
+        )
+
+    def _effective_text(self, state: AgentState) -> str:
+        """合并原任务和运行中指导，供规则分类、路径选择等非模型逻辑使用。"""
+
+        text = str(state.get("text", ""))
+        guidance = list(state.get("guidance") or [])
+        if not guidance:
+            return text
+        return text + "\n\n运行中用户追加指导：\n" + "\n".join(guidance)
+
+    def _guidance_requires_coding(self, state: AgentState) -> bool:
+        """判断代码任务是否出现了尚未经过 Coder 处理的新指导。"""
+
+        return (
+            state.get("task_type") in {"code_gen", "code_mod"}
+            and int(state.get("guidance_revision", 0))
+            > int(state.get("coded_guidance_revision", 0))
+        )
 
     """模型文档生成失败时使用的基础 README 内容。"""
     def _fallback_doc(self, state: AgentState) -> dict[str, str]:
@@ -1652,6 +1716,45 @@ class AgentGraph:
         )
         if self.emit_cb:
             self.emit_cb(event)
+
+    def _apply_guidance(self, state: AgentState, *, checkpoint: str) -> AgentState:
+        """在安全检查点取出指导并更新当前上下文。"""
+
+        if self.guidance_source is None:
+            return state
+        incoming = self.guidance_source()
+        if not incoming:
+            return state
+        previous = list(state.get("guidance") or [])
+        applied: list[str] = []
+        for item in incoming:
+            text = str(item.get("text") or "").strip()
+            if text:
+                # 单条指导保留足够上下文，同时避免连续超长输入挤掉任务和磁盘事实。
+                applied.append(self._trim(text, 12_000))
+        if not applied:
+            return state
+        combined = (previous + applied)[-12:]
+        state["guidance"] = combined
+        state["guidance_revision"] = int(state.get("guidance_revision", 0)) + len(applied)
+        ctx = state.get("context")
+        if ctx:
+            ctx.guidance = combined
+            state["context"] = ctx
+        else:
+            # 极早到达的指导必须参与 manager 分类，不能只进入后续 Coding 提示。
+            original = str(state.get("original_text") or state.get("text") or "")
+            state["original_text"] = original
+            state["text"] = original + "\n\n运行中用户追加指导：\n" + "\n".join(combined)
+        for text in applied:
+            self._emit(
+                state,
+                "manager",
+                "guidance",
+                f"已在{checkpoint}应用用户指导：{self._trim(text, 240)}",
+                data={"checkpoint": checkpoint, "revision": state["guidance_revision"]},
+            )
+        return state
 
     def _add_tokens(self, state: AgentState, tokens: int) -> None:
         """累计 token 估算，并发出 usage 事件。"""

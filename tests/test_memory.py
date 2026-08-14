@@ -58,6 +58,21 @@ def test_memory_lists_history_messages(tmp_path) -> None:
     ]
 
 
+def test_memory_restores_runtime_guidance_as_user_message(tmp_path) -> None:
+    store = MemoryStore(tmp_path / "mem")
+    workdir = str(tmp_path / "proj")
+    store.append(workdir, "s1", "manager", "session", "start", "新会话：s1")
+    store.append(workdir, "s1", "user", "input", "message", "实现首页")
+    store.append(workdir, "s1", "manager", "run", "start", "本轮开始")
+    store.append(workdir, "s1", "user", "guidance", "message", "改成蓝色主题")
+    store.append(workdir, "s1", "manager", "run", "done", "本轮结束")
+
+    messages = store.list_history()[0]["sessions"][0]["messages"]
+
+    assert [item["content"] for item in messages] == ["实现首页", "改成蓝色主题"]
+    assert store.interrupted(workdir, "s1") is False
+
+
 def test_memory_history_restores_all_session_events(tmp_path) -> None:
     """恢复会话时应按顺序返回整个会话的全部事件。"""
 

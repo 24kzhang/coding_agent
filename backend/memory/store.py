@@ -523,8 +523,12 @@ class MemoryStore:
         # messages 只包含用户输入和 agent 最终结果，不包含中间事件流。
         messages: list[dict[str, str]] = []
         for rec in records:
-            # 用户输入记录由 backend/main.py 在 chat_stream 开始时写入。
-            if rec.get("ag") == "user" and rec.get("tl") == "input" and rec.get("k") == "message":
+            # 初始输入和运行中指导都恢复为用户消息；指导不是新的 run/start。
+            if (
+                rec.get("ag") == "user"
+                and rec.get("tl") in {"input", "guidance"}
+                and rec.get("k") == "message"
+            ):
                 messages.append({"id": str(rec.get("id", "")), "role": "user", "content": str(rec.get("out", ""))})
             # agent 最终回复记录由 AgentGraph.final() 写入。
             if rec.get("ag") == "manager" and rec.get("tl") == "final" and rec.get("k") == "result":

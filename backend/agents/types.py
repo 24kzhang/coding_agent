@@ -14,6 +14,14 @@ class AgentState(TypedDict, total=False):
     workdir: str
     # 当前节点要处理的任务文本；Plan 回复时可能被管理者改写为“原始需求 + 用户答案”。
     text: str
+    # original_text 保存本轮最初输入，便于早到指导参与 manager 分类时稳定重建有效任务。
+    original_text: str
+    # guidance 保存本轮运行中已经应用的用户指导，后发送的指导优先级更高。
+    guidance: list[str]
+    # guidance_revision 每应用一批指导递增，Coder 用它丢弃基于旧要求生成的未执行动作。
+    guidance_revision: int
+    # coded_guidance_revision 记录最近一次 Coding 已处理到哪一版指导。
+    coded_guidance_revision: int
     # 前端 Plan 模式开关状态。
     plan_mode: bool
     # 是否强制执行已保存计划。

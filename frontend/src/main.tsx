@@ -32,6 +32,7 @@ import type {
   AgentModelMap,
   AgentName,
   CapabilitiesResponse,
+  GuidanceResponse,
   HistoryMessage,
   HistoryProject,
   HistorySession,
@@ -97,6 +98,12 @@ function App() {
   const [containerShell, setContainerShell] = useState(true);
   // running 表示当前是否正在执行任务，用于禁用发送按钮和显示 loading。
   const [running, setRunning] = useState(false);
+  // activeRunId 是后端当前运行编号；运行中发送框用它追加指导而不是启动第二个任务。
+  const [activeRunId, setActiveRunId] = useState("");
+  // runLockRef 防止快速重复点击在 React 完成重渲染前启动两次任务。
+  const runLockRef = useRef(false);
+  // guidanceLockRef 防止同一段指导被快速重复提交；瞬时互斥无需触发界面重渲染。
+  const guidanceLockRef = useRef(false);
   // events 是右侧事件流数据。
   const [events, setEvents] = useState<AgentEvent[]>([]);
   // result 保存最近一次任务最终结果。
@@ -512,7 +519,49 @@ function App() {
     }
   }
 
+  async function sendGuidance() {
+    // 本地条件先检查，避免运行编号尚未就绪时发起无效网络请求。
+    const text = task.trim();
+    if (!text) {
+      setNotice("请输入指导内容");
+      return;
+    }
+    if (!activeRunId) {
+      setNotice("当前任务正在建立连接，请稍后发送指导");
+      return;
+    }
+    if (guidanceLockRef.current) return;
+    guidanceLockRef.current = true;
+    setTask("");
+    try {
+      const response = await requestJson<GuidanceResponse>(`${API}/api/runs/${activeRunId}/guidance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      setMessages((prev) => [
+        ...prev,
+        { id: response.guidance_id, role: "user", content: text }
+      ]);
+      setNotice("指导已收到，将在下一个安全检查点应用");
+    } catch (error) {
+      setTask((current) => (current ? `${text}\n${current}` : text));
+      setNotice(`指导发送失败：${errorMessage(error)}`);
+    } finally {
+      guidanceLockRef.current = false;
+    }
+  }
+
+  async function submitComposer() {
+    if (running) {
+      await sendGuidance();
+      return;
+    }
+    await runTask();
+  }
+
   async function runTask() {
+    if (runLockRef.current) return;
     // trimmedTask 是去掉首尾空白后的用户输入。
     const trimmedTask = task.trim();
     if (!trimmedTask) {
@@ -523,7 +572,9 @@ function App() {
       setNotice("请先选择项目目录或恢复历史会话");
       return;
     }
+    runLockRef.current = true;
     setRunning(true);
+    setActiveRunId("");
     setResult(null);
     try {
       // id 是本次请求使用的会话 id；没有当前会话时自动创建。
@@ -551,6 +602,10 @@ function App() {
         const errorData = await res.json().catch(() => ({}));
         throw new Error(detailText(errorData.detail) || `请求失败：${res.status}`);
       }
+      // 运行编号通过允许跨域读取的响应头返回，后续输入会定向发送到这个任务。
+      const runId = res.headers.get("X-Run-ID") ?? "";
+      if (!runId) throw new Error("后端没有返回当前运行编号");
+      setActiveRunId(runId);
       // reader 用于逐块读取响应体。
       const reader = res.body?.getReader();
       if (!reader) throw new Error("浏览器不支持流式读取");
@@ -566,12 +621,15 @@ function App() {
         // item 是后端单行 NDJSON 解析后的对象，heartbeat 不进入界面状态。
         const item = JSON.parse(line) as { type: string; data?: AgentEvent | TaskResult | Record<string, unknown> };
         if (item.type === "event") {
-          setEvents((prev) => [...prev, item.data as AgentEvent]);
+          const event = item.data as AgentEvent;
+          setEvents((prev) => [...prev, event]);
+          if (event.kind === "guidance") setNotice(event.msg);
         } else if (item.type === "result") {
           const taskResult = item.data as TaskResult;
           setResult(taskResult);
           setMessages((prev) => [...prev, { id: `${Date.now()}-agent`, role: "agent", content: formatResultMessage(taskResult) }]);
           setNotice(taskResult.ok ? "任务完成" : "任务未完成");
+          setActiveRunId("");
           terminalReceived = true;
         } else if (item.type === "error") {
           const errorData = item.data as { msg?: string; result?: TaskResult };
@@ -579,6 +637,7 @@ function App() {
           if (errorData.result) setResult(errorData.result);
           setMessages((prev) => [...prev, { id: `${Date.now()}-error`, role: "agent", content }]);
           setNotice(`执行失败：${errorData.msg ?? "未知错误"}`);
+          setActiveRunId("");
           terminalReceived = true;
         }
       };
@@ -603,6 +662,8 @@ function App() {
       setMessages((prev) => [...prev, { id: `${Date.now()}-client-error`, role: "agent", content: message }]);
       setNotice(message);
     } finally {
+      runLockRef.current = false;
+      setActiveRunId("");
       setRunning(false);
     }
   }
@@ -777,9 +838,8 @@ function App() {
           <textarea
             value={task}
             onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(event) => handleComposerKey(event, running, () => void runTask())}
-            placeholder="输入任务或问题..."
-            disabled={running}
+            onKeyDown={(event) => handleComposerKey(event, () => void submitComposer())}
+            placeholder={running ? "输入对当前任务的补充或指导..." : "输入任务或问题..."}
           />
           <div className="actions">
             <button className="secondary" type="button" onClick={() => void pickProject()} disabled={running} title={workdir || "选择项目目录"}>
@@ -804,9 +864,13 @@ function App() {
                 <span>{capabilityCount}</span>
               )}
             </button>
-            <button className="primary send-button" disabled={running || !task.trim() || !workdir} onClick={() => void runTask()}>
-              {running ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-              发送
+            <button
+              className="primary send-button"
+              disabled={!task.trim() || !workdir || (running && !activeRunId)}
+              onClick={() => void submitComposer()}
+            >
+              {running ? <RadioTower size={16} /> : <Send size={16} />}
+              {running ? "发送指导" : "发送"}
             </button>
             <label className="toggle shell-toggle">
               <input
@@ -1228,11 +1292,11 @@ function formatResultMessage(result: TaskResult) {
   return lines.join("\n");
 }
 
-function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>, running: boolean, send: () => void) {
+function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>, send: () => void) {
   // Cmd/Ctrl + Enter 是开发工具中常见的发送方式，普通 Enter 仍然输入换行。
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
-    if (!running) send();
+    send();
   }
 }
 

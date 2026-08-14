@@ -16,6 +16,8 @@ from api.schema import (
     AgentModelMap,
     CapabilitiesResponse,
     ChatRequest,
+    GuidanceRequest,
+    GuidanceResponse,
     HistoryResponse,
     McpAuthStatus,
     ModelConfig,
@@ -27,6 +29,7 @@ from api.schema import (
 from backend.agents.graph import AgentGraph, new_session_id
 from backend.capabilities import CapabilityStore, McpClient
 from backend.memory import MemoryStore
+from backend.runs import RunConflictError, RunNotFoundError, RunRegistry
 from llm import LlmClient, LlmError, ModelStore
 
 # app 是 FastAPI 应用实例，所有 HTTP 路由都挂在它上面。
@@ -38,6 +41,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Run-ID"],
 )
 
 # model_store 是模型配置仓库，读写 memory/config/models.json。
@@ -48,6 +52,8 @@ memory_store = MemoryStore()
 capability_store = CapabilityStore()
 # mcp_client 通过官方 MCP SDK 测试、发现和调用用户选择的服务。
 mcp_client = McpClient()
+# run_registry 保存当前进程中的活动任务和运行中指导队列。
+run_registry = RunRegistry()
 
 
 @app.get("/api/health")
@@ -320,28 +326,37 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         mcp_configs = capability_store.select_mcps(req.mcps)
     except (OSError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # resuming 必须在写入本轮记录前判断，否则当前用户输入会被误认为上轮中断。
-    resuming = memory_store.interrupted(workdir, req.session_id)
-    # 能力与 Shell 选择独立写入 session memory，恢复历史会话时前端会同步还原。
-    memory_store.append(
-        workdir,
-        req.session_id,
-        "manager",
-        "capability",
-        "selection",
-        f"本轮启用 {len(skill_contexts)} 个 Skill、{len(mcp_configs)} 个 MCP，"
-        + ("容器 Shell" if req.container_shell else "原生 Shell"),
-        {
-            "skills": [item.id for item in skill_contexts],
-            # 会话只恢复用户手动选择；always_on 服务由后端在每轮重新合并。
-            "mcps": list(dict.fromkeys(req.mcps)),
-            "container_shell": req.container_shell,
-        },
-    )
-    # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
-    memory_store.append(workdir, req.session_id, "user", "input", "message", req.text)
-    # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
-    memory_store.append(workdir, req.session_id, "manager", "run", "start", "本轮任务开始")
+    try:
+        # active_run 让后续指导能够定位当前 Agent，并阻止同一会话并发改动项目。
+        active_run = run_registry.start(req.session_id, workdir, event_queue)
+    except RunConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        # resuming 必须在写入本轮记录前判断，否则当前用户输入会被误认为上轮中断。
+        resuming = memory_store.interrupted(workdir, req.session_id)
+        # 能力与 Shell 选择独立写入 session memory，恢复历史会话时前端会同步还原。
+        memory_store.append(
+            workdir,
+            req.session_id,
+            "manager",
+            "capability",
+            "selection",
+            f"本轮启用 {len(skill_contexts)} 个 Skill、{len(mcp_configs)} 个 MCP，"
+            + ("容器 Shell" if req.container_shell else "原生 Shell"),
+            {
+                "skills": [item.id for item in skill_contexts],
+                # 会话只恢复用户手动选择；always_on 服务由后端在每轮重新合并。
+                "mcps": list(dict.fromkeys(req.mcps)),
+                "container_shell": req.container_shell,
+            },
+        )
+        # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
+        memory_store.append(workdir, req.session_id, "user", "input", "message", req.text)
+        # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
+        memory_store.append(workdir, req.session_id, "manager", "run", "start", "本轮任务开始")
+    except Exception:
+        run_registry.finish(active_run.id)
+        raise
 
     def emit(event: Any) -> None:
         """AgentGraph 调用的事件回调，把事件放入流式队列。"""
@@ -353,7 +368,13 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 
         try:
             # agent 是本次任务的 LangGraph 编排实例，emit 用于实时输出事件。
-            graph = AgentGraph(model_store, memory_store, emit=emit, mcp_client=mcp_client)
+            graph = AgentGraph(
+                model_store,
+                memory_store,
+                emit=emit,
+                mcp_client=mcp_client,
+                guidance_source=active_run.drain_guidance,
+            )
             # result 是任务最终结果，会以 type=result 写入队列。
             result = graph.run(
                 session_id=req.session_id,
@@ -385,6 +406,8 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             # 捕获异常并转成流式 error，避免前端一直等待。
             event_queue.put({"type": "error", "data": {"msg": str(exc), "result": failure.model_dump()}})
         finally:
+            # 先关闭运行注册，防止最终结果已经产生后仍有指导进入无人消费的队列。
+            run_registry.finish(active_run.id)
             # None 是流结束哨兵，stream() 读到后停止 yield。
             event_queue.put(None)
 
@@ -408,7 +431,38 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         stream(),
         media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Run-ID": active_run.id,
+        },
+    )
+
+
+@app.post("/api/runs/{run_id}/guidance")
+def submit_guidance(run_id: str, req: GuidanceRequest) -> GuidanceResponse:
+    """把用户指导加入当前 Agent 运行，不启动新的任务。"""
+
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="指导内容不能为空")
+    try:
+        active_run, guidance = run_registry.submit_guidance(run_id, text)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    memory_store.append(
+        active_run.workdir,
+        active_run.session_id,
+        "user",
+        "guidance",
+        "message",
+        text,
+        {"run_id": run_id, "guidance_id": guidance.id},
+    )
+    return GuidanceResponse(
+        run_id=run_id,
+        guidance_id=guidance.id,
+        accepted_at=guidance.created_at,
     )
 
 
