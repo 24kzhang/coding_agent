@@ -25,8 +25,9 @@ from backend.agents.verifier import verifier
 from backend.capabilities import McpClient, McpServerConfig
 from backend.clock import utc_stamp
 from backend.memory import MemoryStore
+from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
-from llm import LlmClient, LlmError, ModelStore
+from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 7
@@ -60,6 +61,7 @@ class AgentGraph:
         self.mcp_client = mcp_client or McpClient()
         # guidance_source 连接 HTTP 活动运行队列；CLI 和普通测试不传时保持原行为。
         self.guidance_source = guidance_source
+        self.repo_map = RepoMap()
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
         # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
@@ -75,10 +77,12 @@ class AgentGraph:
         plan_mode: bool = False,
         execute_plan: bool = False,
         model_id: str | None = None,
+        effort: str | None = None,
         resuming: bool = False,
         skills: list[SkillContext] | None = None,
         mcp_servers: list[dict[str, Any]] | None = None,
         container_shell: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> TaskResult:
         """运行一次用户任务，并返回最终 TaskResult。"""
 
@@ -104,6 +108,8 @@ class AgentGraph:
             "execute_plan": execute_plan,
             # 本次请求是否覆盖默认模型选择。
             "model_id": model_id,
+            "effort": effort,
+            "attachments": list(attachments or []),
             # resuming 由 HTTP 层在写入本轮 run/start 前计算，避免把当前任务误判成旧中断。
             "resuming": resuming,
             # skills 只包含用户本轮手动选择的 SKILL.md，不会默认加载整个目录。
@@ -190,7 +196,52 @@ class AgentGraph:
         """在 LangGraph 节点开始前应用运行中指导。"""
 
         guided_state = self._apply_guidance(state, checkpoint=f"{name} 节点开始前")
-        return node(self, guided_state)
+        task_id = uuid.uuid4().hex[:12]
+        self.memory.append_task(
+            guided_state["workdir"],
+            guided_state["session_id"],
+            "manager" if name != "manager" else "user",
+            "handoff",
+            f"派发给 {name}：{self._trim(guided_state.get('text', ''), 240)}",
+            {
+                "id": task_id,
+                "parent_id": None,
+                "sender": "manager" if name != "manager" else "user",
+                "receiver": name,
+                "goal": self._trim(guided_state.get("text", ""), 1200),
+                "input_refs": [
+                    str(item.get("id"))
+                    for item in guided_state.get("attachments") or []
+                    if item.get("id")
+                ],
+                "constraints": [],
+                "acceptance": [],
+                "budget": {"retry": int(guided_state.get("retry", 0))},
+            },
+        )
+        result = node(self, guided_state)
+        self.memory.append_task(
+            result["workdir"],
+            result["session_id"],
+            name,
+            "outcome",
+            f"{name} 已完成本阶段",
+            {
+                "task_id": task_id,
+                "status": "failed" if result.get("error") else "ok",
+                "summary": self._trim(
+                    result.get("coding_summary")
+                    or result.get("final")
+                    or f"{name} 阶段完成",
+                    1200,
+                ),
+                "facts": [],
+                "artifact_refs": list(result.get("changes") or [])[-20:],
+                "checks": list(result.get("tests") or [])[-8:],
+                "error": result.get("error") or None,
+            },
+        )
+        return result
 
     def _build(self) -> Any:
         """构建 LangGraph 节点和条件路由。"""
@@ -249,7 +300,7 @@ class AgentGraph:
         graph.add_conditional_edges(
             "verifier",
             self.route_after_verifier,
-            {"coder": "coder", "doc": "doc", "final": "final"},
+            {"manager": "manager", "coder": "coder", "doc": "doc", "final": "final"},
         )
         # doc 期间若收到更新指导则回到 coder，否则进入 final。
         graph.add_conditional_edges(
@@ -584,14 +635,14 @@ class AgentGraph:
         # 验证期间到达的指导尚未经过 Coding，必须回到 Coder 重新规划。
         if self._guidance_requires_coding(state):
             return "coder"
-        # 只有代码或测试本身的失败才回到 coder；模型超时等基础设施失败无法靠改项目代码解决。
+        # 只有代码或测试本身的失败才交回主管决策；模型超时等基础设施失败无法靠改项目代码解决。
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
         ]
         # retry 在每次 Coding 结束后递增。复杂项目常需要多轮“实现 → 语义审查 → 精确修复”，
         # 尤其模型接口偶发超时会消耗整轮步骤；保留五次总尝试仍有明确硬上限。
         if actionable_failures and int(state.get("retry", 0)) < MAX_CODER_ATTEMPTS:
-            return "coder"
+            return "manager"
         # 测试通过且任务需要文档时进入 doc。
         if state.get("tests_ok", True) and state.get("after_verify") == "doc":
             return "doc"
@@ -601,7 +652,7 @@ class AgentGraph:
     def route_after_doc(self, state: AgentState) -> str:
         return "coder" if self._guidance_requires_coding(state) else "final"
 
-    """对用户输入进行任务分类，优先用确定性规则，兜底才调用模型。"""
+    """对用户输入进行任务分类；安全特例用规则，其余优先由模型选择语义路由。"""
     def _classify(self, state: AgentState) -> dict[str, Any]:
         # text 是当前任务文本。
         text = state["text"]
@@ -658,6 +709,58 @@ class AgentGraph:
                 "need_clarify": False,
                 "reason": "用户正在查询或使用本轮选择的 MCP 服务，由答疑 MCP ReAct 处理",
             }
+        try:
+            client = self._client("manager", state)
+            classify_context = {
+                "current": text,
+                "available_agents": {
+                    "planner": "需求澄清与只读计划",
+                    "coder": "修改或创建项目",
+                    "verifier": "只读测试和语义验收",
+                    "answer": "解释和普通答疑",
+                    "doc": "文档生成",
+                    "repo": "按需仓库上下文服务",
+                },
+                "recent": self.memory.conversation_context(
+                    state["workdir"],
+                    state["session_id"],
+                    limit=8,
+                    exclude_latest_user=True,
+                ),
+            }
+            data = self._model_json(
+                state,
+                "manager",
+                client,
+                [
+                    {"role": "system", "content": MANAGER_PROMPT},
+                    {
+                        "role": "user",
+                        "content": self._multimodal_content(
+                            json.dumps(classify_context, ensure_ascii=False),
+                            state,
+                        ),
+                    },
+                ],
+                temperature=0,
+            )
+            normalized = self._normalize_classification(data)
+            self._emit(
+                state,
+                "manager",
+                "dispatch",
+                f"主管模型选择任务类型：{normalized['task_type']}",
+            )
+            return normalized
+        except LlmBalanceError:
+            raise
+        except Exception as exc:
+            self._emit(
+                state,
+                "manager",
+                "fallback",
+                f"主管模型路由不可用，使用确定性规则：{self._trim(str(exc), 120)}",
+            )
         # code_intent 表示用户有从零创建或实现可交付物的倾向。
         code_intent = any(word in lower for word in ["创建", "实现", "开发", "新建", "编写", "做一个", "搭建", "build", "create"])
         # product_intent 表示用户目标是代码、系统、页面、接口或其他工程交付物。
@@ -983,6 +1086,7 @@ class AgentGraph:
             "git_diff",
             "git_status",
             "list_files",
+            "model_copy",
             "read_file",
             "replace_block",
             "replace_file",
@@ -1155,6 +1259,7 @@ class AgentGraph:
                 "run_command": ("cmd",),
                 "search_files": ("query",),
                 "write_file": ("path", "content"),
+                "model_copy": ("model_id",),
             }
             missing = [key for key in required.get(str(tool), ()) if key not in action]
             if missing:
@@ -1163,6 +1268,19 @@ class AgentGraph:
                 # rel 是实际写入文件的项目相对路径。
                 rel = fs.write(str(action["path"]), str(action.get("content", "")))
                 return {"ok": True, "text": f"写入文件：{rel}", "file": rel}
+            if tool == "model_copy":
+                target = str(action.get("target") or ".local/model.json")
+                path = self.model_store.copy_private(
+                    str(action["model_id"]),
+                    str((state or {}).get("workdir") or fs.root),
+                    target,
+                )
+                rel = path.relative_to(Path(str((state or {}).get("workdir") or fs.root)).resolve()).as_posix()
+                return {
+                    "ok": True,
+                    "text": f"模型私密配置已复制到 {rel}；密钥未进入工具结果。",
+                    "file": rel,
+                }
             if tool == "append_file":
                 # rel 是实际追加文件的项目相对路径。
                 rel = fs.append(str(action["path"]), str(action.get("content", "")))
@@ -1623,7 +1741,44 @@ class AgentGraph:
 
     """根据智能体名称创建对应模型客户端。"""
     def _client(self, agent: str, state: AgentState) -> LlmClient:
-        return LlmClient(self.model_store.for_agent(agent, state.get("model_id")))
+        cfg = self.model_store.for_agent(agent, state.get("model_id"))
+        if state.get("attachments") and agent in {"manager", "planner", "coder", "answer"}:
+            if "vision" not in cfg.capabilities:
+                if state.get("model_id"):
+                    raise LlmError(f"所选模型“{cfg.name}”不支持图片输入")
+                candidates = [
+                    item
+                    for item in self.model_store.fallbacks(cfg.id)
+                    if "vision" in item.capabilities
+                ]
+                if not candidates:
+                    raise LlmError(f"Agent“{agent}”配置的模型不支持图片输入，且没有可用视觉模型")
+                cfg = candidates[0]
+                self._emit(state, agent, "route", f"图片任务已路由到视觉模型：{cfg.name}")
+        client = LlmClient(cfg)
+        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+        return client
+
+    def _multimodal_content(self, text: str, state: AgentState) -> str | list[dict[str, str]]:
+        """把安全附件引用附在当前模型输入上，base64 仅在 HTTP 边界生成。"""
+
+        attachments = [
+            item
+            for item in state.get("attachments") or []
+            if item.get("path") and item.get("mime")
+        ]
+        if not attachments:
+            return text
+        content: list[dict[str, str]] = [{"type": "input_text", "text": text}]
+        content.extend(
+            {
+                "type": "input_image",
+                "path": str(item["path"]),
+                "mime": str(item["mime"]),
+            }
+            for item in attachments
+        )
+        return content
 
     """把当前上下文包序列化成模型输入文本。"""
     def _ctx_text(self, state: AgentState) -> str:

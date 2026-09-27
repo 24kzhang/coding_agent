@@ -8,12 +8,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from api.schema import (
     AgentModelMap,
+    AgentProfileMap,
+    AttachmentInfo,
     CapabilitiesResponse,
     ChatRequest,
     GuidanceRequest,
@@ -21,6 +23,7 @@ from api.schema import (
     HistoryResponse,
     McpAuthStatus,
     ModelConfig,
+    ModelPublic,
     SessionCreate,
     SessionInfo,
     SessionUpdate,
@@ -67,14 +70,22 @@ def health() -> dict[str, Any]:
 def list_models() -> dict[str, Any]:
     """返回模型列表和每个智能体的模型映射。"""
 
-    return {"models": [model.model_dump() for model in model_store.all()], "agent_models": model_store.model_map().model_dump()}
+    return {
+        "models": [model.model_dump() for model in model_store.public()],
+        "agent_models": model_store.model_map().model_dump(),
+        "agent_profiles": model_store.profiles().model_dump(),
+    }
 
 
 @app.post("/api/models")
-def save_model(cfg: ModelConfig) -> ModelConfig:
+def save_model(cfg: ModelConfig) -> ModelPublic:
     """新增或更新模型配置。"""
 
-    return model_store.upsert(cfg)
+    try:
+        saved = model_store.upsert(cfg)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return next(item for item in model_store.public() if item.id == saved.id)
 
 
 @app.delete("/api/models/{model_id}")
@@ -97,12 +108,40 @@ def test_model(model_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/models/{model_id}/probe")
+def probe_model(model_id: str) -> dict[str, Any]:
+    """探测模型连通性并返回当前声明的协议能力。"""
+
+    try:
+        cfg = model_store.get(model_id)
+        result = LlmClient(cfg).test()
+    except (KeyError, LlmError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        **result,
+        "protocol": cfg.protocol,
+        "capabilities": cfg.capabilities,
+        "efforts": cfg.efforts,
+        "default_effort": cfg.default_effort,
+    }
+
+
 @app.post("/api/model-map")
 def save_model_map(model_map: AgentModelMap) -> AgentModelMap:
     """保存每个智能体对应的模型 id。"""
 
     try:
         return model_store.set_model_map(model_map)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/agent-profiles")
+def save_agent_profiles(profiles: AgentProfileMap) -> AgentProfileMap:
+    """保存模型型 Agent 的模型与思考等级。"""
+
+    try:
+        return model_store.set_profiles(profiles)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -181,6 +220,55 @@ def create_session(req: SessionCreate) -> SessionInfo:
         mcps=[],
         container_shell=True,
     )
+
+
+@app.post("/api/sessions/{session_id}/files")
+async def upload_session_file(session_id: str, file: UploadFile = File(...)) -> AttachmentInfo:
+    """上传一张会话图片，正文只保存到附件目录。"""
+
+    workdir = _session_workdir(session_id)
+    content = await file.read(20 * 1024 * 1024 + 1)
+    try:
+        info = memory_store.save_file(
+            workdir,
+            session_id,
+            file.filename or "image",
+            file.content_type or "application/octet-stream",
+            content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AttachmentInfo(
+        id=info["id"],
+        name=info["name"],
+        mime=info["mime"],
+        size=info["size"],
+        url=f"/api/sessions/{session_id}/files/{info['id']}",
+    )
+
+
+@app.get("/api/sessions/{session_id}/files/{file_id}")
+def get_session_file(session_id: str, file_id: str) -> FileResponse:
+    """返回会话图片，仅通过哈希 id 访问。"""
+
+    workdir = _session_workdir(session_id)
+    try:
+        info = memory_store.file_info(workdir, session_id, file_id)
+    except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="附件不存在") from exc
+    return FileResponse(info["path"], media_type=info["mime"], filename=info["name"])
+
+
+@app.delete("/api/sessions/{session_id}/files/{file_id}")
+def delete_session_file(session_id: str, file_id: str) -> dict[str, Any]:
+    """删除当前会话的一张附件。"""
+
+    workdir = _session_workdir(session_id)
+    try:
+        deleted = memory_store.delete_file(workdir, session_id, file_id)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/pick-dir")
@@ -319,6 +407,25 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
     # workdir 通过 session_id 反查，避免前端伪造任意项目路径执行任务。
     workdir = _session_workdir(req.session_id)
+    attachments: list[dict[str, Any]] = []
+    total_attachment_size = 0
+    for file_id in req.attachments:
+        try:
+            info = memory_store.file_info(workdir, req.session_id, file_id)
+        except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"附件不存在或已损坏：{file_id}") from exc
+        total_attachment_size += int(info["size"])
+        if total_attachment_size > 64 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="本轮附件总大小不能超过 64 MiB")
+        attachments.append(
+            {
+                "id": file_id,
+                "name": info["name"],
+                "mime": info["mime"],
+                "size": info["size"],
+                "path": str(info["path"]),
+            }
+        )
     try:
         # skill_contexts 是受字符预算限制的 SKILL.md 正文。
         skill_contexts = capability_store.load_skills(req.skills)
@@ -351,7 +458,15 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             },
         )
         # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
-        memory_store.append(workdir, req.session_id, "user", "input", "message", req.text)
+        memory_store.append(
+            workdir,
+            req.session_id,
+            "user",
+            "input",
+            "message",
+            req.text,
+            {"attachments": [item["id"] for item in attachments]},
+        )
         # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
         memory_store.append(workdir, req.session_id, "manager", "run", "start", "本轮任务开始")
     except Exception:
@@ -361,7 +476,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     def emit(event: Any) -> None:
         """AgentGraph 调用的事件回调，把事件放入流式队列。"""
 
-        event_queue.put({"type": "event", "data": event.model_dump()})
+        active_run.publish({"type": "event", "data": event.model_dump()})
 
     def worker() -> None:
         """后台线程函数，负责真正运行 AgentGraph。"""
@@ -383,13 +498,15 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 plan_mode=req.plan_mode,
                 execute_plan=req.execute_plan,
                 model_id=req.model_id,
+                effort=req.effort,
                 resuming=resuming,
                 skills=skill_contexts,
                 mcp_servers=[item.model_dump() for item in mcp_configs],
                 container_shell=req.container_shell,
+                attachments=attachments,
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "done", "本轮任务正常结束")
-            event_queue.put({"type": "result", "data": result.model_dump()})
+            active_run.publish({"type": "result", "data": result.model_dump()})
         except Exception as exc:
             # failure 会写入最终会话回复，历史恢复后仍能看到异常，而不是只留半轮对话。
             failure = TaskResult(ok=False, summary=f"任务执行失败：{exc}")
@@ -404,28 +521,42 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "error", failure.summary)
             # 捕获异常并转成流式 error，避免前端一直等待。
-            event_queue.put({"type": "error", "data": {"msg": str(exc), "result": failure.model_dump()}})
+            active_run.publish({"type": "error", "data": {"msg": str(exc), "result": failure.model_dump()}})
         finally:
-            # 先关闭运行注册，防止最终结果已经产生后仍有指导进入无人消费的队列。
+            # None 是流结束哨兵，同时让运行进入可恢复的最近完成列表。
+            active_run.publish(None)
             run_registry.finish(active_run.id)
-            # None 是流结束哨兵，stream() 读到后停止 yield。
-            event_queue.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
 
     def stream() -> Any:
         """StreamingResponse 使用的生成器，把队列数据逐行编码为 NDJSON。"""
 
-        while True:
-            # item 是后台线程放入队列的一条事件、结果、错误或结束哨兵。
-            try:
-                # 超时轮询允许服务定期发送心跳，长模型调用期间连接不会显得完全静默。
-                item = event_queue.get(timeout=15)
-            except queue.Empty:
-                yield json.dumps({"type": "heartbeat"}, ensure_ascii=False) + "\n"
-                continue
-            if item is None:
-                break
+        for item in active_run.replay():
+            yield json.dumps(item, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Run-ID": active_run.id,
+        },
+    )
+
+
+@app.post("/api/runs/{run_id}/resume")
+def resume_run(run_id: str, cursor: int = 0) -> StreamingResponse:
+    """从事件游标恢复中断的运行流；最近完成的运行也可以完整重放。"""
+
+    try:
+        active_run = run_registry.get(run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def stream() -> Any:
+        for item in active_run.replay(cursor):
             yield json.dumps(item, ensure_ascii=False) + "\n"
 
     return StreamingResponse(

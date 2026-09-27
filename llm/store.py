@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from api.schema import AgentModelMap, ModelConfig
+from api.schema import AgentModelMap, AgentProfile, AgentProfileMap, ModelConfig, ModelPublic
 
 
 class ModelStore:
@@ -23,7 +24,13 @@ class ModelStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # 首次启动时创建空模型列表和默认智能体模型映射。
         if not self.path.exists():
-            self._write({"models": [], "agent_models": AgentModelMap().model_dump()})
+            self._write(
+                {
+                    "models": [],
+                    "agent_models": AgentModelMap().model_dump(),
+                    "agent_profiles": AgentProfileMap().model_dump(),
+                }
+            )
 
     def all(self) -> list[ModelConfig]:
         """读取全部模型配置。"""
@@ -38,7 +45,26 @@ class ModelStore:
 
         # data 是 models.json 的完整内容。
         data = self._read()
-        return AgentModelMap(**data.get("agent_models", {}))
+        profiles = self.profiles()
+        return AgentModelMap(
+            **{name: str(profile["model_id"]) for name, profile in profiles.model_dump().items()}
+        )
+
+    def profiles(self) -> AgentProfileMap:
+        """读取 Agent 的模型与思考等级，并兼容旧 agent_models 配置。"""
+
+        data = self._read()
+        raw = data.get("agent_profiles")
+        if isinstance(raw, dict) and raw:
+            return AgentProfileMap(**raw)
+        legacy = data.get("agent_models") if isinstance(data.get("agent_models"), dict) else {}
+        defaults = AgentProfileMap().model_dump()
+        for name in defaults:
+            defaults[name] = {
+                "model_id": str(legacy.get(name) or ""),
+                "effort": "inherit",
+            }
+        return AgentProfileMap(**defaults)
 
     def set_model_map(self, model_map: AgentModelMap) -> AgentModelMap:
         """保存智能体到模型 id 的映射。"""
@@ -51,8 +77,35 @@ class ModelStore:
         if invalid:
             raise ValueError("智能体模型映射引用了不存在的模型：" + "、".join(invalid))
         data["agent_models"] = model_map.model_dump()
+        profiles = self.profiles().model_dump()
+        for name, model_id in model_map.model_dump().items():
+            profiles[name]["model_id"] = model_id
+        data["agent_profiles"] = profiles
         self._write(data)
         return model_map
+
+    def set_profiles(self, profiles: AgentProfileMap) -> AgentProfileMap:
+        """保存 Agent 配置并同步旧版模型映射字段。"""
+
+        data = self._read()
+        model_ids = {str(item.get("id")) for item in data.get("models", [])}
+        invalid = sorted(
+            {
+                profile.model_id
+                for profile in profiles.__dict__.values()
+                if isinstance(profile, AgentProfile)
+                and profile.model_id
+                and profile.model_id not in model_ids
+            }
+        )
+        if invalid:
+            raise ValueError("Agent 配置引用了不存在的模型：" + "、".join(invalid))
+        data["agent_profiles"] = profiles.model_dump()
+        data["agent_models"] = {
+            name: item["model_id"] for name, item in profiles.model_dump().items()
+        }
+        self._write(data)
+        return profiles
 
     def get(self, model_id: str | None) -> ModelConfig:
         """按模型 id 获取配置；为空时返回第一个启用模型。"""
@@ -81,8 +134,35 @@ class ModelStore:
         if override:
             return self.get(override)
         # model_map 保存每个智能体对应的模型 id。
-        model_map = self.model_map()
-        return self.get(getattr(model_map, agent, None))
+        profiles = self.profiles()
+        profile = getattr(profiles, agent, AgentProfile())
+        return self.get(profile.model_id or None)
+
+    def effort_for_agent(self, agent: str, override: str | None = None) -> str:
+        """返回 Agent 实际使用的思考等级。"""
+
+        if override and override != "inherit":
+            return override
+        profile = getattr(self.profiles(), agent, AgentProfile())
+        if profile.effort != "inherit":
+            return profile.effort
+        model = self.for_agent(agent)
+        return model.default_effort
+
+    def public(self) -> list[ModelPublic]:
+        """返回不会泄露密钥的浏览器模型列表。"""
+
+        result: list[ModelPublic] = []
+        for model in self.all():
+            key = model.api_key
+            result.append(
+                ModelPublic(
+                    **model.model_dump(exclude={"api_key"}),
+                    has_key=bool(key),
+                    key_hint=(f"••••{key[-4:]}" if len(key) >= 4 else "已配置") if key else "",
+                )
+            )
+        return result
 
     def fallbacks(self, current_id: str, excluded: set[str] | None = None) -> list[ModelConfig]:
         """返回当前模型失败后可用的启用模型，结构化任务把 LongCat 放到最后。"""
@@ -105,15 +185,56 @@ class ModelStore:
         # idx 是当前遍历到的模型下标，item 是模型原始 dict。
         for idx, item in enumerate(models):
             if item.get("id") == cfg.id:
-                models[idx] = cfg.model_dump()
+                value = cfg.model_dump()
+                if not value.get("api_key"):
+                    value["api_key"] = str(item.get("api_key") or "")
+                models[idx] = value
                 replaced = True
                 break
         # 没有同 id 模型时追加为新配置。
         if not replaced:
+            if not cfg.api_key:
+                raise ValueError("新增模型必须填写 API Key")
             models.append(cfg.model_dump())
         data["models"] = models
         self._write(data)
         return cfg
+
+    def copy_private(self, model_id: str, workdir: str, target: str = ".local/model.json") -> Path:
+        """把模型配置复制到工作区内的私密文件，返回路径但不返回密钥。"""
+
+        root = Path(workdir).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError("工作区不存在")
+        destination = (root / target).resolve()
+        if root not in destination.parents:
+            raise ValueError("模型配置只能复制到当前工作区")
+        cfg = self.get(model_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(destination.parent, 0o700)
+        payload = {
+            "id": cfg.id,
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "api_key": cfg.api_key,
+            "protocol": cfg.protocol,
+            "timeout": cfg.timeout,
+            "default_effort": cfg.default_effort,
+        }
+        temp = destination.with_name(f".{destination.name}.tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temp, 0o600)
+        temp.replace(destination)
+        os.chmod(destination, 0o600)
+        ignore = root / ".gitignore"
+        ignore_text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+        entry = f"{destination.parent.relative_to(root).as_posix().rstrip('/')}/"
+        if entry not in {line.strip() for line in ignore_text.splitlines()}:
+            with ignore.open("a", encoding="utf-8") as fh:
+                if ignore_text and not ignore_text.endswith("\n"):
+                    fh.write("\n")
+                fh.write(entry + "\n")
+        return destination
 
     def delete(self, model_id: str) -> None:
         """删除模型，并把引用该模型的智能体映射切换到 fallback。"""
@@ -134,6 +255,11 @@ class ModelStore:
             if current == model_id:
                 mapped[agent] = fallback
         data["agent_models"] = mapped
+        profiles = self.profiles().model_dump()
+        for name, profile in profiles.items():
+            if profile["model_id"] == model_id:
+                profile["model_id"] = fallback
+        data["agent_profiles"] = profiles
         self._write(data)
 
     def _read(self) -> dict[str, Any]:
@@ -150,4 +276,6 @@ class ModelStore:
         # temp_path 与正式配置同目录，写完后原子替换，避免程序中断留下半个 JSON。
         temp_path = self.path.with_name(f".{self.path.name}.tmp")
         temp_path.write_text(content, encoding="utf-8")
+        os.chmod(temp_path, 0o600)
         temp_path.replace(self.path)
+        os.chmod(self.path, 0o600)

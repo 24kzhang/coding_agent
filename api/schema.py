@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 # 这个文件只放“前后端通信合同”，不要放业务逻辑。
 # 后端 FastAPI、前端 TypeScript、LangGraph 返回值都围绕这些结构传输。
 
+ModelProtocol = Literal["auto", "responses", "chat_completions"]
+ReasoningEffort = Literal["inherit", "minimal", "low", "medium", "high", "max"]
+
+
 class ModelConfig(BaseModel):
     """模型配置。字段名保持短小，便于前端和 json 文件共同使用。"""
 
@@ -17,7 +21,7 @@ class ModelConfig(BaseModel):
     # OpenAI-compatible 服务的基础地址，LlmClient 会自动拼接 chat completions 路径。
     base_url: str = Field(min_length=8, max_length=500)
     # 模型 API key，当前项目按需求明文保存到 memory/config/models.json。
-    api_key: str = Field(min_length=1, max_length=1000)
+    api_key: str = Field(default="", max_length=1000)
     # 供应商实际要求的模型名，例如 LongCat-2.0。
     model: str = Field(min_length=1, max_length=200)
     # 模型上下文窗口大小，MemoryStore 会用它判断会话记忆是否需要压缩。
@@ -26,10 +30,43 @@ class ModelConfig(BaseModel):
     enabled: bool = True
     # 单次 HTTP 请求超时时间，避免模型接口长时间无响应导致后端卡死。
     timeout: int = Field(default=120, ge=5, le=1800)
+    # protocol 决定优先使用 Responses 还是 Chat Completions；auto 会先探测并缓存。
+    protocol: ModelProtocol = "auto"
+    # capabilities 用于前端和路由器判断模型是否支持视觉、原生工具和推理。
+    capabilities: list[Literal["text", "vision", "tools", "reasoning"]] = Field(
+        default_factory=lambda: ["text", "vision", "tools", "reasoning"]
+    )
+    # efforts 是该模型允许用户选择的思考等级。
+    efforts: list[ReasoningEffort] = Field(
+        default_factory=lambda: ["minimal", "low", "medium", "high", "max"]
+    )
+    # default_effort 是没有 Agent 或单次请求覆盖时使用的等级。
+    default_effort: ReasoningEffort = "high"
+    # max_output_tokens 为各 Agent 的输出预算提供模型级上限。
+    max_output_tokens: int = Field(default=16_384, ge=256, le=262_144)
+
+
+class ModelPublic(BaseModel):
+    """可安全返回给浏览器的模型配置，不包含真实密钥。"""
+
+    id: str
+    name: str
+    base_url: str
+    model: str
+    ctx: int
+    enabled: bool
+    timeout: int
+    protocol: ModelProtocol
+    capabilities: list[str]
+    efforts: list[ReasoningEffort]
+    default_effort: ReasoningEffort
+    max_output_tokens: int
+    has_key: bool
+    key_hint: str = ""
 
 
 # 系统内置智能体名称；如果新增智能体，要同步修改这里、AgentModelMap、前端 agents 数组和 AgentGraph。
-AgentName = Literal["manager", "planner", "repo", "coder", "verifier", "doc"]
+AgentName = Literal["manager", "planner", "coder", "verifier", "answer", "doc", "compact"]
 
 
 class AgentModelMap(BaseModel):
@@ -39,14 +76,35 @@ class AgentModelMap(BaseModel):
     manager: str = "longcat"
     # Plan 生成智能体使用的模型 id，负责需求澄清和计划生成。
     planner: str = "longcat"
-    # 仓库读取智能体使用的模型 id；当前 repo 节点主要是规则读取，保留映射便于后续扩展。
-    repo: str = "longcat"
     # Coding 智能体使用的模型 id，负责 ReAct 写代码。
     coder: str = "longcat"
     # 验证测试智能体使用的模型 id；当前 verifier 主要规则执行，保留映射便于后续扩展。
     verifier: str = "longcat"
+    # 普通问答智能体使用的模型 id。
+    answer: str = "longcat"
     # 文档生成智能体使用的模型 id，负责生成 README 或 docs 文档。
     doc: str = "longcat"
+    # 隐藏的上下文压缩智能体使用的模型 id。
+    compact: str = "longcat"
+
+
+class AgentProfile(BaseModel):
+    """一个模型型 Agent 的运行配置。"""
+
+    model_id: str = ""
+    effort: ReasoningEffort = "inherit"
+
+
+class AgentProfileMap(BaseModel):
+    """所有模型型 Agent 的模型与思考等级设置。"""
+
+    manager: AgentProfile = Field(default_factory=AgentProfile)
+    planner: AgentProfile = Field(default_factory=AgentProfile)
+    coder: AgentProfile = Field(default_factory=AgentProfile)
+    verifier: AgentProfile = Field(default_factory=AgentProfile)
+    answer: AgentProfile = Field(default_factory=AgentProfile)
+    doc: AgentProfile = Field(default_factory=AgentProfile)
+    compact: AgentProfile = Field(default_factory=AgentProfile)
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +126,47 @@ class ChatRequest(BaseModel):
     mcps: list[str] = Field(default_factory=list, max_length=20)
     # 是否让 Coder 和 Verifier 在本轮共享 Docker 容器；API 默认保留旧的原生行为。
     container_shell: bool = False
+    # attachments 是通过会话文件接口上传后的附件 id，不接受客户端文件路径。
+    attachments: list[str] = Field(default_factory=list, max_length=8)
+    # effort 临时覆盖本轮所有模型型 Agent 的思考等级。
+    effort: ReasoningEffort | None = None
+
+
+class AttachmentInfo(BaseModel):
+    """上传后返回给前端的安全附件元数据。"""
+
+    id: str
+    name: str
+    mime: str
+    size: int
+    url: str
+
+
+class TaskEnvelope(BaseModel):
+    """父 Agent 派发给子 Agent 的最小任务合同。"""
+
+    id: str
+    parent_id: str | None = None
+    sender: str
+    receiver: str
+    goal: str
+    input_refs: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    acceptance: list[str] = Field(default_factory=list)
+    budget: dict[str, int] = Field(default_factory=dict)
+
+
+class TaskOutcome(BaseModel):
+    """子 Agent 返回给父 Agent 的结果合同。"""
+
+    task_id: str
+    status: Literal["ok", "failed", "needs_clarification"]
+    summary: str
+    facts: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+    question: str | None = None
+    error: str | None = None
 
 
 class GuidanceRequest(BaseModel):
@@ -307,6 +406,8 @@ class ContextPackage(BaseModel):
     guidance: list[str] = Field(default_factory=list)
     # 用户本轮手动选择的 Skill 内容；未选择时为空，不会自动加载全部 Skill。
     skills: list[SkillContext] = Field(default_factory=list)
+    # attachments 只保存附件 id、名称、类型和大小，不保存本地路径或正文。
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TaskResult(BaseModel):

@@ -30,6 +30,10 @@ class AgentState(TypedDict, total=False):
     executing_plan: bool
     # 临时覆盖模型 id；为空时按每个智能体自己的模型映射选择。
     model_id: str | None
+    # 本轮临时覆盖所有模型型 Agent 的思考等级。
+    effort: str | None
+    # attachments 是经过后端校验的会话图片引用，不包含 base64。
+    attachments: list[dict[str, Any]]
     # resuming 表示开始本轮前检测到上一轮异常中断。
     resuming: bool
     # skills 是用户本轮手动选择并由后端安全读取的 Skill 正文。

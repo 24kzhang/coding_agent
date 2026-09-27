@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from api.schema import ModelConfig
-from llm.client import LlmClient, LlmError
+from llm.client import LlmBalanceError, LlmClient, LlmError
 from llm.store import ModelStore
 
 
@@ -51,6 +52,34 @@ def test_model_store_fallbacks_skip_disabled_and_keep_config_order(tmp_path) -> 
     fallbacks = ModelStore(path).fallbacks("missing")
 
     assert [model.id for model in fallbacks] == ["longcat", "qwen"]
+
+
+def test_model_store_public_view_and_private_copy(tmp_path) -> None:
+    """浏览器接口不能拿到密钥，受控复制必须设置权限并加入忽略。"""
+
+    config = tmp_path / "models.json"
+    store = ModelStore(config)
+    store.upsert(
+        ModelConfig(
+            id="DeepSeek-V4.1-Flash",
+            name="DeepSeek",
+            base_url="https://api.deepseek.com",
+            api_key="sk-private-value",
+            model="deepseek-flash",
+            protocol="responses",
+        )
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    destination = store.copy_private("DeepSeek-V4.1-Flash", str(project))
+    public = store.public()[0].model_dump()
+
+    assert "api_key" not in public
+    assert public["has_key"] is True
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert destination.parent.stat().st_mode & 0o777 == 0o700
+    assert ".local/" in (project / ".gitignore").read_text(encoding="utf-8")
+    assert json.loads(destination.read_text(encoding="utf-8"))["api_key"] == "sk-private-value"
 
 
 def test_llm_url_candidates_for_plain_openai_base() -> None:
@@ -180,6 +209,160 @@ def test_longcat_chat_streams_and_joins_sse_content(monkeypatch) -> None:
 
 def test_llm_token_estimate_handles_chinese() -> None:
     assert LlmClient.estimate_tokens("你好，世界") >= 3
+
+
+def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_path) -> None:
+    """Responses 适配器应映射思考等级与图片，并只返回最终文本。"""
+
+    image = tmp_path / "tiny.png"
+    image.write_bytes(
+        __import__("base64").b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nS4AAAAASUVORK5CYII="
+        )
+    )
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, **kwargs):
+            captured.update({"url": url, "json": kwargs["json"]})
+            return httpx.Response(
+                200,
+                json={
+                    "output_text": "看到了",
+                    "usage": {"input_tokens": 12, "output_tokens": 3},
+                },
+            )
+
+    cfg = ModelConfig(
+        id="deepseek",
+        name="视觉模型",
+        base_url="https://api.deepseek.com",
+        api_key="k",
+        model="deepseek-flash",
+        protocol="responses",
+    )
+    monkeypatch.setattr("llm.client.httpx.Client", FakeClient)
+    client = LlmClient(cfg)
+    text = client.chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "看图"},
+                    {"type": "input_image", "path": str(image), "mime": "image/png"},
+                ],
+            }
+        ],
+        effort="max",
+    )
+
+    assert text == "看到了"
+    assert captured["url"].endswith("/v1/responses")
+    assert captured["json"]["reasoning"] == {"effort": "max"}
+    assert captured["json"]["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
+    assert client.last_usage.total == 15
+
+
+def test_native_responses_tools_are_converted_to_actions(monkeypatch) -> None:
+    """原生 function_call 必须转换为内部动作，执行策略字段不得发送给供应商。"""
+
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, **kwargs):
+            captured.update(kwargs["json"])
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "name": "write_file",
+                            "call_id": "c1",
+                            "arguments": '{"path":"app.py","content":"print(1)\\n"}',
+                        }
+                    ],
+                    "usage": {"input_tokens": 2, "output_tokens": 3},
+                },
+            )
+
+    cfg = ModelConfig(
+        id="deepseek",
+        name="工具模型",
+        base_url="https://api.deepseek.com",
+        api_key="k",
+        model="deepseek-flash",
+        protocol="responses",
+    )
+    monkeypatch.setattr("llm.client.httpx.Client", FakeClient)
+    result = LlmClient(cfg).chat_tools(
+        [{"role": "user", "content": "创建文件"}],
+        [
+            {
+                "name": "write_file",
+                "description": "写文件",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                "risk": "medium",
+                "permission": "allow",
+            }
+        ],
+    )
+
+    assert result["actions"] == [{"tool": "write_file", "path": "app.py", "content": "print(1)\n"}]
+    assert "risk" not in captured["tools"][0]
+    assert "permission" not in captured["tools"][0]
+
+
+def test_balance_error_stops_and_redacts_key(monkeypatch) -> None:
+    """明确余额不足时应抛出专用错误，错误中不能出现密钥。"""
+
+    secret = "sk-super-secret-key"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, **kwargs):
+            return httpx.Response(402, text=f"余额不足，key={secret}")
+
+    cfg = ModelConfig(
+        id="deepseek",
+        name="测试",
+        base_url="https://api.deepseek.com",
+        api_key=secret,
+        model="deepseek-flash",
+        protocol="responses",
+    )
+    monkeypatch.setattr("llm.client.httpx.Client", FakeClient)
+
+    with pytest.raises(LlmBalanceError) as caught:
+        LlmClient(cfg).chat([{"role": "user", "content": "测试"}])
+
+    assert secret not in str(caught.value)
 
 
 def test_llm_extracts_balanced_json_with_braces_inside_string() -> None:

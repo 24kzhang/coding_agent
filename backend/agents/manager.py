@@ -139,6 +139,10 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
         recent=graph.memory.conversation_context(workdir, session_id, limit=12, exclude_latest_user=True),
         # skills 已由 HTTP 层从本 Agent 的 skills 目录安全读取；下游只得到用户本轮选择项。
         skills=list(state.get("skills") or []),
+        attachments=[
+            {key: item[key] for key in ("id", "name", "mime", "size") if key in item}
+            for item in state.get("attachments") or []
+        ],
     )
     if ctx.skills or state.get("mcp_servers"):
         # selected_names 只记录能力 id，不把 Skill 正文或 MCP 敏感配置写入事件流。

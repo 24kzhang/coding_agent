@@ -1,5 +1,7 @@
 // AgentName 必须与 api/schema.py 中的 AgentName 保持一致。
-export type AgentName = "manager" | "planner" | "repo" | "coder" | "verifier" | "doc";
+export type AgentName = "manager" | "planner" | "coder" | "verifier" | "answer" | "doc" | "compact";
+export type ModelProtocol = "auto" | "responses" | "chat_completions";
+export type ReasoningEffort = "inherit" | "minimal" | "low" | "medium" | "high" | "max";
 
 export interface ModelConfig {
   // 模型本地唯一 id。
@@ -9,7 +11,7 @@ export interface ModelConfig {
   // OpenAI-compatible 服务基础地址。
   base_url: string;
   // 模型 API key。
-  api_key: string;
+  api_key?: string;
   // 供应商模型名。
   model: string;
   // 上下文窗口，单位 token。
@@ -18,6 +20,13 @@ export interface ModelConfig {
   enabled: boolean;
   // 请求超时时间，单位秒。
   timeout: number;
+  protocol: ModelProtocol;
+  capabilities: Array<"text" | "vision" | "tools" | "reasoning">;
+  efforts: ReasoningEffort[];
+  default_effort: ReasoningEffort;
+  max_output_tokens: number;
+  has_key?: boolean;
+  key_hint?: string;
 }
 
 export interface AgentModelMap {
@@ -25,15 +34,24 @@ export interface AgentModelMap {
   manager: string;
   // Plan 智能体模型 id。
   planner: string;
-  // 仓库读取智能体模型 id。
-  repo: string;
   // Coding 智能体模型 id。
   coder: string;
   // 验证测试智能体模型 id。
   verifier: string;
+  // 普通问答智能体模型 id。
+  answer: string;
   // 文档智能体模型 id。
   doc: string;
+  // 隐藏的上下文压缩智能体模型 id。
+  compact: string;
 }
+
+export interface AgentProfile {
+  model_id: string;
+  effort: ReasoningEffort;
+}
+
+export type AgentProfileMap = Record<AgentName, AgentProfile>;
 
 export interface SessionInfo {
   // 会话 id。
@@ -136,6 +154,18 @@ export interface ChatRequest {
   mcps: string[];
   // 是否让 Coder 和 Verifier 在本轮共享 Docker 容器。
   container_shell: boolean;
+  // 已上传到本会话的附件 id。
+  attachments: string[];
+  // 本轮临时思考等级。
+  effort?: ReasoningEffort | null;
+}
+
+export interface AttachmentInfo {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  url: string;
 }
 
 export interface GuidanceRequest {

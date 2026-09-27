@@ -32,6 +32,8 @@ def repo(graph: AgentGraph, state: AgentState) -> AgentState:
         budget -= len(chunk)
     # stack 是根据文件名粗略识别的技术栈。
     stack = graph._detect_stack(files)
+    # symbol_map 使用语法树或语言级声明提取符号，并按任务关联度受预算选取。
+    symbol_map = graph.repo_map.build(fs, files, graph._effective_text(state))
     # repo_context 是传给下游节点的仓库摘要。
     repo_context = {
         "files": files,
@@ -39,6 +41,7 @@ def repo(graph: AgentGraph, state: AgentState) -> AgentState:
         "stack": stack,
         "empty": len(files) == 0,
         "selected": candidates,
+        "symbol_map": symbol_map,
     }
     graph._emit(state, "repo", "summary", f"识别到 {len(files)} 个文件，技术栈：{', '.join(stack) or '空项目'}")
     graph.memory.append(state["workdir"], state["session_id"], "repo", "fs", "summary", f"文件数：{len(files)}，技术栈：{stack}")

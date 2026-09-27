@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import PLANNER_PROMPT
 from backend.agents.types import AgentState
-from llm import LlmClient, LlmError
+from llm import LlmBalanceError, LlmClient, LlmError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -331,9 +331,19 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     if state.get("repo"):
         repo_text = json.dumps(state["repo"], ensure_ascii=False)
         context_text += "\n\n仓库事实摘要（字段、路径和 schema 以此为准）：\n" + graph._trim(repo_text, 24_000)
+    user_content: list[dict[str, str]] = [{"type": "input_text", "text": context_text}]
+    user_content.extend(
+        {
+            "type": "input_image",
+            "path": str(item["path"]),
+            "mime": str(item["mime"]),
+        }
+        for item in state.get("attachments") or []
+        if item.get("path") and item.get("mime")
+    )
     messages = [
         {"role": "system", "content": PLANNER_PROMPT},
-        {"role": "user", "content": context_text},
+        {"role": "user", "content": user_content},
     ]
     data = None
     last_error: LlmError | None = None
@@ -342,6 +352,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             # data 应该是模型返回的 JSON，status 为 questions 或 plan。
             data = graph._model_json(state, "planner", client, messages)
             break
+        except LlmBalanceError:
+            raise
         except LlmError as exc:
             last_error = exc
             error_text = str(exc)
@@ -425,6 +437,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                         },
                     ]
                 )
+            except LlmBalanceError:
+                raise
             except LlmError as exc:
                 graph._emit(state, "planner", "error", f"自动采用推荐选项生成计划失败：{str(exc)[:120]}")
     if data.get("status") == "plan":
@@ -468,6 +482,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                     client,
                     repair_messages,
                 )
+            except LlmBalanceError:
+                raise
             except LlmError as exc:
                 next_cfg = next((cfg for cfg in fallback_configs if cfg.id not in repair_models), None)
                 if next_cfg is None:

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import ANSWER_PROMPT, MCP_ANSWER_PROMPT
 from backend.agents.types import AgentState
-from llm import LlmClient, LlmError
+from llm import LlmBalanceError, LlmClient, LlmError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -64,6 +64,8 @@ def answer(graph: AgentGraph, state: AgentState) -> AgentState:
             else:
                 data = client.chat_json(messages, plain_text="longcat" in model_name)
             graph._add_tokens(state, client.last_usage.total)
+        except LlmBalanceError:
+            raise
         except LlmError as exc:
             final_text = f"已选择的 MCP 工具发现完成，但答疑模型无法继续处理：{exc}"
             break
@@ -130,6 +132,8 @@ def _plain_answer(graph: AgentGraph, state: AgentState, client: object) -> str:
         # text 是模型生成的最终回答。
         text = client.chat(messages, temperature=0.2).strip()
         graph._add_tokens(state, client.last_usage.total)
+    except LlmBalanceError:
+        raise
     except LlmError as exc:
         # 模型失败时仍返回明确错误，不进入 Coding。
         text = f"我现在无法完成解释，因为模型调用失败：{exc}"
@@ -179,5 +183,7 @@ def _synthesize_mcp_answer(
         text = client.chat(messages, temperature=0.2, max_tokens=3000)
         graph._add_tokens(state, client.last_usage.total)
         return _answer_summary(text, "MCP 查询已完成，但模型没有返回总结。")
+    except LlmBalanceError:
+        raise
     except LlmError as exc:
         return f"MCP 工具调用成功，但最终总结模型失败：{exc}"

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
 from dataclasses import dataclass
 from html import unescape
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +16,10 @@ from api.schema import ModelConfig
 
 class LlmError(RuntimeError):
     """模型调用失败时抛出的统一异常。"""
+
+
+class LlmBalanceError(LlmError):
+    """账户余额或额度明确不足，调用方必须立即停止。"""
 
 
 @dataclass
@@ -47,6 +53,8 @@ class LlmClient:
         self.cfg = cfg
         # last_usage 保存最近一次模型调用的 token 用量，AgentGraph 会把它累加到事件流。
         self.last_usage = LlmUsage()
+        # default_effort 可由 AgentGraph 按 Agent 配置覆盖。
+        self.default_effort = cfg.default_effort
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -86,22 +94,246 @@ class LlmClient:
             candidates.insert(0, working_url)
         return candidates
 
+    def _response_urls(self) -> list[str]:
+        """生成 Responses API 候选地址。"""
+
+        base = self.cfg.base_url.rstrip("/")
+        if base.endswith("/responses"):
+            return [base]
+        urls = [f"{base}/responses"] if base.endswith("/v1") else [
+            f"{base}/v1/responses",
+            f"{base}/responses",
+        ]
+        key = f"responses:{base}"
+        working = self.working_urls.get(key)
+        if working in urls:
+            urls.remove(working)
+            urls.insert(0, working)
+        return list(dict.fromkeys(urls))
+
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.2,
         *,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        effort: str | None = None,
+    ) -> str:
+        """按模型配置选择 Responses 或 Chat Completions。"""
+
+        protocol = self.cfg.protocol
+        if protocol == "auto":
+            model = self.cfg.model.lower()
+            protocol = "responses" if "deepseek" in model or "qwen3.8" in model else "chat_completions"
+        if protocol == "responses":
+            try:
+                return self._responses(
+                    messages,
+                    temperature=temperature,
+                    json_mode=json_mode,
+                    max_tokens=max_tokens,
+                    effort=effort,
+                )
+            except LlmError as exc:
+                # auto 只在接口不存在且尚未执行任何工具时回退，认证、余额和模型错误不重放。
+                if self.cfg.protocol != "auto" or not any(
+                    marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
+                ):
+                    raise
+        return self._chat_completions(
+            messages,
+            temperature=temperature,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+            effort=effort,
+        )
+
+    def chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        """使用供应商原生函数工具，并转换为 Agent 内部动作格式。"""
+
+        protocol = self.cfg.protocol
+        if protocol == "auto":
+            model = self.cfg.model.lower()
+            protocol = "responses" if "deepseek" in model or "qwen3.8" in model else "chat_completions"
+        if protocol == "responses":
+            try:
+                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort)
+            except LlmError as exc:
+                if self.cfg.protocol != "auto" or not any(
+                    marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
+                ):
+                    raise
+        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort)
+
+    @staticmethod
+    def _public_tools(tools: list[dict[str, Any]], *, responses: bool) -> list[dict[str, Any]]:
+        """只把名称、说明和 JSON Schema 发送给供应商。"""
+
+        result: list[dict[str, Any]] = []
+        for item in tools:
+            function = {
+                "name": item["name"],
+                "description": item.get("description", ""),
+                "parameters": item.get("parameters") or {"type": "object", "properties": {}},
+            }
+            result.append({"type": "function", **function} if responses else {"type": "function", "function": function})
+        return result
+
+    def _responses_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None,
+        effort: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.cfg.model,
+            "input": self._normalize_messages(messages, responses=True),
+            "tools": self._public_tools(tools, responses=True),
+            "tool_choice": "auto",
+        }
+        if max_tokens is not None:
+            payload["max_output_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        chosen_effort = self._effort(effort)
+        if chosen_effort:
+            payload["reasoning"] = {"effort": chosen_effort}
+        headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
+        last_error = ""
+        with httpx.Client(timeout=self.cfg.timeout) as client:
+            for url in self._response_urls():
+                try:
+                    response = client.post(url, headers=headers, json=payload)
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    last_error = f"{url} 调用失败：{exc}"
+                    continue
+                if response.status_code in {404, 405}:
+                    last_error = f"{url} 返回 {response.status_code}"
+                    continue
+                if response.status_code >= 400:
+                    self._raise_http_error(response.status_code, response.text)
+                try:
+                    data = response.json()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise LlmError("Responses API 没有返回合法 JSON") from exc
+                self.last_usage = self._responses_usage(data, messages)
+                actions: list[dict[str, Any]] = []
+                summary_parts: list[str] = []
+                for item in data.get("output") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "function_call":
+                        try:
+                            arguments = json.loads(str(item.get("arguments") or "{}"))
+                        except json.JSONDecodeError as exc:
+                            raise LlmError("原生工具调用参数不是合法 JSON") from exc
+                        actions.append({"tool": str(item.get("name") or ""), **arguments})
+                    elif item.get("type") == "message":
+                        summary_parts.extend(
+                            str(part.get("text") or "")
+                            for part in item.get("content") or []
+                            if isinstance(part, dict) and part.get("type") in {"output_text", "text"}
+                        )
+                return self._tool_result(actions, "".join(summary_parts))
+        raise LlmError(last_error or "Responses API 接口不存在")
+
+    def _chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None,
+        effort: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.cfg.model,
+            "messages": self._normalize_messages(messages, responses=False),
+            "tools": self._public_tools(tools, responses=False),
+            "tool_choice": "auto",
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        chosen_effort = self._effort(effort)
+        if chosen_effort:
+            payload["reasoning_effort"] = chosen_effort
+            payload["thinking"] = {"type": "disabled" if chosen_effort == "none" else "enabled"}
+        headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
+        last_error = ""
+        with httpx.Client(timeout=self.cfg.timeout) as client:
+            for url in self._urls():
+                try:
+                    response = client.post(url, headers=headers, json=payload)
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    last_error = f"{url} 调用失败：{exc}"
+                    continue
+                if response.status_code in {404, 405}:
+                    last_error = f"{url} 返回 {response.status_code}"
+                    continue
+                if response.status_code >= 400:
+                    self._raise_http_error(response.status_code, response.text)
+                try:
+                    data = response.json()
+                    message = data["choices"][0]["message"]
+                except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise LlmError("Chat Completions 没有返回合法工具响应") from exc
+                self.last_usage = self._usage(data, messages)
+                actions: list[dict[str, Any]] = []
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    try:
+                        arguments = json.loads(str(function.get("arguments") or "{}"))
+                    except json.JSONDecodeError as exc:
+                        raise LlmError("原生工具调用参数不是合法 JSON") from exc
+                    actions.append({"tool": str(function.get("name") or ""), **arguments})
+                return self._tool_result(actions, self._content_text(message.get("content") or ""))
+        raise LlmError(last_error or "没有可用的模型接口地址")
+
+    @staticmethod
+    def _tool_result(actions: list[dict[str, Any]], summary: str) -> dict[str, Any]:
+        finish = next((item for item in actions if item.get("tool") == "finish"), None)
+        executable = [item for item in actions if item.get("tool") != "finish"]
+        if finish and not executable:
+            return {
+                "thought": "",
+                "actions": [],
+                "done": True,
+                "summary": str(finish.get("summary") or summary or "任务已完成。"),
+            }
+        return {
+            "thought": summary if executable else "",
+            "actions": executable,
+            "done": not executable and bool(summary),
+            "summary": summary,
+        }
+
+    def _chat_completions(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+        *,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        effort: str | None = None,
     ) -> str:
         """调用模型并返回文本内容。"""
 
         # payload 是 OpenAI-compatible chat completions 请求体。
         payload = {
             "model": self.cfg.model,
-            "messages": messages,
+            "messages": self._normalize_messages(messages, responses=False),
             "temperature": temperature,
         }
+        chosen_effort = self._effort(effort)
+        if chosen_effort:
+            payload["reasoning_effort"] = chosen_effort
         # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
         # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
         if max_tokens is not None:
@@ -145,7 +377,7 @@ class LlmClient:
                                     break
                                 if status >= 400:
                                     body = resp.read().decode("utf-8", errors="replace")
-                                    raise LlmError(f"模型接口错误 {status}: {body[:500]}")
+                                    self._raise_http_error(status, body)
                                 self.working_urls[self.cfg.base_url.rstrip("/")] = url
                                 return self._stream_text(resp, messages)
 
@@ -162,7 +394,7 @@ class LlmClient:
                             last_error = f"{url} 不支持 JSON 输出模式"
                             break
                         if resp.status_code >= 400:
-                            raise LlmError(f"模型接口错误 {resp.status_code}: {resp.text[:500]}")
+                            self._raise_http_error(resp.status_code, resp.text)
                         self.working_urls[self.cfg.base_url.rstrip("/")] = url
                         data = resp.json()
                         self.last_usage = self._usage(data, messages)
@@ -184,6 +416,169 @@ class LlmClient:
             raise LlmError("模型接口不支持 JSON 输出模式")
         raise LlmError(last_error or "没有可用的模型接口地址")
 
+    def _responses(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        json_mode: bool,
+        max_tokens: int | None,
+        effort: str | None,
+    ) -> str:
+        """调用 OpenAI-compatible Responses API 并提取文本。"""
+
+        payload: dict[str, Any] = {
+            "model": self.cfg.model,
+            "input": self._normalize_messages(messages, responses=True),
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            payload["max_output_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        chosen_effort = self._effort(effort)
+        if chosen_effort:
+            payload["reasoning"] = {"effort": chosen_effort}
+        if json_mode:
+            payload["text"] = {"format": {"type": "json_object"}}
+        headers = {
+            "Authorization": f"Bearer {self.cfg.api_key}",
+            "Content-Type": "application/json",
+        }
+        last_error = ""
+        with httpx.Client(timeout=self.cfg.timeout) as client:
+            for url in self._response_urls():
+                try:
+                    response = client.post(url, headers=headers, json=payload)
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    last_error = f"{url} 调用失败：{exc}"
+                    continue
+                except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+                    raise LlmError(f"{url} 模型响应超时：{exc}") from exc
+                if response.status_code in {404, 405}:
+                    last_error = f"{url} 返回 {response.status_code}"
+                    continue
+                if response.status_code >= 400:
+                    self._raise_http_error(response.status_code, response.text)
+                try:
+                    data = response.json()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise LlmError("Responses API 没有返回合法 JSON") from exc
+                self.working_urls[f"responses:{self.cfg.base_url.rstrip('/')}"] = url
+                self.last_usage = self._responses_usage(data, messages)
+                text = data.get("output_text")
+                if isinstance(text, str) and text:
+                    return text
+                parts: list[str] = []
+                for item in data.get("output") or []:
+                    if not isinstance(item, dict) or item.get("type") != "message":
+                        continue
+                    for part in item.get("content") or []:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            parts.append(part["text"])
+                if parts:
+                    return "".join(parts)
+                raise LlmError("Responses API 响应中没有可用文本")
+        raise LlmError(last_error or "Responses API 接口不存在")
+
+    def _normalize_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        responses: bool,
+    ) -> list[dict[str, Any]]:
+        """把文本和本地图片引用转换为供应商内容块。"""
+
+        normalized: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            if isinstance(content, str):
+                normalized.append({"role": role, "content": content})
+                continue
+            if not isinstance(content, list):
+                normalized.append({"role": role, "content": str(content)})
+                continue
+            parts: list[dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                kind = str(part.get("type") or "")
+                if kind in {"text", "input_text"}:
+                    text = str(part.get("text") or "")
+                    parts.append(
+                        {"type": "input_text" if responses else "text", "text": text}
+                    )
+                elif kind in {"image", "input_image"}:
+                    url = str(part.get("image_url") or "")
+                    path = str(part.get("path") or "")
+                    if path:
+                        raw = Path(path).read_bytes()
+                        mime = str(part.get("mime") or "image/png")
+                        url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+                    if not url:
+                        continue
+                    parts.append(
+                        {"type": "input_image", "image_url": url}
+                        if responses
+                        else {"type": "image_url", "image_url": {"url": url}}
+                    )
+            normalized.append({"role": role, "content": parts})
+        return normalized
+
+    def _effort(self, value: str | None) -> str:
+        chosen = value or self.default_effort
+        if chosen == "inherit":
+            chosen = self.cfg.default_effort
+        return chosen if chosen in self.cfg.efforts else self.cfg.default_effort
+
+    def _raise_http_error(self, status: int, body: str) -> None:
+        """分类供应商错误并保证密钥不会通过错误正文进入日志。"""
+
+        safe = body[:500]
+        if self.cfg.api_key:
+            safe = safe.replace(self.cfg.api_key, "[密钥已脱敏]")
+        lower = safe.lower()
+        balance_markers = (
+            "insufficient balance",
+            "insufficient quota",
+            "balance_not_enough",
+            "余额不足",
+            "额度不足",
+            "账户余额",
+        )
+        if status == 402 or any(marker in lower for marker in balance_markers):
+            raise LlmBalanceError("模型账户余额不足，已停止后续调用并保留现场")
+        raise LlmError(f"模型接口错误 {status}: {safe}")
+
+    def _responses_usage(
+        self,
+        data: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> LlmUsage:
+        usage = data.get("usage") or {}
+        prompt = int(usage.get("input_tokens") or 0)
+        completion = int(usage.get("output_tokens") or 0)
+        if prompt or completion:
+            return LlmUsage(prompt=prompt, completion=completion)
+        return LlmUsage(
+            prompt=self.estimate_tokens(self._messages_text(messages)),
+            completion=self.estimate_tokens(str(data.get("output_text") or data.get("output") or "")),
+        )
+
+    @staticmethod
+    def _messages_text(messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                parts.extend(
+                    str(item.get("text") or "")
+                    for item in content
+                    if isinstance(item, dict)
+                )
+        return "\n".join(parts)
+
     @staticmethod
     def _sleep_retry(value: str | None) -> None:
         """按服务端 Retry-After 做一次有上限的短退避。"""
@@ -194,7 +589,7 @@ class LlmClient:
             retry_after = 0.6
         time.sleep(max(retry_after, 0.1))
 
-    def _stream_text(self, response: httpx.Response, messages: list[dict[str, str]]) -> str:
+    def _stream_text(self, response: httpx.Response, messages: list[dict[str, Any]]) -> str:
         """读取 OpenAI-compatible SSE 分片并拼成普通文本。"""
 
         # 少数网关会忽略 stream=true 并返回普通 JSON，仍按标准响应兼容处理。
@@ -404,7 +799,7 @@ class LlmClient:
         # ok 用宽松判断，兼容模型回复“连接成功”“连通成功”等中文变体。
         return {"ok": "连通" in text or "成功" in text, "reply": text, "tokens": self.last_usage.total}
 
-    def _usage(self, data: dict[str, Any], messages: list[dict[str, str]]) -> LlmUsage:
+    def _usage(self, data: dict[str, Any], messages: list[dict[str, Any]]) -> LlmUsage:
         """从模型响应中读取 usage；没有 usage 时用文本长度估算。"""
 
         # usage 是 OpenAI-compatible 响应里的标准 token 用量字段。
@@ -416,7 +811,7 @@ class LlmClient:
         if prompt or completion:
             return LlmUsage(prompt=prompt, completion=completion)
         # prompt_text 是所有输入消息拼接后的文本，用于估算输入 token。
-        prompt_text = "\n".join(msg.get("content", "") for msg in messages)
+        prompt_text = self._messages_text(messages)
         # completion_text 是 choices 的 JSON 字符串，用于估算输出 token。
         completion_text = json.dumps(data.get("choices", []), ensure_ascii=False)
         return LlmUsage(

@@ -33,6 +33,21 @@ def test_run_registry_queues_guidance_and_blocks_parallel_session(tmp_path) -> N
         registry.submit_guidance(active.id, "已经太晚")
 
 
+def test_run_registry_replays_completed_events_from_cursor(tmp_path) -> None:
+    """断线恢复只重放游标之后的事件，完成运行仍可读取。"""
+
+    registry = RunRegistry()
+    active = registry.start("s1", str(tmp_path), queue.Queue())
+    active.publish({"type": "event", "data": {"msg": "第一条"}})
+    active.publish({"type": "result", "data": {"ok": True}})
+    active.publish(None)
+    registry.finish(active.id)
+
+    assert list(registry.get(active.id).replay(1)) == [
+        {"type": "result", "data": {"ok": True}, "cursor": 2}
+    ]
+
+
 def test_guidance_endpoint_persists_message_and_queues_it(tmp_path, monkeypatch) -> None:
     registry = RunRegistry()
     memory = MemoryStore(tmp_path / "mem")

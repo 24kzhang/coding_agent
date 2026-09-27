@@ -39,6 +39,9 @@ class ActiveRun:
     workdir: str
     event_queue: queue.Queue[dict | None]
     guidance_queue: queue.Queue[GuidanceMessage] = field(default_factory=queue.Queue)
+    events: list[dict | None] = field(default_factory=list)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    finished: bool = False
 
     def drain_guidance(self) -> list[dict[str, str]]:
         """非阻塞取出当前已经到达的全部指导，并保持发送顺序。"""
@@ -50,6 +53,42 @@ class ActiveRun:
             except queue.Empty:
                 return messages
 
+    def publish(self, item: dict | None) -> None:
+        """保存一条可重放事件，并唤醒初始流和恢复流。"""
+
+        with self.condition:
+            self.events.append(item)
+            if item is None:
+                self.finished = True
+            self.condition.notify_all()
+
+    def replay(self, cursor: int = 0):
+        """从指定事件序号重放，运行中每 15 秒产生一次心跳。"""
+
+        index = max(cursor, 0)
+        while True:
+            heartbeat: dict | None = None
+            with self.condition:
+                if index >= len(self.events):
+                    if self.finished:
+                        return
+                    self.condition.wait(timeout=15)
+                    if index >= len(self.events):
+                        heartbeat = {"type": "heartbeat", "cursor": index}
+                        item = None
+                    else:
+                        item = self.events[index]
+                        index += 1
+                else:
+                    item = self.events[index]
+                    index += 1
+            if heartbeat is not None:
+                yield heartbeat
+                continue
+            if item is None:
+                return
+            yield {**item, "cursor": index}
+
 
 class RunRegistry:
     """线程安全地管理当前进程中的活动运行。"""
@@ -58,6 +97,7 @@ class RunRegistry:
         self.lock = threading.RLock()
         self.by_id: dict[str, ActiveRun] = {}
         self.by_session: dict[str, str] = {}
+        self.completed: dict[str, ActiveRun] = {}
 
     def start(
         self,
@@ -96,6 +136,15 @@ class RunRegistry:
             run.guidance_queue.put(message)
             return run, message
 
+    def get(self, run_id: str) -> ActiveRun:
+        """读取活动或最近完成的运行，供断线恢复重放。"""
+
+        with self.lock:
+            run = self.by_id.get(run_id) or self.completed.get(run_id)
+            if run is None:
+                raise RunNotFoundError("运行编号不存在或已超过恢复保留期")
+            return run
+
     def finish(self, run_id: str) -> None:
         """移除已结束运行，使后续指导明确返回过期状态。"""
 
@@ -103,3 +152,7 @@ class RunRegistry:
             run = self.by_id.pop(run_id, None)
             if run and self.by_session.get(run.session_id) == run_id:
                 self.by_session.pop(run.session_id, None)
+            if run and run.finished:
+                self.completed[run_id] = run
+                while len(self.completed) > 50:
+                    self.completed.pop(next(iter(self.completed)))

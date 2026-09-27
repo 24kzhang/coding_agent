@@ -302,7 +302,8 @@ def test_complex_project_allows_additional_repair_rounds(tmp_path) -> None:
         "tests": [{"cmd": "需求实现审查", "ok": False, "issues": ["缺少配置文件"]}],
     }
 
-    assert graph.route_after_verifier(state) == "coder"
+    # 验证失败先回到主管，由主管决定修复、重规划或请求澄清。
+    assert graph.route_after_verifier(state) == "manager"
 
     state["retry"] = 7
     assert graph.route_after_verifier(state) == "final"

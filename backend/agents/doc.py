@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from backend.agents.prompts import DOC_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
-from llm import LlmError
+from llm import LlmBalanceError, LlmError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -46,6 +46,8 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
                 },
             ]
         ).strip()
+    except LlmBalanceError:
+        raise
     except LlmError as exc:
         state = graph._apply_guidance(state, checkpoint="文档模型失败后")
         if int(state.get("guidance_revision", 0)) != planned_guidance_revision:

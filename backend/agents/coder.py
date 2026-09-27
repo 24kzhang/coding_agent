@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
-from backend.tools import FsTool, GitTool
-from llm import LlmClient, LlmError
+from backend.tools import FsTool, GitTool, tool_specs
+from llm import LlmBalanceError, LlmClient, LlmError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -392,6 +392,26 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "\n已进入收尾阶段：禁止仅为确认而读取文件。若实现已完成，必须返回 actions=[]、done=true；"
                 "若仍有缺口，只执行直接修复缺口的写入或测试命令。\n"
             )
+        user_text = (
+            f"当前是第 {step}/{max_steps} 步。当前模式：{'失败修复' if retry else '首次实现'}。\n"
+            + f"当前磁盘文件：{manifest}\n"
+            + f"已完成进度：{progress}\n"
+            + f"已读取且当前可直接修改的文件：{readable}\n"
+            + "必须根据失败清单和已有观察产生新进展；禁止重复扫描、重复创建已有文件或重新开始任务。\n"
+            + "最近工具观察是已经发生的权威事实；标记为成功的命令无需再次确认，不得声称没有看到结果。\n"
+            + ("当前是失败修复轮次：验证失败清单的优先级高于原始任务中的整体重写等实现方式，只精确修复清单中的问题。\n" if retry else "")
+            + "若目标文件出现在“已读取且当前可直接修改”列表，禁止再次 read_file；短改动直接 replace_file，长函数直接 replace_block。\n"
+            + "run_command 已经在项目工作目录执行，命令中禁止使用 cd，也不要添加工作目录前缀。\n"
+            + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
+            + finish_instruction
+            + task_brief
+            + "\n\n仓库摘要：\n"
+            + repo_brief
+            + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
+            + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
+            + "\n\n最近工具观察：\n"
+            + "\n".join(recent_observations)
+        )
         messages = [
             {
                 "role": "system",
@@ -401,29 +421,37 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             },
             {
                 "role": "user",
-                "content": f"当前是第 {step}/{max_steps} 步。当前模式：{'失败修复' if retry else '首次实现'}。\n"
-                + f"当前磁盘文件：{manifest}\n"
-                + f"已完成进度：{progress}\n"
-                + f"已读取且当前可直接修改的文件：{readable}\n"
-                + "必须根据失败清单和已有观察产生新进展；禁止重复扫描、重复创建已有文件或重新开始任务。\n"
-                + "最近工具观察是已经发生的权威事实；标记为成功的命令无需再次确认，不得声称没有看到结果。\n"
-                + ("当前是失败修复轮次：验证失败清单的优先级高于原始任务中的整体重写等实现方式，只精确修复清单中的问题。\n" if retry else "")
-                + "若目标文件出现在“已读取且当前可直接修改”列表，禁止再次 read_file；短改动直接 replace_file，长函数直接 replace_block。\n"
-                + "run_command 已经在项目工作目录执行，命令中禁止使用 cd，也不要添加工作目录前缀。\n"
-                + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
-                + finish_instruction
-                + task_brief
-                + "\n\n仓库摘要：\n"
-                + repo_brief
-                + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
-                + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
-                + "\n\n最近工具观察：\n"
-                + "\n".join(recent_observations),
+                "content": graph._multimodal_content(user_text, state),
             },
         ]
         try:
             # data 是模型返回的 ReAct JSON。
-            if "longcat" in model_name or empty_steps >= 2:
+            if (
+                isinstance(client, LlmClient)
+                and "tools" in getattr(client.cfg, "capabilities", [])
+                and "longcat" not in model_name
+            ):
+                native_specs = tool_specs()
+                native_specs.extend(
+                    {
+                        "name": str(item["action"]),
+                        "description": str(item.get("description") or "调用已授权 MCP 工具"),
+                        "parameters": item.get("input_schema") or {"type": "object", "properties": {}},
+                        "risk": "low" if item.get("shared") else "medium",
+                        "permission": "allow",
+                        "timeout": 60,
+                        "concurrency": "parallel" if item.get("shared") else "serial",
+                        "output_limit": 12_000,
+                        "mode": "read" if item.get("shared") else "write",
+                    }
+                    for item in mcp_tools
+                )
+                data = client.chat_tools(
+                    messages,
+                    native_specs,
+                    max_tokens=CODER_OUTPUT_TOKENS,
+                )
+            elif "longcat" in model_name or empty_steps >= 2:
                 # LongCat 的普通文本模式会稳定返回原生工具标签；直接使用该协议，避免先用
                 # response_format 连续得到空对象。其他模型只有连续空响应后才进入兼容模式。
                 if isinstance(client, LlmClient):
@@ -436,6 +464,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 else:
                     data = client.chat_json(messages)
             graph._add_tokens(state, client.last_usage.total)
+        except LlmBalanceError:
+            raise
         except LlmError as exc:
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = graph._trim(str(exc), 240)
@@ -548,7 +578,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # signature 用稳定 JSON 表示本次动作，相同参数和内容的动作不会重复执行。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             tool = str(action.get("tool") or "")
-            path = str(action.get("path") or "")
+            path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
             if signature in seen_actions and tool == "read_file" and path in read_paths:
                 duplicate_read_failures += 1
                 observation = {
@@ -634,7 +664,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if observation.get("ok"):
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
-                if tool in {"append_file", "assert_text_absent", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__"):
+                if tool in {"append_file", "assert_text_absent", "model_copy", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__"):
                     batch_progress = True
                 if tool == "write_file" and path:
                     unchecked_rewrites.add(path)
@@ -651,12 +681,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     )
                 if tool == "read_file" and path:
                     read_paths.add(path)
-                elif tool in {"append_file", "replace_block", "replace_file", "write_file"} and path:
+                elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。
                     mutated_paths.add(path)
                     if path not in current_files:
                         current_files.append(path)
-                if tool in {"append_file", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__"):
+                if tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__"):
                     mutation_count += 1
             if observation.get("file"):
                 changes.append(str(observation["file"]))
