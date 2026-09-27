@@ -2,6 +2,7 @@ import React, { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState }
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  Brain,
   Bot,
   Check,
   Circle,
@@ -12,6 +13,7 @@ import {
   FolderOpen,
   GitBranch,
   History,
+  ImagePlus,
   KeyRound,
   Loader2,
   PlugZap,
@@ -23,12 +25,14 @@ import {
   Send,
   Settings,
   Trash2,
+  X,
   XCircle
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
   AgentEvent,
+  AgentProfileMap,
   AgentModelMap,
   AgentName,
   CapabilitiesResponse,
@@ -39,6 +43,8 @@ import type {
   McpAuthStatus,
   McpInfo,
   ModelConfig,
+  ReasoningEffort,
+  AttachmentInfo,
   SkillInfo,
   TaskResult
 } from "../../api/types";
@@ -58,30 +64,39 @@ type ModelTestState = {
   message: string;
 };
 
+type PendingImage = {
+  key: string;
+  file: File;
+  preview: string;
+};
+
 // API 是后端地址，启动脚本会通过 VITE_API_URL 注入动态端口。
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8710";
 // agents 是左侧“智能体模型”和右侧状态条共享的智能体展示列表。
 const agents: Array<{ id: AgentName; name: string }> = [
   { id: "manager", name: "管理者" },
   { id: "planner", name: "Plan" },
-  { id: "repo", name: "仓库读取" },
   { id: "coder", name: "Coding" },
   { id: "verifier", name: "验证测试" },
-  { id: "doc", name: "文档" }
+  { id: "answer", name: "答疑" },
+  { id: "doc", name: "文档" },
+  { id: "compact", name: "上下文压缩" }
+];
+const effortOptions: Array<{ value: ReasoningEffort; label: string }> = [
+  { value: "inherit", label: "继承" },
+  { value: "minimal", label: "最低" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "max", label: "最高" }
 ];
 
 function App() {
   // models 保存后端返回的所有模型配置。
   const [models, setModels] = useState<ModelConfig[]>([]);
-  // modelMap 保存每个智能体当前绑定的模型 id。
-  const [modelMap, setModelMap] = useState<AgentModelMap>({
-    manager: "longcat",
-    planner: "longcat",
-    repo: "longcat",
-    coder: "longcat",
-    verifier: "longcat",
-    doc: "longcat"
-  });
+  const [profiles, setProfiles] = useState<AgentProfileMap>(() => emptyProfiles());
+  const [runEffort, setRunEffort] = useState<ReasoningEffort>("inherit");
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   // draft 是模型弹窗中正在编辑的模型配置草稿。
   const [draft, setDraft] = useState<ModelConfig>(emptyModel());
   // workdir 是当前选中的项目目录。
@@ -142,6 +157,7 @@ function App() {
   const chatRef = useRef<HTMLDivElement>(null);
   // eventRef 指向事件流滚动容器，新事件到达后自动滚到底部。
   const eventRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // 组件首次挂载时加载模型配置。
   useEffect(() => {
@@ -173,14 +189,39 @@ function App() {
   );
   // activeAgent 是最后一个产生事件的智能体，没有事件时默认 manager。
   const activeAgent = events.at(-1)?.agent ?? "manager";
+  const agentStats = useMemo(
+    () =>
+      Object.fromEntries(
+        agents.map((agent) => {
+          const own = events.filter((event) => event.agent === agent.id);
+          const last = own.at(-1);
+          const state = agent.id === activeAgent && running
+            ? "运行中"
+            : last
+              ? last.kind === "error"
+                ? "失败"
+                : "已完成"
+              : "等待";
+          return [
+            agent.id,
+            {
+              state,
+              task: last?.msg ?? "尚未接收任务",
+              tokens: own.reduce((sum, event) => sum + event.tokens, 0)
+            }
+          ];
+        })
+      ) as Record<AgentName, { state: string; task: string; tokens: number }>,
+    [activeAgent, events, running]
+  );
 
   async function loadModels() {
     try {
       // data 包含 models 和 agent_models，requestJson 会统一处理非 2xx 和断网错误。
-      const data = await requestJson<{ models: ModelConfig[]; agent_models: AgentModelMap }>(`${API}/api/models`);
+      const data = await requestJson<{ models: ModelConfig[]; agent_models: AgentModelMap; agent_profiles: AgentProfileMap }>(`${API}/api/models`);
       setModels(data.models);
-      setModelMap(data.agent_models);
-      setDraft(data.models[0] ?? emptyModel());
+      setProfiles(data.agent_profiles ?? emptyProfiles(data.agent_models));
+      setDraft(data.models[0] ? { ...data.models[0], api_key: "" } : emptyModel());
     } catch (error) {
       setNotice(errorMessage(error));
     }
@@ -334,20 +375,18 @@ function App() {
     }
   }
 
-  async function saveMap(next: AgentModelMap) {
-    // next 是用户刚选择后的完整智能体模型映射。
-    // previous 用于接口失败时回滚下拉框，避免界面和磁盘配置不一致。
-    const previous = modelMap;
-    setModelMap(next);
+  async function saveProfiles(next: AgentProfileMap) {
+    const previous = profiles;
+    setProfiles(next);
     try {
-      await requestJson<AgentModelMap>(`${API}/api/model-map`, {
+      await requestJson<AgentProfileMap>(`${API}/api/agent-profiles`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next)
       });
-      setNotice("智能体模型映射已保存");
+      setNotice("Agent 模型与思考等级已保存");
     } catch (error) {
-      setModelMap(previous);
+      setProfiles(previous);
       setNotice(errorMessage(error));
     }
   }
@@ -560,6 +599,45 @@ function App() {
     await runTask();
   }
 
+  function queueImages(files: File[]) {
+    const allowed = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    const valid = files.filter((file) => allowed.has(file.type) && file.size <= 20 * 1024 * 1024);
+    if (valid.length !== files.length) {
+      setNotice("仅支持单张不超过 20 MiB 的 PNG、JPEG、WebP 或 GIF");
+    }
+    setPendingImages((current) => {
+      const remaining = Math.max(8 - current.length, 0);
+      const added = valid.slice(0, remaining).map((file) => ({
+        key: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+        file,
+        preview: URL.createObjectURL(file)
+      }));
+      if (valid.length > remaining) setNotice("每条消息最多添加 8 张图片");
+      return [...current, ...added];
+    });
+  }
+
+  function removeImage(key: string) {
+    setPendingImages((current) => {
+      const target = current.find((item) => item.key === key);
+      if (target) URL.revokeObjectURL(target.preview);
+      return current.filter((item) => item.key !== key);
+    });
+  }
+
+  async function uploadImages(id: string): Promise<AttachmentInfo[]> {
+    return Promise.all(
+      pendingImages.map(async (item) => {
+        const form = new FormData();
+        form.append("file", item.file);
+        return requestJson<AttachmentInfo>(`${API}/api/sessions/${encodeURIComponent(id)}/files`, {
+          method: "POST",
+          body: form
+        });
+      })
+    );
+  }
+
   async function runTask() {
     if (runLockRef.current) return;
     // trimmedTask 是去掉首尾空白后的用户输入。
@@ -579,9 +657,20 @@ function App() {
     try {
       // id 是本次请求使用的会话 id；没有当前会话时自动创建。
       const id = sessionId || (await createSessionAndReturnId());
+      setNotice(pendingImages.length ? "正在安全上传图片" : "任务执行中");
+      const uploaded = await uploadImages(id);
       // 先把用户消息加入对话窗口，让界面立即响应。
-      setMessages((prev) => [...prev, { id: `${Date.now()}-user`, role: "user", content: trimmedTask }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-user`,
+          role: "user",
+          content: trimmedTask + (uploaded.length ? `\n\n已附加 ${uploaded.length} 张图片。` : "")
+        }
+      ]);
       setTask("");
+      pendingImages.forEach((item) => URL.revokeObjectURL(item.preview));
+      setPendingImages([]);
       setNotice("任务执行中");
       // res 是后端 NDJSON 流式接口响应。
       const res = await fetch(`${API}/api/chat/stream`, {
@@ -594,7 +683,9 @@ function App() {
           execute_plan: false,
           skills: selectedSkills,
           mcps: selectedMcps,
-          container_shell: containerShell
+          container_shell: containerShell,
+          attachments: uploaded.map((item) => item.id),
+          effort: runEffort
         })
       });
       if (!res.ok) {
@@ -700,7 +791,7 @@ function App() {
                 <button
                   className="ghost text-left model-name-button"
                   onClick={() => {
-                    setDraft(model);
+                    setDraft({ ...model, api_key: "" });
                     setEditingModelId(model.id);
                     setModelTestState({ status: "idle", message: "" });
                     setModelModalOpen(true);
@@ -732,25 +823,46 @@ function App() {
           </div>
 
           <div className="side-section agent-map-title">
-            <SectionTitle icon={<Bot size={18} />} text="智能体模型" />
+            <SectionTitle icon={<Bot size={18} />} text="Agent 配置" />
             <span className="section-count">{agents.length}</span>
           </div>
           <div className="map-list">
             {agents.map((agent) => (
-              <label key={agent.id}>
+              <div className="agent-setting" key={agent.id}>
                 <span>{agent.name}</span>
                 <select
-                  value={modelMap[agent.id]}
-                  onChange={(e) => void saveMap({ ...modelMap, [agent.id]: e.target.value })}
+                  aria-label={`${agent.name}模型`}
+                  value={profiles[agent.id]?.model_id ?? ""}
+                  onChange={(e) => void saveProfiles({
+                    ...profiles,
+                    [agent.id]: { ...profiles[agent.id], model_id: e.target.value }
+                  })}
                   disabled={models.length === 0 || running}
                 >
+                  <option value="">首个启用模型</option>
                   {models.map((model) => (
                     <option value={model.id} key={model.id}>
                       {model.name}
                     </option>
                   ))}
                 </select>
-              </label>
+                <select
+                  aria-label={`${agent.name}思考等级`}
+                  value={profiles[agent.id]?.effort ?? "inherit"}
+                  onChange={(e) => void saveProfiles({
+                    ...profiles,
+                    [agent.id]: {
+                      ...profiles[agent.id],
+                      effort: e.target.value as ReasoningEffort
+                    }
+                  })}
+                  disabled={models.length === 0 || running}
+                >
+                  {effortOptions.map((item) => (
+                    <option value={item.value} key={item.value}>{item.label}</option>
+                  ))}
+                </select>
+              </div>
             ))}
           </div>
         </aside>
@@ -805,11 +917,21 @@ function App() {
               <Metric label="项目" value={workdir ? shortPath(workdir) : "未选择"} />
               <Metric label="耗时" value={result ? formatDuration(result.duration_ms) : "--"} />
             </div>
-            <div className="agent-strip">
+            <div className="agent-board">
               {agents.map((agent) => (
-                <span className={agent.id === activeAgent ? "agent active" : "agent"} key={agent.id}>
-                  {agent.name}
-                </span>
+                <article className={agent.id === activeAgent ? "agent-card active" : "agent-card"} key={agent.id}>
+                  <div>
+                    <span className="agent-mark"><Bot size={14} /></span>
+                    <strong>{agent.name}</strong>
+                    <span className={`agent-state ${agentStats[agent.id].state}`}>{agentStats[agent.id].state}</span>
+                  </div>
+                  <p>{agentStats[agent.id].task}</p>
+                  <footer>
+                    <span>{models.find((model) => model.id === profiles[agent.id]?.model_id)?.name ?? "自动选择"}</span>
+                    <span><Brain size={12} /> {effortLabel(profiles[agent.id]?.effort ?? "inherit")}</span>
+                    <span>{agentStats[agent.id].tokens} tok</span>
+                  </footer>
+                </article>
               ))}
             </div>
           </section>
@@ -834,14 +956,52 @@ function App() {
         </aside>
 
         {/* 底部输入区：选择项目、历史会话、新建会话、发送和 Plan 模式。 */}
-        <section className="composer">
+        <section
+          className={pendingImages.length ? "composer has-images" : "composer"}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            if (!running) queueImages(Array.from(event.dataTransfer.files));
+          }}
+        >
+          {pendingImages.length > 0 && (
+            <div className="image-tray" aria-label="待发送图片">
+              {pendingImages.map((item) => (
+                <figure key={item.key}>
+                  <img src={item.preview} alt={item.file.name} />
+                  <figcaption>{item.file.name}</figcaption>
+                  <button type="button" onClick={() => removeImage(item.key)} aria-label={`移除 ${item.file.name}`}>
+                    <X size={13} />
+                  </button>
+                </figure>
+              ))}
+            </div>
+          )}
           <textarea
             value={task}
             onChange={(e) => setTask(e.target.value)}
             onKeyDown={(event) => handleComposerKey(event, () => void submitComposer())}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files);
+              if (files.length && !running) queueImages(files);
+            }}
             placeholder={running ? "输入对当前任务的补充或指导..." : "输入任务或问题..."}
           />
           <div className="actions">
+            <input
+              ref={fileRef}
+              className="file-input"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              multiple
+              onChange={(event) => {
+                queueImages(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            <button className="secondary attach-button" type="button" onClick={() => fileRef.current?.click()} disabled={running}>
+              <ImagePlus size={16} /> 图片
+            </button>
             <button className="secondary" type="button" onClick={() => void pickProject()} disabled={running} title={workdir || "选择项目目录"}>
               <FolderOpen size={16} /> 选择项目
             </button>
@@ -885,6 +1045,19 @@ function App() {
               <input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} disabled={running} />
               <span>Plan 模式</span>
             </label>
+            <label className="effort-control">
+              <Brain size={15} />
+              <span>本轮思考</span>
+              <select
+                value={runEffort}
+                onChange={(event) => setRunEffort(event.target.value as ReasoningEffort)}
+                disabled={running}
+              >
+                {effortOptions.map((item) => (
+                  <option value={item.value} key={item.value}>{item.label}</option>
+                ))}
+              </select>
+            </label>
           </div>
         </section>
 
@@ -919,7 +1092,7 @@ function App() {
               </label>
               <label>
                 <span>API Key</span>
-                <input value={draft.api_key} onChange={(e) => setDraft({ ...draft, api_key: e.target.value })} placeholder="API Key" type="password" />
+                <input value={draft.api_key ?? ""} onChange={(e) => setDraft({ ...draft, api_key: e.target.value })} placeholder={draft.has_key ? `${draft.key_hint ?? "已配置"}（留空保持不变）` : "API Key"} type="password" />
               </label>
               <div className="row">
                 <label>
@@ -931,6 +1104,46 @@ function App() {
                   <input value={draft.timeout} onChange={(e) => setDraft({ ...draft, timeout: Number(e.target.value) })} type="number" />
                 </label>
               </div>
+              <div className="row">
+                <label>
+                  <span>调用协议</span>
+                  <select value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ModelConfig["protocol"] })}>
+                    <option value="auto">自动探测</option>
+                    <option value="responses">Responses API</option>
+                    <option value="chat_completions">Chat Completions</option>
+                  </select>
+                </label>
+                <label>
+                  <span>默认思考等级</span>
+                  <select value={draft.default_effort} onChange={(e) => setDraft({ ...draft, default_effort: e.target.value as ReasoningEffort })}>
+                    {effortOptions.filter((item) => item.value !== "inherit").map((item) => (
+                      <option value={item.value} key={item.value}>{item.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                <span>最大输出 Token</span>
+                <input value={draft.max_output_tokens} onChange={(e) => setDraft({ ...draft, max_output_tokens: Number(e.target.value) })} type="number" />
+              </label>
+              <fieldset className="capability-flags">
+                <legend>模型能力</legend>
+                {(["text", "vision", "tools", "reasoning"] as const).map((capability) => (
+                  <label key={capability}>
+                    <input
+                      type="checkbox"
+                      checked={draft.capabilities.includes(capability)}
+                      onChange={() => setDraft({
+                        ...draft,
+                        capabilities: draft.capabilities.includes(capability)
+                          ? draft.capabilities.filter((item) => item !== capability)
+                          : [...draft.capabilities, capability]
+                      })}
+                    />
+                    <span>{{ text: "文本", vision: "视觉", tools: "工具", reasoning: "推理" }[capability]}</span>
+                  </label>
+                ))}
+              </fieldset>
               <label className="toggle model-enabled">
                 <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
                 <span>启用此模型</span>
@@ -1226,8 +1439,26 @@ function emptyModel(): ModelConfig {
     model: "",
     ctx: 128000,
     enabled: true,
-    timeout: 120
+    timeout: 120,
+    protocol: "auto",
+    capabilities: ["text", "vision", "tools", "reasoning"],
+    efforts: ["minimal", "low", "medium", "high", "max"],
+    default_effort: "high",
+    max_output_tokens: 16384
   };
+}
+
+function emptyProfiles(map?: AgentModelMap): AgentProfileMap {
+  return Object.fromEntries(
+    agents.map((agent) => [
+      agent.id,
+      { model_id: map?.[agent.id] ?? "", effort: "inherit" as ReasoningEffort }
+    ])
+  ) as AgentProfileMap;
+}
+
+function effortLabel(value: ReasoningEffort): string {
+  return effortOptions.find((item) => item.value === value)?.label ?? value;
 }
 
 function toggleSelected(current: string[], id: string): string[] {
