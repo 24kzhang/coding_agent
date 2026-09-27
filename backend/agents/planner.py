@@ -463,6 +463,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
         repair_models = {str(getattr(getattr(client, "cfg", None), "id", ""))}
         repair_counts: dict[str, int] = {}
+        repair_transient_counts: dict[str, int] = {}
         for repair_index in range(_MAX_PLAN_REPAIRS):
             if not best_issues:
                 break
@@ -498,6 +499,17 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             except LlmBalanceError:
                 raise
             except LlmError as exc:
+                current_id = str(getattr(getattr(client, "cfg", None), "id", ""))
+                if _is_transient(str(exc)):
+                    repair_transient_counts[current_id] = repair_transient_counts.get(current_id, 0) + 1
+                    if repair_transient_counts[current_id] == 1 and repair_index + 1 < _MAX_PLAN_REPAIRS:
+                        graph._emit(
+                            state,
+                            "planner",
+                            "error",
+                            f"Plan 修订模型 {current_id} 瞬时不可用，将使用同一计划输入重试一次：{str(exc)[:120]}",
+                        )
+                        continue
                 next_cfg = next((cfg for cfg in fallback_configs if cfg.id not in repair_models), None)
                 if next_cfg is None:
                     graph._emit(state, "planner", "error", f"计划自动修订失败，保留当前最佳版本：{str(exc)[:120]}")

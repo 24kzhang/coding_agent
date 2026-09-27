@@ -228,6 +228,58 @@ def test_plan_quality_requires_visible_attachment_reference_codes(tmp_path) -> N
     assert not any("参考编号" in item for item in complete)
 
 
+def test_planner_retries_one_transient_repair_failure(tmp_path, monkeypatch) -> None:
+    """计划修订的瞬时超时应在同一模型上重试，不能直接返回未通过的初稿。"""
+
+    events = []
+    graph = AgentGraph(
+        ModelStore(tmp_path / "models.json"),
+        MemoryStore(tmp_path / "mem"),
+        emit=events.append,
+    )
+
+    class Usage:
+        total = 3
+
+    class RepairClient:
+        last_usage = Usage()
+        cfg = SimpleNamespace(id="repair")
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return {"status": "plan", "markdown": "# 初稿"}
+            if self.calls == 2:
+                raise LlmError("模型响应超时：暂时不可用")
+            return {"status": "plan", "markdown": "# 已修复计划"}
+
+    client = RepairClient()
+    monkeypatch.setattr(graph, "_client", lambda *_args: client)
+    monkeypatch.setattr(graph, "_ctx_text", lambda _state: "创建网站")
+    monkeypatch.setattr(
+        "backend.agents.planner._plan_quality_issues",
+        lambda _graph, _state, markdown: [] if "已修复" in markdown else ["缺少必要合同"],
+    )
+
+    result = planner(
+        graph,
+        {
+            "session_id": "plan-retry",
+            "workdir": str(tmp_path / "project"),
+            "text": "创建网站",
+            "tokens": 0,
+        },
+    )
+
+    assert result["plan"]["status"] == "plan"
+    assert "已修复" in result["plan"]["markdown"]
+    assert client.calls == 3
+    assert any(event.kind == "error" and "重试一次" in event.msg for event in events)
+
+
 def test_planner_switches_repair_model_when_quality_stagnates(tmp_path, monkeypatch) -> None:
     """同一模型修订后问题数不下降时，应换备用模型继续，而不是重复无效调用。"""
 
