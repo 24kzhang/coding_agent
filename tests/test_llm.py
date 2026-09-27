@@ -224,7 +224,7 @@ def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_pa
 
     class FakeClient:
         def __init__(self, **kwargs):
-            pass
+            captured["client"] = kwargs
 
         def __enter__(self):
             return self
@@ -267,9 +267,54 @@ def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_pa
 
     assert text == "看到了"
     assert captured["url"].endswith("/v1/responses")
+    assert captured["client"]["trust_env"] is False
     assert captured["json"]["reasoning"] == {"effort": "max"}
     assert captured["json"]["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
     assert client.last_usage.total == 15
+
+
+def test_responses_api_retries_transient_status(monkeypatch) -> None:
+    """Responses API 在执行工具前遇到瞬时服务错误时，应使用同一请求重试一次。"""
+
+    statuses = [503, 200]
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, **kwargs):
+            calls.append(url)
+            status = statuses.pop(0)
+            if status == 503:
+                return httpx.Response(status, text="暂时不可用")
+            return httpx.Response(
+                200,
+                json={"output_text": "成功", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+
+    cfg = ModelConfig(
+        id="retry",
+        name="重试模型",
+        base_url="https://retry.example.com",
+        api_key="k",
+        model="deepseek-flash",
+        protocol="responses",
+    )
+    monkeypatch.setattr("llm.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("llm.client.LlmClient._sleep_retry", lambda *args: None)
+
+    assert LlmClient(cfg).chat([{"role": "user", "content": "测试"}]) == "成功"
+    assert calls == [
+        "https://retry.example.com/v1/responses",
+        "https://retry.example.com/v1/responses",
+    ]
 
 
 def test_native_responses_tools_are_converted_to_actions(monkeypatch) -> None:

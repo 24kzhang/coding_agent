@@ -35,7 +35,7 @@ def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -
             events.append("close")
 
     monkeypatch.setattr(graph_module, "ContainerShellTool", FakeContainer)
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {"workdir": str(tmp_path / "project"), "container_shell": True}
 
     assert graph._shell(state) is graph._shell(state)
@@ -49,7 +49,7 @@ def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -
 def test_planner_retries_transient_gateway_errors(tmp_path, monkeypatch) -> None:
     """Plan 模型短暂 502 应退避后继续生成真实计划，不能立即降级。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     calls = 0
 
     class Usage:
@@ -131,7 +131,7 @@ def test_planner_fails_over_after_model_timeout(tmp_path, monkeypatch) -> None:
 def test_planner_rejects_plan_that_stays_invalid_after_repairs(tmp_path, monkeypatch) -> None:
     """自动修订耗尽后不得保存不合格计划或返回成功。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
     class Usage:
         total = 3
@@ -210,7 +210,7 @@ def test_planner_switches_repair_model_when_quality_stagnates(tmp_path, monkeypa
 def test_planner_auto_answers_questions_for_sufficient_data_site_task(tmp_path, monkeypatch) -> None:
     """信息足够的数据集建站任务若模型返回澄清题，应同轮采用推荐项继续出计划。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
     class Usage:
         total = 6
@@ -325,7 +325,7 @@ def test_planner_cross_reviews_after_two_improving_repairs(tmp_path, monkeypatch
 def test_fallback_plan_redacts_api_key_but_preserves_execution_goal(tmp_path) -> None:
     """兜底 Plan 文档必须脱敏，执行元数据仍可另存原始目标。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     secret = "sk-local-test-secret"
     state = {
         "text": f'创建网站，apikey："{secret}"，并写入 config.json。',
@@ -342,7 +342,7 @@ def test_fallback_plan_redacts_api_key_but_preserves_execution_goal(tmp_path) ->
 def test_plan_redaction_handles_json_fields_and_bare_tokens(tmp_path) -> None:
     """模型即使把凭据复制进 JSON 代码块或正文，保存计划前也必须彻底脱敏。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     secret = "sk-local-test-secret-123456"
     markdown = f'''# 配置
 
@@ -365,7 +365,7 @@ def test_plan_redaction_handles_json_fields_and_bare_tokens(tmp_path) -> None:
 def test_plan_quality_review_detects_broken_full_stack_contracts(tmp_path) -> None:
     """数据网站计划若改配置字段、漏接口/测试或前端构造 system，必须在保存前触发修订。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": (
             "基于数据集开发网站，第一次提问添加动作上下文，之后传历史对话；"
@@ -402,7 +402,7 @@ currentMessages.push({ role: 'user', content: question });
 def test_plan_quality_accepts_explicit_video_only_contract(tmp_path) -> None:
     """`/videos/*.gif` 与禁止 `/images-exercises/*` 的明确合同不应被审查器误报。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "网页展示只用 videos 文件夹的 gif，不要用 images-exercises 文件夹的静图。",
         "skills": [],
@@ -423,7 +423,7 @@ def test_plan_field_match_accepts_real_language_subfield() -> None:
 def test_plan_quality_accepts_complete_detail_api_claim(tmp_path) -> None:
     """详情接口明确返回完整动作详情时，无需在同一区段重复整张 schema 表。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "详情展示所有详细信息",
         "skills": [],
@@ -458,7 +458,7 @@ def test_plan_quality_accepts_complete_detail_api_claim(tmp_path) -> None:
 def test_plan_quality_accepts_generic_complete_detail_api_claim(tmp_path) -> None:
     """详情 API 写明完整对象/记录即可，不强迫使用固定措辞或重复字段表。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "详情展示所有详细信息",
         "skills": [],
@@ -495,7 +495,7 @@ def test_plan_quality_accepts_generic_complete_detail_api_claim(tmp_path) -> Non
 def test_plan_quality_accepts_complete_left_detail_claim(tmp_path) -> None:
     """左侧已明确展示全部原始字段时，不要求在同一区段重复列出所有字段名。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "详情左侧需要展示所有详细信息",
         "skills": [],
@@ -534,7 +534,7 @@ def test_repo_candidates_exclude_generated_plan_files(tmp_path) -> None:
     (workdir / "docs" / "plans").mkdir(parents=True)
     (workdir / "docs" / "plans" / "old.md").write_text("exercises-dataset 旧计划", encoding="utf-8")
     (workdir / "README.md").write_text("# 项目", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     fs = FsTool(str(workdir))
 
     candidates = graph._repo_candidates(fs, fs.list(), "exercises-dataset")
@@ -567,7 +567,7 @@ def test_chat_contract_normalizer_removes_frontend_system_contradictions() -> No
 def test_plan_quality_accepts_canonical_server_owned_system_contract(tmp_path) -> None:
     """质量门不应把“前端不初始化 system”的规范合同误报为冲突。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "第一次提问添加动作上下文，之后传历史对话。",
         "skills": [],
@@ -590,7 +590,7 @@ def test_plan_quality_accepts_canonical_server_owned_system_contract(tmp_path) -
 def test_plan_quality_rejects_server_stored_chat_history(tmp_path) -> None:
     """聊天历史应由客户端回传，计划不得要求服务端保存 messages 状态。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "text": "第一次提问添加动作上下文，之后传历史对话。",
         "skills": [],
@@ -624,7 +624,7 @@ def test_direct_greeting_does_not_read_repo_or_write_files(tmp_path) -> None:
 
 
 def test_manager_prefers_code_generation_when_doc_is_a_deliverable(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -643,7 +643,7 @@ def test_manager_prefers_code_generation_when_doc_is_a_deliverable(tmp_path) -> 
 def test_manager_routes_selected_mcp_question_directly_to_answer(tmp_path) -> None:
     """MCP 能力查询不应因“检查”二字读取用户项目仓库。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -661,7 +661,7 @@ def test_manager_routes_selected_mcp_question_directly_to_answer(tmp_path) -> No
 def test_manager_keeps_mcp_assisted_code_change_in_coding_flow(tmp_path) -> None:
     """选择 MCP 不能把明确的项目代码修改任务降级成普通答疑。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -677,7 +677,7 @@ def test_manager_keeps_mcp_assisted_code_change_in_coding_flow(tmp_path) -> None
 
 
 def test_code_task_with_doc_routes_to_coder_then_doc(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -701,7 +701,7 @@ def test_code_task_with_doc_routes_to_coder_then_doc(tmp_path) -> None:
 
 
 def test_doc_task_routes_to_repo_then_doc_without_coder(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -731,7 +731,7 @@ def test_doc_model_failure_preserves_existing_readme(tmp_path, monkeypatch) -> N
     workdir.mkdir()
     readme = workdir / "README.md"
     readme.write_text("# 原有完整文档\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
     class BrokenClient:
         def chat(self, messages):
@@ -759,7 +759,7 @@ def test_doc_writes_plain_markdown_to_requested_path(tmp_path, monkeypatch) -> N
     """文档智能体直接写 Markdown，并由编排确定目标路径。"""
 
     workdir = tmp_path / "proj"
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
     class Usage:
         total = 12
@@ -789,7 +789,7 @@ def test_doc_writes_plain_markdown_to_requested_path(tmp_path, monkeypatch) -> N
 
 
 def test_plan_questions_are_formatted_for_user(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     questions = graph._normalize_plan_questions(
         [
             {
@@ -812,7 +812,7 @@ def test_plan_questions_are_formatted_for_user(tmp_path) -> None:
 
 
 def test_plan_questions_hide_json_parse_errors(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     questions = graph._normalize_plan_questions(
         [
             {
@@ -1121,7 +1121,7 @@ def test_final_closes_saved_plan_only_after_success(tmp_path) -> None:
 
 
 def test_manager_classifies_project_improvement_as_code_change(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
         "session_id": "s1",
         "workdir": str(tmp_path / "proj"),
@@ -1140,7 +1140,7 @@ def test_manager_classifies_project_improvement_as_code_change(tmp_path) -> None
 def test_manager_does_not_expose_classification_reason_as_code_result(tmp_path) -> None:
     """代码任务的分类理由只用于路由，不能提前占用最终回复字段。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     next_state = manager(
         graph,
         {
@@ -1160,7 +1160,7 @@ def test_manager_does_not_expose_classification_reason_as_code_result(tmp_path) 
 def test_manager_routes_no_write_acceptance_to_verifier(tmp_path) -> None:
     """只读验收不能误触发 Coding 或文档生成。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     next_state = manager(
         graph,
         {
@@ -1182,7 +1182,7 @@ def test_manager_routes_no_write_acceptance_to_verifier(tmp_path) -> None:
 def test_manager_recognizes_common_read_only_verification_phrases(tmp_path) -> None:
     """只读验证的自然表达必须稳定进入 verifier，不依赖管理者模型猜测。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     phrases = [
         "继续只读验证，禁止修改文件",
         "只读验收当前项目",
@@ -1204,7 +1204,7 @@ def test_manager_recognizes_common_read_only_verification_phrases(tmp_path) -> N
 def test_manager_does_not_treat_scoped_no_other_files_as_read_only(tmp_path) -> None:
     """“不要修改其他文件”只限制修改范围，不能吞掉明确的 README 写入任务。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     result = graph._classify(
         {
             "session_id": "s1",
@@ -1220,7 +1220,7 @@ def test_manager_does_not_treat_scoped_no_other_files_as_read_only(tmp_path) -> 
 def test_manager_routes_readme_recovery_to_doc_only(tmp_path) -> None:
     """项目背景词不能让“恢复 README”重复经过 Coding 和文档两个写入节点。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     result = graph._classify(
         {
             "session_id": "s1",
@@ -1237,7 +1237,7 @@ def test_manager_routes_readme_recovery_to_doc_only(tmp_path) -> None:
 def test_final_prefers_completed_code_summary_over_stale_manager_text(tmp_path) -> None:
     """即使状态中残留分类文本，代码任务也必须返回真实执行摘要。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = final(
         graph,
         {
@@ -1258,7 +1258,7 @@ def test_final_prefers_completed_code_summary_over_stale_manager_text(tmp_path) 
 def test_final_uses_semantic_review_summary_for_verify_task(tmp_path) -> None:
     """只读验收的最终回复应包含可读的审查结论。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = final(
         graph,
         {

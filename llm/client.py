@@ -208,41 +208,48 @@ class LlmClient:
             payload["reasoning"] = {"effort": chosen_effort}
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
         last_error = ""
-        with httpx.Client(timeout=self.cfg.timeout) as client:
+        with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
             for url in self._response_urls():
-                try:
-                    response = client.post(url, headers=headers, json=payload)
-                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-                    last_error = f"{url} 调用失败：{exc}"
-                    continue
-                if response.status_code in {404, 405}:
-                    last_error = f"{url} 返回 {response.status_code}"
-                    continue
-                if response.status_code >= 400:
-                    self._raise_http_error(response.status_code, response.text)
-                try:
-                    data = response.json()
-                except (ValueError, json.JSONDecodeError) as exc:
-                    raise LlmError("Responses API 没有返回合法 JSON") from exc
-                self.last_usage = self._responses_usage(data, messages)
-                actions: list[dict[str, Any]] = []
-                summary_parts: list[str] = []
-                for item in data.get("output") or []:
-                    if not isinstance(item, dict):
+                for attempt in range(2):
+                    try:
+                        response = client.post(url, headers=headers, json=payload)
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                        last_error = f"{url} 调用失败：{exc}"
+                        if attempt == 0:
+                            time.sleep(0.4)
+                            continue
+                        break
+                    if response.status_code in {404, 405}:
+                        last_error = f"{url} 返回 {response.status_code}"
+                        break
+                    if response.status_code in {429, 500, 502, 503, 504} and attempt == 0:
+                        self._sleep_retry(response.headers.get("Retry-After"))
                         continue
-                    if item.get("type") == "function_call":
-                        try:
-                            arguments = json.loads(str(item.get("arguments") or "{}"))
-                        except json.JSONDecodeError as exc:
-                            raise LlmError("原生工具调用参数不是合法 JSON") from exc
-                        actions.append({"tool": str(item.get("name") or ""), **arguments})
-                    elif item.get("type") == "message":
-                        summary_parts.extend(
-                            str(part.get("text") or "")
-                            for part in item.get("content") or []
-                            if isinstance(part, dict) and part.get("type") in {"output_text", "text"}
-                        )
-                return self._tool_result(actions, "".join(summary_parts))
+                    if response.status_code >= 400:
+                        self._raise_http_error(response.status_code, response.text)
+                    try:
+                        data = response.json()
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        raise LlmError("Responses API 没有返回合法 JSON") from exc
+                    self.last_usage = self._responses_usage(data, messages)
+                    actions: list[dict[str, Any]] = []
+                    summary_parts: list[str] = []
+                    for item in data.get("output") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "function_call":
+                            try:
+                                arguments = json.loads(str(item.get("arguments") or "{}"))
+                            except json.JSONDecodeError as exc:
+                                raise LlmError("原生工具调用参数不是合法 JSON") from exc
+                            actions.append({"tool": str(item.get("name") or ""), **arguments})
+                        elif item.get("type") == "message":
+                            summary_parts.extend(
+                                str(part.get("text") or "")
+                                for part in item.get("content") or []
+                                if isinstance(part, dict) and part.get("type") in {"output_text", "text"}
+                            )
+                    return self._tool_result(actions, "".join(summary_parts))
         raise LlmError(last_error or "Responses API 接口不存在")
 
     def _chat_tools(
@@ -267,7 +274,7 @@ class LlmClient:
             payload["thinking"] = {"type": "disabled" if chosen_effort == "none" else "enabled"}
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
         last_error = ""
-        with httpx.Client(timeout=self.cfg.timeout) as client:
+        with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
             for url in self._urls():
                 try:
                     response = client.post(url, headers=headers, json=payload)
@@ -356,7 +363,7 @@ class LlmClient:
         if use_stream:
             payload["stream"] = True
         # 一个 client 复用连接池；候选 URL 和短重试不需要重复建立 TLS 连接。
-        with httpx.Client(timeout=self.cfg.timeout) as client:
+        with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
             # 按 _urls() 给出的候选地址依次尝试，兼容不同供应商 URL 规则。
             for url in self._urls():
                 for attempt in range(2):
@@ -444,39 +451,46 @@ class LlmClient:
             "Content-Type": "application/json",
         }
         last_error = ""
-        with httpx.Client(timeout=self.cfg.timeout) as client:
+        with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
             for url in self._response_urls():
-                try:
-                    response = client.post(url, headers=headers, json=payload)
-                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-                    last_error = f"{url} 调用失败：{exc}"
-                    continue
-                except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
-                    raise LlmError(f"{url} 模型响应超时：{exc}") from exc
-                if response.status_code in {404, 405}:
-                    last_error = f"{url} 返回 {response.status_code}"
-                    continue
-                if response.status_code >= 400:
-                    self._raise_http_error(response.status_code, response.text)
-                try:
-                    data = response.json()
-                except (ValueError, json.JSONDecodeError) as exc:
-                    raise LlmError("Responses API 没有返回合法 JSON") from exc
-                self.working_urls[f"responses:{self.cfg.base_url.rstrip('/')}"] = url
-                self.last_usage = self._responses_usage(data, messages)
-                text = data.get("output_text")
-                if isinstance(text, str) and text:
-                    return text
-                parts: list[str] = []
-                for item in data.get("output") or []:
-                    if not isinstance(item, dict) or item.get("type") != "message":
+                for attempt in range(2):
+                    try:
+                        response = client.post(url, headers=headers, json=payload)
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                        last_error = f"{url} 调用失败：{exc}"
+                        if attempt == 0:
+                            time.sleep(0.4)
+                            continue
+                        break
+                    except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+                        raise LlmError(f"{url} 模型响应超时：{exc}") from exc
+                    if response.status_code in {404, 405}:
+                        last_error = f"{url} 返回 {response.status_code}"
+                        break
+                    if response.status_code in {429, 500, 502, 503, 504} and attempt == 0:
+                        self._sleep_retry(response.headers.get("Retry-After"))
                         continue
-                    for part in item.get("content") or []:
-                        if isinstance(part, dict) and isinstance(part.get("text"), str):
-                            parts.append(part["text"])
-                if parts:
-                    return "".join(parts)
-                raise LlmError("Responses API 响应中没有可用文本")
+                    if response.status_code >= 400:
+                        self._raise_http_error(response.status_code, response.text)
+                    try:
+                        data = response.json()
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        raise LlmError("Responses API 没有返回合法 JSON") from exc
+                    self.working_urls[f"responses:{self.cfg.base_url.rstrip('/')}"] = url
+                    self.last_usage = self._responses_usage(data, messages)
+                    text = data.get("output_text")
+                    if isinstance(text, str) and text:
+                        return text
+                    parts: list[str] = []
+                    for item in data.get("output") or []:
+                        if not isinstance(item, dict) or item.get("type") != "message":
+                            continue
+                        for part in item.get("content") or []:
+                            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                parts.append(part["text"])
+                    if parts:
+                        return "".join(parts)
+                    raise LlmError("Responses API 响应中没有可用文本")
         raise LlmError(last_error or "Responses API 接口不存在")
 
     def _normalize_messages(
