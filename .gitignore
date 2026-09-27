@@ -17,4 +17,5 @@ frontend/dist/
 /.jbeval/
 /run_test/exercises/exercises-dataset-main.zip
 /memory/config/models.json
+/memory/legacy/
 /MCP/auth.json

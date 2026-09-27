@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+from io import BytesIO
+
+from PIL import Image
 
 from api.schema import HistoryResponse
 from backend.memory import MemoryStore
@@ -164,6 +167,54 @@ def test_memory_context_keeps_dialogue_and_drops_events(tmp_path) -> None:
 
     assert context == ["用户：先修改接口", "Agent：接口已修改"]
     assert all("工具输出" not in item for item in context)
+
+
+def test_memory_separates_agent_task_and_chat_logs(tmp_path) -> None:
+    """每个 Agent 的过程、交接合同和用户对话必须物理分离。"""
+
+    store = MemoryStore(tmp_path / "memory" / "data")
+    workdir = str(tmp_path / "project")
+    store.append(workdir, "s1", "user", "input", "message", "开始")
+    store.append(workdir, "s1", "coder", "event", "tool", "读取文件")
+    store.append_task(workdir, "s1", "manager", "handoff", "派发", {"id": "t1"})
+    session = store.session_dir(workdir, "s1")
+
+    assert "开始" in (session / "chat.jsonl").read_text(encoding="utf-8")
+    assert "读取文件" in (session / "agents" / "coder" / "log.jsonl").read_text(encoding="utf-8")
+    assert "派发" in (session / "tasks.jsonl").read_text(encoding="utf-8")
+    assert "读取文件" not in (session / "chat.jsonl").read_text(encoding="utf-8")
+
+
+def test_memory_archives_legacy_jsonl_without_loading_it(tmp_path) -> None:
+    """旧单文件会话只移动和记录哈希，不得成为活动会话。"""
+
+    root = tmp_path / "memory" / "data"
+    old = root / "projects" / "p1" / "sessions" / "old.jsonl"
+    old.parent.mkdir(parents=True)
+    old.write_text('{"id":1,"out":"旧过程"}\n', encoding="utf-8")
+
+    store = MemoryStore(root)
+    manifests = list((root.parent / "legacy").glob("*/index.json"))
+
+    assert not old.exists()
+    assert len(manifests) == 1
+    assert json.loads(manifests[0].read_text(encoding="utf-8"))["files"][0]["sha256"]
+    assert store.find_session_workdir("old") == ""
+
+
+def test_memory_validates_and_hashes_real_image(tmp_path) -> None:
+    """附件以内容哈希保存，日志不包含 base64。"""
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), "white").save(buffer, format="PNG")
+    png = buffer.getvalue()
+    store = MemoryStore(tmp_path / "memory" / "data")
+    workdir = str(tmp_path / "project")
+    info = store.save_file(workdir, "s1", "参考图.png", "image/png", png)
+
+    assert info["width"] == info["height"] == 1
+    assert re.fullmatch(r"[0-9a-f]{64}", info["id"])
+    assert "base64" not in json.dumps(store.read_session(workdir, "s1"), ensure_ascii=False)
 
 
 def test_memory_run_lifecycle_ignores_session_rename(tmp_path) -> None:

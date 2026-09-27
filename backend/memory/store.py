@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import re
 import shutil
 import threading
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, UnidentifiedImageError
 
 from backend.clock import utc_stamp
 
@@ -31,6 +35,8 @@ class MemoryStore:
         self.session_index: dict[str, str] = {}
         # 确保记忆根目录存在。
         self.root.mkdir(parents=True, exist_ok=True)
+        # 旧版把所有 Agent 写进同一个 sessions/<id>.jsonl；新版首次启动时只归档，不迁移。
+        self._archive_legacy_sessions()
         # global_path 是跨项目长期记忆文件。
         self.global_path = self.root / "global.md"
         # 首次启动时创建全局长期记忆文件，便于用户直接打开阅读。
@@ -74,12 +80,30 @@ class MemoryStore:
                 self._atomic_write(project_md, "# 项目长期记忆\n\n暂无。\n")
             return path
 
-    def session_path(self, workdir: str, session_id: str) -> Path:
-        """返回指定会话的 jsonl 文件路径，并确保项目 memory 目录存在。"""
+    def session_dir(self, workdir: str, session_id: str) -> Path:
+        """返回新版会话目录，并创建各类独立记忆容器。"""
 
-        # safe_id 拒绝路径分隔符和上级目录片段，防止接口参数逃出 sessions 目录。
         safe_id = self._safe_session_id(session_id)
-        return self.project_dir(workdir) / "sessions" / f"{safe_id}.jsonl"
+        path = self.project_dir(workdir) / "sessions" / safe_id
+        (path / "agents").mkdir(parents=True, exist_ok=True)
+        (path / "files").mkdir(parents=True, exist_ok=True)
+        meta = path / "meta.json"
+        if not meta.exists():
+            self._atomic_write(
+                meta,
+                json.dumps(
+                    {"version": 2, "id": safe_id, "workdir": str(Path(workdir).resolve())},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+        return path
+
+    def session_path(self, workdir: str, session_id: str) -> Path:
+        """返回会话的用户对话日志路径，保留旧调用方使用的接口名。"""
+
+        return self.session_dir(workdir, session_id) / "chat.jsonl"
 
     def delete_session(self, workdir: str, session_id: str) -> bool:
         """删除某个会话的 memory 文件，不删除真实项目文件。"""
@@ -87,14 +111,18 @@ class MemoryStore:
         # path 指向待删除的会话 jsonl；这里不调用 project_dir，避免删除不存在会话时创建目录。
         # safe_id 是通过白名单校验后的会话 id。
         safe_id = self._safe_session_id(session_id)
-        path = self.project_path(workdir) / "sessions" / f"{safe_id}.jsonl"
+        path = self.project_path(workdir) / "sessions" / safe_id
         # 删除前确认路径一定在 memory/data/projects 内。
         self._ensure_under_projects(path)
         with self.lock:
             if not path.exists():
                 return False
-            path.unlink()
-            self.last_ids.pop(path, None)
+            shutil.rmtree(path)
+            self.last_ids = {
+                item: value
+                for item, value in self.last_ids.items()
+                if item != path and path not in item.parents
+            }
             self.session_index.pop(safe_id, None)
             return True
 
@@ -109,7 +137,7 @@ class MemoryStore:
             if not path.exists():
                 return False
             # session_ids 是删除前需要从内存索引移除的全部会话。
-            session_ids = [session_path.stem for session_path in (path / "sessions").glob("*.jsonl")]
+            session_ids = [session_path.name for session_path in (path / "sessions").glob("*") if session_path.is_dir()]
             shutil.rmtree(path)
             for session_id in session_ids:
                 self.session_index.pop(session_id, None)
@@ -140,10 +168,10 @@ class MemoryStore:
         # path 是会话 jsonl 文件路径；不存在时返回空字符串，让调用方自行处理。
         # safe_id 保证读取路径无法由外部参数构造到 sessions 目录之外。
         safe_id = self._safe_session_id(session_id)
-        path = self.project_path(workdir) / "sessions" / f"{safe_id}.jsonl"
+        path = self.project_path(workdir) / "sessions" / safe_id
         if not path.exists():
             return ""
-        return self._session_title(self._read_session_file(path)) or session_id
+        return self._session_title(self._read_all_records(path)) or session_id
 
     def session_capabilities(self, workdir: str, session_id: str) -> dict[str, Any]:
         """读取会话最近一次任务选择的 Skills、MCP 服务和 Shell 模式。"""
@@ -151,10 +179,10 @@ class MemoryStore:
         # safe_id 保证外部 session_id 不能构造越界路径。
         safe_id = self._safe_session_id(session_id)
         # path 直接定位已有会话，不因读取不存在会话而创建 memory 目录。
-        path = self.project_path(workdir) / "sessions" / f"{safe_id}.jsonl"
+        path = self.project_path(workdir) / "sessions" / safe_id
         if not path.exists():
             return {"skills": [], "mcps": [], "container_shell": True}
-        return self._session_capabilities(self._read_session_file(path))
+        return self._session_capabilities(self._read_all_records(path))
 
     def append(
         self,
@@ -168,13 +196,20 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """追加一条短字段记忆，字段名短但可辨识。"""
         with self.lock:
-            # path 是本次要追加的会话 jsonl 文件路径。
-            path = self.session_path(workdir, session_id)
-            # last_id 从缓存读取；第一次写已有会话时才扫描一次文件。
-            last_id = self.last_ids.get(path)
+            session_dir = self.session_dir(workdir, session_id)
+            # 用户对话和生命周期进入 chat；交接进入 tasks；其余过程进入对应 Agent。
+            if tool == "task" or kind in {"handoff", "outcome", "needs_clarification"}:
+                path = session_dir / "tasks.jsonl"
+            elif agent == "user" or tool in {"session", "input", "guidance", "capability", "run", "final"}:
+                path = session_dir / "chat.jsonl"
+            else:
+                safe_agent = re.sub(r"[^A-Za-z0-9._-]+", "-", str(agent)).strip("-")[:40] or "unknown"
+                path = session_dir / "agents" / safe_agent / "log.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+            # last_id 使用会话目录作为键，保证分文件写入仍使用全局递增序号。
+            last_id = self.last_ids.get(session_dir)
             if last_id is None:
-                # records 是当前文件中仍可解析的记录，损坏尾行不会阻断后续恢复。
-                records = self._read_session_file(path)
+                records = self._read_all_records(session_dir)
                 last_id = max((int(rec.get("id", 0)) for rec in records), default=0)
             # rec 是最终写入 jsonl 的一条记忆记录，字段名短是为了减少上下文占用。
             rec = {
@@ -190,7 +225,7 @@ class MemoryStore:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
                 fh.flush()
-            self.last_ids[path] = rec["id"]
+            self.last_ids[session_dir] = rec["id"]
             self.session_index[self._safe_session_id(session_id)] = str(Path(workdir).resolve())
             return rec
 
@@ -198,10 +233,9 @@ class MemoryStore:
         """读取会话 jsonl；limit 为空读全部，否则只返回最后 limit 条。"""
 
         # path 是会话 jsonl 文件路径；调用 session_path 会确保目录存在。
-        path = self.session_path(workdir, session_id)
+        path = self.session_dir(workdir, session_id)
         with self.lock:
-            # records 由统一容错读取器解析，异常中断留下的半行不会破坏整个会话。
-            records = self._read_session_file(path)
+            records = self._active_records(path)
             return records[-limit:] if limit else records
 
     def list_history(self) -> list[dict[str, Any]]:
@@ -217,7 +251,11 @@ class MemoryStore:
             if not workdir:
                 continue
             # sessions 是当前项目下所有会话摘要，None 表示空文件或无法恢复的会话。
-            sessions = [self._session_summary(workdir, path) for path in sorted((project_dir / "sessions").glob("*.jsonl"))]
+            sessions = [
+                self._session_summary(workdir, path)
+                for path in sorted((project_dir / "sessions").glob("*"))
+                if path.is_dir()
+            ]
             sessions = [session for session in sessions if session is not None]
             # 会话按最后更新时间倒序排列，前端默认先看到最近会话。
             sessions.sort(key=lambda item: item["updated_at"], reverse=True)
@@ -250,8 +288,8 @@ class MemoryStore:
             # 缓存没有命中时做一次兼容扫描，用于发现进程外新写入的旧会话。
             for project in (self.root / "projects").glob("*"):
                 # session_file 是当前项目下可能匹配的会话 jsonl。
-                session_file = project / "sessions" / f"{safe_id}.jsonl"
-                if session_file.exists():
+                session_file = project / "sessions" / safe_id
+                if session_file.is_dir():
                     workdir = self._read_project_workdir(project)
                     if workdir:
                         self.session_index[safe_id] = workdir
@@ -356,87 +394,48 @@ class MemoryStore:
         return "全局长期记忆" if global_scope else "项目长期记忆"
 
     def maybe_compress(self, workdir: str, session_id: str, ctx: int) -> None:
-        """当会话记忆超过模型上下文 85% 时压缩运行日志。
-
-        用户消息、最终回复、Plan 状态和会话元数据属于恢复所需的关键记录；工具
-        事件属于可压缩运行日志。第一次压缩先汇总运行日志，仍超限时再成组丢弃最早
-        的非最近对话，始终保留最近阶段。
-        """
+        """超过上下文 65% 时追加压缩视图，原始 Agent 日志保持不变。"""
 
         with self.lock:
-            # records 是压缩前的完整会话记录。
-            records = self.read_session(workdir, session_id)
-            # max_chars 按 4 字符约 1 token 估算，并使用配置窗口的 85%。
-            max_chars = max(int(ctx * 4 * 0.85), 1000)
+            session_dir = self.session_dir(workdir, session_id)
+            records = self._read_all_records(session_dir, include_summaries=False)
+            max_chars = max(int(ctx * 4 * 0.65), 1000)
             if self._records_size(records) <= max_chars:
                 return
-
-            # critical 保存恢复对话、Plan 和会话生命周期所需的关键记录。
-            critical: list[dict[str, Any]] = []
-            # runtime_counts 统计被折叠的 agent/tool/kind 组合。
             runtime_counts: dict[str, int] = {}
-            # runtime_latest 保存每个组合最近一次输出的极简摘要。
             runtime_latest: dict[str, str] = {}
             for rec in records:
-                # is_critical 表示这条记录不能在第一阶段被丢弃。
-                is_critical = (
-                    rec.get("tl") in {"session", "input", "final", "state", "run", "capability"}
-                    or rec.get("k") in {"message", "result", "pending_plan", "plan_done"}
-                )
-                if is_critical:
-                    critical.append(dict(rec))
+                if self._critical(rec):
                     continue
-                # key 用短字符串标识一类重复运行记录。
                 key = f"{rec.get('ag', '')}/{rec.get('tl', '')}/{rec.get('k', '')}"
                 runtime_counts[key] = runtime_counts.get(key, 0) + 1
                 runtime_latest[key] = str(rec.get("out", ""))[-240:]
-
-            # detail 把重复工具调用压缩为“次数 + 最新摘要”，不保留大段命令输出。
             detail = [
                 {"key": key, "count": runtime_counts[key], "latest": runtime_latest[key]}
                 for key in sorted(runtime_counts)
             ]
-            # summary 是压缩阶段说明记录，本身也使用短时间戳。
-            summary: dict[str, Any] = {
-                "id": 0,
+            latest_cutoff = max((int(rec.get("id", 0)) for rec in records), default=0)
+            previous = [
+                rec
+                for rec in self._read_all_records(session_dir)
+                if rec.get("tl") == "memory" and rec.get("k") == "summary"
+            ]
+            if previous and int((previous[-1].get("m") or {}).get("cutoff", 0)) >= latest_cutoff:
+                return
+            summary = {
+                "id": latest_cutoff + 1,
                 "ts": utc_stamp(),
                 "ag": "manager",
                 "tl": "memory",
                 "k": "summary",
-                "out": "会话运行日志已压缩，保留对话、计划、生命周期和最近阶段。",
-                "m": {"old_count": len(records), "runtime": detail},
+                "out": "旧运行过程已折叠；原始记录仍保存在各 Agent 日志中。",
+                "m": {"old_count": len(records), "cutoff": latest_cutoff, "runtime": detail},
             }
-            # recent_ids 确保最后 20 条记录中的关键现场仍被保留。
-            recent_ids = {int(rec.get("id", 0)) for rec in records[-20:]}
-            # recent_runtime 保存最近阶段的非关键记录，并截断大字段。
-            recent_runtime = [self._compact_record(rec) for rec in records if int(rec.get("id", 0)) in recent_ids and rec not in critical]
-            compact = [summary] + critical + recent_runtime
-            compact.sort(key=lambda rec: (int(rec.get("id", 0)) != 0, int(rec.get("id", 0))))
-
-            # 仍超限时优先丢弃最早的普通对话，只保留最近 12 条关键记录和会话起点。
-            if self._records_size(compact) > max_chars and len(critical) > 12:
-                # session_meta 保存创建与重命名记录，避免压缩后会话名丢失。
-                session_meta = [rec for rec in critical if rec.get("tl") == "session"][-2:]
-                # newest_critical 是最近的任务对话与计划状态。
-                newest_critical = critical[-12:]
-                compact = [summary] + session_meta + newest_critical + recent_runtime[-8:]
-
-            # 如果单条用户长文本仍导致超限，只截断最旧记录；最近 6 条保持完整。
-            while self._records_size(compact) > max_chars and len(compact) > 8:
-                # drop_index 从 summary 后开始删除，summary 和最近记录始终保留。
-                drop_index = 1
-                compact.pop(drop_index)
-
-            # path 是原会话 JSONL，使用同目录临时文件原子替换，避免中途断电留下半文件。
-            path = self.session_path(workdir, session_id)
-            lines: list[str] = []
-            for index, rec in enumerate(compact, start=1):
-                # normalized 是副本，避免修改调用方仍持有的原始记录。
-                normalized = dict(rec)
-                normalized["id"] = index
-                lines.append(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")))
-            self._atomic_write(path, "\n".join(lines) + "\n")
-            self.last_ids[path] = len(lines)
+            path = session_dir / "agents" / "manager" / "sum.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(summary, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self.last_ids[session_dir] = summary["id"]
 
     def _read_project_workdir(self, project_dir: Path) -> str:
         """从项目 project.md 中读取真实项目路径。"""
@@ -472,8 +471,7 @@ class MemoryStore:
     def _session_summary(self, workdir: str, path: Path) -> dict[str, Any] | None:
         """把一个会话 jsonl 文件转换成历史弹窗需要的摘要。"""
 
-        # records 是会话内全部记忆记录。
-        records = self._read_session_file(path)
+        records = self._active_records(path)
         if not records:
             return None
         # messages 是可恢复到对话窗口的用户消息和最终回复。
@@ -481,11 +479,11 @@ class MemoryStore:
         # events 是整个会话产生的事件摘要，恢复会话时重新显示在右侧事件流。
         events = self._history_events(records)
         # title 是会话展示名；没有自定义名时用文件名也就是 session_id。
-        title = self._session_title(records) or path.stem
+        title = self._session_title(records) or path.name
         # last 是最后一条记录，用于更新时间和中断判断。
         last = records[-1]
         return {
-            "id": path.stem,
+            "id": path.name,
             "title": title,
             "workdir": workdir,
             "updated_at": str(last.get("ts", "")),
@@ -516,6 +514,173 @@ class MemoryStore:
                     if isinstance(record, dict):
                         records.append(record)
         return records
+
+    def _read_all_records(
+        self,
+        session_dir: Path,
+        *,
+        include_summaries: bool = True,
+    ) -> list[dict[str, Any]]:
+        """合并会话内各独立日志，仅在读取视图时按全局 id 排序。"""
+
+        if not session_dir.is_dir():
+            return []
+        paths = [session_dir / "chat.jsonl", session_dir / "tasks.jsonl"]
+        paths.extend(session_dir.glob("agents/*/log.jsonl"))
+        if include_summaries:
+            paths.extend(session_dir.glob("agents/*/sum.jsonl"))
+        records: list[dict[str, Any]] = []
+        for path in paths:
+            records.extend(self._read_session_file(path))
+        records.sort(key=lambda rec: (int(rec.get("id", 0)), str(rec.get("ts", ""))))
+        return records
+
+    def _active_records(self, session_dir: Path) -> list[dict[str, Any]]:
+        """返回压缩后的逻辑视图，原始文件不会被删除或重写。"""
+
+        records = self._read_all_records(session_dir)
+        summaries = [
+            rec for rec in records if rec.get("tl") == "memory" and rec.get("k") == "summary"
+        ]
+        if not summaries:
+            return records
+        summary = summaries[-1]
+        cutoff = int((summary.get("m") or {}).get("cutoff", 0))
+        raw = [rec for rec in records if rec.get("k") != "summary"]
+        critical = [rec for rec in raw if int(rec.get("id", 0)) <= cutoff and self._critical(rec)]
+        recent = [rec for rec in raw if int(rec.get("id", 0)) > cutoff]
+        if len(recent) < 20:
+            recent_ids = {int(rec.get("id", 0)) for rec in raw[-(20 - len(recent)) :]}
+            recent = [
+                self._compact_record(rec)
+                for rec in raw
+                if int(rec.get("id", 0)) in recent_ids and rec not in critical
+            ] + recent
+        active = [summary] + critical[-16:] + recent
+        unique: dict[int, dict[str, Any]] = {}
+        for rec in active:
+            unique[int(rec.get("id", 0))] = rec
+        return [summary] + [
+            rec for _, rec in sorted(unique.items()) if rec is not summary
+        ]
+
+    @staticmethod
+    def _critical(rec: dict[str, Any]) -> bool:
+        return bool(
+            rec.get("tl") in {"session", "input", "final", "state", "run", "capability", "task"}
+            or rec.get("k")
+            in {"message", "result", "pending_plan", "plan_done", "handoff", "outcome", "needs_clarification"}
+        )
+
+    def append_task(
+        self,
+        workdir: str,
+        session_id: str,
+        agent: str,
+        kind: str,
+        text: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """写入只包含任务或结果的 Agent 交接记录。"""
+
+        if kind not in {"handoff", "outcome", "needs_clarification"}:
+            raise ValueError("非法任务交接类型")
+        return self.append(workdir, session_id, agent, "task", kind, text, payload)
+
+    def save_file(
+        self,
+        workdir: str,
+        session_id: str,
+        name: str,
+        mime: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        """保存图片附件，返回不含二进制内容的元数据。"""
+
+        if not content or len(content) > 20 * 1024 * 1024:
+            raise ValueError("单张图片必须在 1 字节到 20 MiB 之间")
+        allowed = {
+            "image/png": b"\x89PNG\r\n\x1a\n",
+            "image/jpeg": b"\xff\xd8\xff",
+            "image/gif": b"GIF8",
+            "image/webp": b"RIFF",
+        }
+        if mime not in allowed or not content.startswith(allowed[mime]):
+            raise ValueError("仅支持真实的 PNG、JPEG、WebP 或 GIF 图片")
+        if mime == "image/webp" and content[8:12] != b"WEBP":
+            raise ValueError("WebP 文件头无效")
+        try:
+            with Image.open(BytesIO(content)) as image:
+                width, height = image.size
+                actual_mime = Image.MIME.get(image.format or "", "")
+                image.verify()
+        except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
+            raise ValueError("图片内容损坏或无法解码") from exc
+        if actual_mime != mime or width <= 0 or height <= 0:
+            raise ValueError("图片真实格式或尺寸无效")
+        if width * height > 100_000_000:
+            raise ValueError("图片像素尺寸过大")
+        digest = hashlib.sha256(content).hexdigest()
+        ext = mimetypes.guess_extension(mime) or ".bin"
+        if ext == ".jpe":
+            ext = ".jpg"
+        folder = self.session_dir(workdir, session_id) / "files"
+        path = folder / f"{digest}{ext}"
+        if not path.exists():
+            path.write_bytes(content)
+        index_path = folder / "index.json"
+        index = {}
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                index = {}
+        info = {
+            "id": digest,
+            "name": Path(name).name[:160] or f"image{ext}",
+            "mime": mime,
+            "size": len(content),
+            "width": width,
+            "height": height,
+            "file": path.name,
+        }
+        index[digest] = info
+        self._atomic_write(index_path, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        return info
+
+    def file_info(self, workdir: str, session_id: str, file_id: str) -> dict[str, Any]:
+        """读取附件元数据并返回真实路径。"""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", file_id):
+            raise ValueError("非法附件 id")
+        folder = self.session_dir(workdir, session_id) / "files"
+        index_path = folder / "index.json"
+        if not index_path.exists():
+            raise FileNotFoundError(file_id)
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        info = dict(index.get(file_id) or {})
+        if not info:
+            raise FileNotFoundError(file_id)
+        path = (folder / str(info["file"])).resolve()
+        if folder.resolve() not in path.parents or not path.is_file():
+            raise FileNotFoundError(file_id)
+        info["path"] = path
+        return info
+
+    def delete_file(self, workdir: str, session_id: str, file_id: str) -> bool:
+        """删除会话附件及索引项。"""
+
+        try:
+            info = self.file_info(workdir, session_id, file_id)
+        except FileNotFoundError:
+            return False
+        folder = self.session_dir(workdir, session_id) / "files"
+        Path(info["path"]).unlink(missing_ok=True)
+        index_path = folder / "index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        index.pop(file_id, None)
+        self._atomic_write(index_path, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        return True
 
     def _history_messages(self, records: list[dict[str, Any]]) -> list[dict[str, str]]:
         """从完整会话记录中提取前端对话窗口需要恢复的消息。"""
@@ -646,6 +811,40 @@ class MemoryStore:
             raise ValueError("非法会话 id")
         return clean
 
+    def _archive_legacy_sessions(self) -> None:
+        """把旧版单文件会话移动到独立归档，绝不导入新版活动记忆。"""
+
+        legacy_files = sorted((self.root / "projects").glob("*/sessions/*.jsonl"))
+        if not legacy_files:
+            return
+        archive_root = self.root.parent / "legacy"
+        archive_id = utc_stamp().replace(":", "").replace("-", "")
+        destination_root = archive_root / archive_id
+        manifest: list[dict[str, Any]] = []
+        for source in legacy_files:
+            relative = source.relative_to(self.root)
+            destination = destination_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            content = source.read_bytes()
+            manifest.append(
+                {
+                    "source": relative.as_posix(),
+                    "target": destination.relative_to(archive_root).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            )
+            source.replace(destination)
+        self._atomic_write(
+            destination_root / "index.json",
+            json.dumps(
+                {"version": 1, "archived_at": utc_stamp(), "files": manifest},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+
     def _rebuild_session_index(self) -> None:
         """启动时扫描已有项目，建立会话到工作目录的内存索引。"""
 
@@ -661,14 +860,17 @@ class MemoryStore:
                 workdir = self._read_project_workdir(project_dir)
                 if not workdir:
                     continue
-                for session_path in (project_dir / "sessions").glob("*.jsonl"):
-                    self.session_index[session_path.stem] = workdir
+                for session_path in (project_dir / "sessions").glob("*"):
+                    if session_path.is_dir():
+                        self.session_index[session_path.name] = workdir
 
     def _normalize_existing_timestamps(self) -> None:
         """把已有 JSONL 中的长 ISO 时间迁移为紧凑 UTC 时间。"""
 
         with self.lock:
-            for path in (self.root / "projects").glob("*/sessions/*.jsonl"):
+            for path in (self.root / "projects").glob("*/sessions/**/*.jsonl"):
+                if path.name == "index.json":
+                    continue
                 # records 是容错读取后的旧会话内容。
                 records = self._read_session_file(path)
                 changed = False
