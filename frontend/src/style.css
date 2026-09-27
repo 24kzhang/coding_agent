@@ -973,14 +973,16 @@ select:disabled {
 .actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
   padding-bottom: 1px;
 }
 
 .send-button {
   min-width: 82px;
+  order: -1;
 }
 
 .capability-button {
@@ -1601,6 +1603,11 @@ select:disabled {
     padding: 9px;
   }
 
+  .status {
+    overflow: auto;
+    scrollbar-gutter: stable;
+  }
+
   .status-title {
     grid-template-columns: 1fr;
     gap: 5px;
@@ -1651,11 +1658,6 @@ select:disabled {
 
   .composer textarea {
     height: 68px;
-  }
-
-  .actions {
-    flex-wrap: wrap;
-    overflow: visible;
   }
 
   .image-tray img {
