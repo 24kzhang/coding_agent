@@ -161,6 +161,73 @@ def test_planner_rejects_plan_that_stays_invalid_after_repairs(tmp_path, monkeyp
     assert not (tmp_path / "project" / "docs" / "plans" / "plan-invalid.md").exists()
 
 
+def test_planner_keeps_successful_plan_in_session_memory_only(tmp_path, monkeypatch) -> None:
+    """Plan 权限层必须保持工作目录只读，成功计划只写入分会话记忆。"""
+
+    memory = MemoryStore(tmp_path / "mem")
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), memory)
+
+    class Usage:
+        total = 2
+
+    class GoodClient:
+        last_usage = Usage()
+        cfg = SimpleNamespace(id="good")
+
+        def chat_json(self, _messages):
+            return {"status": "plan", "title": "计划", "markdown": "# 可执行计划\n\n完成全部需求。"}
+
+    monkeypatch.setattr(graph, "_client", lambda *_args: GoodClient())
+    monkeypatch.setattr(graph, "_ctx_text", lambda _state: "创建网站")
+    monkeypatch.setattr("backend.agents.planner._plan_quality_issues", lambda *_args: [])
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+
+    result = planner(
+        graph,
+        {
+            "session_id": "plan-memory",
+            "workdir": str(workdir),
+            "text": "创建网站",
+            "tokens": 0,
+        },
+    )
+
+    assert result["plan"]["path"] is None
+    assert "# 可执行计划" in result["final"]
+    assert list(workdir.rglob("*")) == []
+    assert graph._latest_saved_plan(str(workdir), "plan-memory")["markdown"].startswith("# 可执行计划")
+
+
+def test_plan_quality_requires_visible_attachment_reference_codes(tmp_path) -> None:
+    """图片任务的计划必须逐张关联附件并抄录图内参考编号。"""
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    state = {
+        "text": "根据附件规划页面",
+        "attachments": [
+            {"name": "home.png"},
+            {"name": "detail.png"},
+            {"name": "mobile.png"},
+        ],
+    }
+
+    missing = _plan_quality_issues(
+        graph,
+        state,
+        "home.png、detail.png、mobile.png 分别用于首页、详情和移动端。",
+    )
+    complete = _plan_quality_issues(
+        graph,
+        state,
+        "home.png 参考编号 FIT-HOME-27；detail.png 参考编号 FIT-DETAIL-27；"
+        "mobile.png 参考编号 FIT-MOBILE-27。",
+    )
+
+    assert any("参考编号" in item for item in missing)
+    assert not any("参考编号" in item for item in complete)
+
+
 def test_planner_switches_repair_model_when_quality_stagnates(tmp_path, monkeypatch) -> None:
     """同一模型修订后问题数不下降时，应换备用模型继续，而不是重复无效调用。"""
 

@@ -42,6 +42,14 @@ SKILL_TOTAL_LIMIT = 100_000
 MCP_OUTPUT_LIMIT = 16_000
 # ID_PATTERN 是 Skill、MCP 服务和动态工具名可使用的安全字符集合。
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+PROXY_ENV_NAMES = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+}
 
 
 class McpServerConfig(BaseModel):
@@ -422,6 +430,24 @@ class McpClient:
         self.auth_lock = threading.Lock()
         # 进程退出时关闭持久 MCP 子进程，避免本地开发停止后残留后台服务。
         atexit.register(self.close)
+
+    @staticmethod
+    def _process_env() -> dict[str, str]:
+        """复制进程环境，并移除格式损坏的代理地址，避免 MCP 子进程启动即失败。"""
+
+        env = dict(os.environ)
+        for name in PROXY_ENV_NAMES:
+            value = env.get(name)
+            if not value:
+                continue
+            try:
+                parsed = httpx.URL(value)
+                if not parsed.scheme or not parsed.host:
+                    raise ValueError("代理地址缺少协议或主机")
+                parsed.port
+            except (TypeError, ValueError, httpx.InvalidURL):
+                env.pop(name, None)
+        return env
 
     def list_tools(self, config: McpServerConfig, workdir: str) -> list[McpToolInfo]:
         """连接 MCP 服务并返回标准化工具定义。"""
@@ -861,7 +887,7 @@ class McpClient:
                 command=command,
                 args=args,
                 env={
-                    **os.environ,
+                    **self._process_env(),
                     **{key: self._expand(value, workdir) for key, value in config.env.items()},
                     **credential_env,
                     **temporary_env,
@@ -890,6 +916,7 @@ class McpClient:
         async with httpx.AsyncClient(
             headers={key: self._expand(value, workdir) for key, value in config.headers.items()},
             timeout=config.timeout,
+            trust_env=False,
         ) as http_client:
             async with streamable_http_client(
                 self._expand(config.url or "", workdir),

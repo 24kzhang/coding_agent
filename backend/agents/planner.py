@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.agents.prompts import PLANNER_PROMPT
@@ -278,6 +277,18 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         if missing_guidelines:
             issues.append("所选 web-design-guidelines 关键验收遗漏：" + "、".join(missing_guidelines))
 
+    attachments = list(state.get("attachments") or [])
+    if attachments:
+        missing_names = [
+            str(item.get("name") or item.get("id") or "未命名附件")
+            for item in attachments
+            if str(item.get("name") or "") not in markdown
+        ]
+        if missing_names:
+            issues.append("计划未逐张关联图片附件：" + "、".join(missing_names))
+        if not re.search(r"(?i)(?:参考编号|reference\s*(?:id|code)|FIT[-_][A-Z0-9_-]+)", markdown):
+            issues.append("图片附件可能含可见参考编号；必须重新查看原图并逐张准确抄录，不能只写文件名")
+
     implementation_fences = sum(
         markdown.lower().count(f"```{language}") for language in ("python", "javascript", "typescript", "html", "css")
     )
@@ -428,11 +439,12 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                         {"role": "system", "content": PLANNER_PROMPT},
                         {
                             "role": "user",
-                            "content": (
+                            "content": graph._multimodal_content(
                                 context_text
                                 + "\n\n模型刚才生成了澄清问题，但当前用户需求已经足够执行。"
                                 "请按以下推荐答案直接生成完整可执行计划，不要再返回 questions：\n"
-                                + _recommended_plan_answers(data["questions"])
+                                + _recommended_plan_answers(data["questions"]),
+                                state,
                             ),
                         },
                     ]
@@ -465,13 +477,14 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 {"role": "system", "content": PLANNER_PROMPT},
                 {
                     "role": "user",
-                    "content": (
+                    "content": graph._multimodal_content(
                         context_text
                         + "\n\n待修订计划初稿：\n"
                         + str(best_data.get("markdown") or "")
                         + "\n\n必须逐项修复以下问题，并返回一份自洽、可直接执行的完整计划：\n- "
                         + "\n- ".join(best_issues)
-                        + "\n不得只追加勘误；要消除初稿中的冲突和错误字段。"
+                        + "\n不得只追加勘误；要消除初稿中的冲突和错误字段。",
+                        state,
                     ),
                 },
             ]
@@ -557,13 +570,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     if data.get("status") == "plan" or state.get("execute_plan"):
         # md 是最终计划正文；缺失时使用兜底计划。
         md = graph._redact_plan_secrets(data.get("markdown") or graph._fallback_plan_markdown(state))
-        # plan_dir 是用户项目内保存计划的目录。
-        plan_dir = Path(state["workdir"]) / "docs" / "plans"
-        plan_dir.mkdir(parents=True, exist_ok=True)
-        # path 是本会话对应的计划文件路径。
-        path = plan_dir / f"{state['session_id']}.md"
-        path.write_text(md.strip() + "\n", encoding="utf-8")
-        graph._emit(state, "planner", "plan", f"计划已保存：{path}")
+        # Plan 模式是只读权限层；计划正文只进入会话记忆，绝不写入用户工作目录。
+        graph._emit(state, "planner", "plan", "计划已保存到当前会话记忆")
         graph.memory.append(
             state["workdir"],
             state["session_id"],
@@ -571,15 +579,19 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             "state",
             "plan_done",
             "计划已生成",
-            {"status": "plan", "path": str(path), "markdown": md, "goal": graph._plan_goal(state)},
+            {"status": "plan", "path": None, "markdown": md, "goal": graph._plan_goal(state)},
         )
         # execute_plan=True 时直接进入 repo，否则停在 final 等用户确认。
         route = "repo" if state.get("execute_plan") else "final"
         # final 是返回给用户的确认提示；直接执行时保持空字符串。
-        final = "" if route == "repo" else "计划已生成，等待你确认执行。\n计划文件：" + str(path) + "\n确认后回复“执行计划”。"
+        final = (
+            ""
+            if route == "repo"
+            else md.strip() + "\n\n计划已保存到当前会话记忆。确认后回复“执行计划”。"
+        )
         return {
             **state,
-            "plan": {"status": "plan", "path": str(path), "markdown": md},
+            "plan": {"status": "plan", "path": None, "markdown": md},
             "route": route,
             "after_repo": "coder",
             "after_verify": "doc",

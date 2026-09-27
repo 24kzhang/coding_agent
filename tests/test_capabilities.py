@@ -18,6 +18,18 @@ from llm import ModelStore
 from scripts.github_mcp import target
 
 
+def test_mcp_process_env_removes_only_malformed_proxy_values(monkeypatch) -> None:
+    """MCP 子进程不应因格式损坏的代理变量启动失败，也不能无条件清空正常代理。"""
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1::1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+
+    env = McpClient._process_env()
+
+    assert "HTTP_PROXY" not in env
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:8080"
+
+
 def test_skill_discovery_and_selected_content_loading(tmp_path: Path) -> None:
     """只发现规范 Skill，并且只读取用户明确选择的正文。"""
 
