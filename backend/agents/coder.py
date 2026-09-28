@@ -241,6 +241,30 @@ def _is_dependency_mutation_command(command: str) -> bool:
     return False
 
 
+def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool) -> list[dict]:
+    """构造原生工具清单；用户停止读取后不再向模型暴露只读文件工具。"""
+
+    specs = tool_specs()
+    if reads_forbidden:
+        blocked = {"list_files", "read_file", "search_files"}
+        specs = [item for item in specs if str(item.get("name")) not in blocked]
+    specs.extend(
+        {
+            "name": str(item["action"]),
+            "description": str(item.get("description") or "调用已授权 MCP 工具"),
+            "parameters": item.get("input_schema") or {"type": "object", "properties": {}},
+            "risk": "low" if item.get("shared") else "medium",
+            "permission": "allow",
+            "timeout": 60,
+            "concurrency": "parallel" if item.get("shared") else "serial",
+            "output_limit": 12_000,
+            "mode": "read" if item.get("shared") else "write",
+        }
+        for item in mcp_tools
+    )
+    return specs
+
+
 def _observation_brief(action: dict, observation: dict) -> str:
     """把工具返回值转换为下一轮模型可直接判断的权威结果。"""
 
@@ -412,6 +436,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
         task_brief = _task_brief(state)
         planned_guidance_revision = int(state.get("guidance_revision", 0))
+        reads_forbidden = _guidance_forbids_reads(state)
         # recent_observations 只保留最近 6 条精简事件；文件内容由 file_observations 单独管理。
         recent_observations = [_middle_trim(item, 1_200) for item in observations[-6:]]
         # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
@@ -457,6 +482,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             + "若目标文件出现在“已读取且当前可直接修改”列表，禁止再次 read_file；短改动直接 replace_file，长函数直接 replace_block。\n"
             + "run_command 已经在项目工作目录执行，命令中禁止使用 cd，也不要添加工作目录前缀。\n"
             + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
+            + (
+                "用户已禁止继续读取和搜索：本轮原生工具清单已移除 "
+                "list_files/read_file/search_files。只能直接写入、精确修改或运行验证命令。\n"
+                if reads_forbidden
+                else ""
+            )
             + finish_instruction
             + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
             + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
@@ -487,21 +518,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 and "tools" in getattr(client.cfg, "capabilities", [])
                 and "longcat" not in model_name
             ):
-                native_specs = tool_specs()
-                native_specs.extend(
-                    {
-                        "name": str(item["action"]),
-                        "description": str(item.get("description") or "调用已授权 MCP 工具"),
-                        "parameters": item.get("input_schema") or {"type": "object", "properties": {}},
-                        "risk": "low" if item.get("shared") else "medium",
-                        "permission": "allow",
-                        "timeout": 60,
-                        "concurrency": "parallel" if item.get("shared") else "serial",
-                        "output_limit": 12_000,
-                        "mode": "read" if item.get("shared") else "write",
-                    }
-                    for item in mcp_tools
-                )
+                native_specs = _native_coder_specs(mcp_tools, reads_forbidden)
                 data = client.chat_tools(
                     messages,
                     native_specs,
@@ -696,7 +713,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             tool = str(action.get("tool") or "")
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
-            reads_forbidden = _guidance_forbids_reads(state)
             inspection_command = tool == "run_command" and _is_inspection_command(
                 str(action.get("cmd", ""))
             )

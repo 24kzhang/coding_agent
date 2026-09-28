@@ -8,6 +8,7 @@ from backend.agents.coder import (
     _is_dependency_mutation_command,
     _is_discovery_command,
     _is_inspection_command,
+    _native_coder_specs,
     _observation_brief,
     _test_brief,
     coder,
@@ -1410,6 +1411,15 @@ def test_shell_inspection_and_read_stop_guidance_are_detected() -> None:
     assert _is_inspection_command("uv run pytest -q") is False
     assert _guidance_forbids_reads({"guidance": ["不要再搜索或读取，立即完成写入。"]}) is True
     assert _guidance_forbids_reads({"guidance": ["请先查看相关文件。"]}) is False
+
+
+def test_native_tool_specs_hide_file_reads_after_stop_guidance() -> None:
+    normal = {item["name"] for item in _native_coder_specs([], reads_forbidden=False)}
+    restricted = {item["name"] for item in _native_coder_specs([], reads_forbidden=True)}
+
+    assert {"list_files", "read_file", "search_files"} <= normal
+    assert not {"list_files", "read_file", "search_files"} & restricted
+    assert {"write_file", "replace_file", "run_command"} <= restricted
 
 
 class RepairContextClient:
