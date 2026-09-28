@@ -262,6 +262,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             return False
         failed_model_ids.add(next_cfg.id)
         client = LlmClient(next_cfg)
+        client.default_effort = graph.model_store.effort_for_agent("coder", state.get("effort"))
         model_name = str(next_cfg.model).lower()
         parse_failures = 0
         empty_steps = 0
@@ -428,6 +429,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "content": graph._multimodal_content(stable_text, state, dynamic_text),
             },
         ]
+        # usage_before 用对象身份区分“本次响应已产生用量但解析失败”和“请求前就失败”；
+        # 后一种情况不能重复累计上一轮用量。
+        usage_before = getattr(client, "last_usage", None)
         try:
             # data 是模型返回的 ReAct JSON。
             if (
@@ -471,8 +475,31 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         except LlmBalanceError:
             raise
         except LlmError as exc:
+            failed_usage = getattr(client, "last_usage", None)
+            if failed_usage is not usage_before:
+                graph._add_tokens(state, failed_usage)
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = graph._trim(str(exc), 240)
+            if (
+                "原生工具调用参数不是合法 JSON" in error_text
+                and isinstance(client, LlmClient)
+                and client.default_effort not in {"minimal", "low"}
+            ):
+                supported = set(getattr(client.cfg, "efforts", []))
+                lowered = "low" if "low" in supported else "minimal" if "minimal" in supported else ""
+                if lowered:
+                    previous_effort = client.default_effort
+                    client.default_effort = lowered
+                    graph._emit(
+                        state,
+                        "coder",
+                        "model",
+                        (
+                            f"原生工具参数被推理输出截断，思考等级已从 {previous_effort} "
+                            f"降为 {lowered} 后重试"
+                        ),
+                        data={"reason": "invalid_tool_json", "effort": lowered},
+                    )
             protocol = "LongCat 原生工具标签" if "longcat" in model_name else "约定 JSON"
             transient_error = _is_transient_llm_error(error_text)
             if transient_error:

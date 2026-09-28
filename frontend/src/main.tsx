@@ -1443,7 +1443,7 @@ function emptyModel(): ModelConfig {
     protocol: "auto",
     capabilities: ["text", "vision", "tools", "reasoning"],
     efforts: ["minimal", "low", "medium", "high", "max"],
-    default_effort: "high",
+    default_effort: "low",
     max_output_tokens: 16384
   };
 }

@@ -41,7 +41,8 @@ class ModelConfig(BaseModel):
         default_factory=lambda: ["minimal", "low", "medium", "high", "max"]
     )
     # default_effort 是没有 Agent 或单次请求覆盖时使用的等级。
-    default_effort: ReasoningEffort = "high"
+    # 低思考足以覆盖日常工具编排，也能避免推理 token 挤占工具参数输出预算。
+    default_effort: ReasoningEffort = "low"
     # max_output_tokens 为各 Agent 的输出预算提供模型级上限。
     max_output_tokens: int = Field(default=16_384, ge=256, le=262_144)
 

@@ -11,7 +11,76 @@ from backend.agents.coder import (
 )
 from backend.agents.graph import AgentGraph
 from backend.memory import MemoryStore
-from llm import LlmError, ModelStore
+from llm import LlmClient, LlmError, ModelStore
+from llm.client import LlmUsage
+
+
+def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
+    """工具参数被推理截断时应计量本次用量，并降低思考等级后重试。"""
+
+    events = []
+    graph = AgentGraph(
+        ModelStore(tmp_path / "models.json"),
+        MemoryStore(tmp_path / "mem"),
+        emit=events.append,
+    )
+
+    class MalformedClient(LlmClient):
+        def __init__(self):
+            self.cfg = SimpleNamespace(
+                id="deepseek",
+                model="deepseek-flash",
+                capabilities=["tools"],
+                efforts=["minimal", "low", "medium", "high", "max"],
+            )
+            self.default_effort = "high"
+            self.last_usage = LlmUsage()
+            self.calls = 0
+
+        def chat_tools(self, messages, tools, *, max_tokens=None, effort=None):
+            self.calls += 1
+            if self.calls == 1:
+                self.last_usage = LlmUsage(
+                    prompt=1_000,
+                    completion=6_000,
+                    cache_miss=1_000,
+                    reasoning=5_900,
+                )
+                raise LlmError("原生工具调用参数不是合法 JSON")
+            self.last_usage = LlmUsage(
+                prompt=1_000,
+                completion=10,
+                cached=900,
+                cache_miss=100,
+                reasoning=2,
+            )
+            return {"actions": [], "done": True, "summary": "已完成"}
+
+    client = MalformedClient()
+    graph._client = lambda _agent, _state: client
+    project = tmp_path / "project"
+    project.mkdir()
+    result = coder(
+        graph,
+        {
+            "session_id": "invalid-tool-json",
+            "workdir": str(project),
+            "text": "创建入口文件",
+            "repo": {"files": [], "snippets": {}, "stack": ["Python"]},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert result["tokens"] == 8_010
+    assert result["output_tokens"] == 6_010
+    assert client.default_effort == "low"
+    assert any(event.kind == "model" and "降为 low" in event.msg for event in events)
 
 
 class ProgressClient:
