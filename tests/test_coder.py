@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from api.schema import ModelConfig
 from backend.agents.coder import (
     _guidance_forbids_reads,
     _is_dependency_mutation_command,
@@ -138,6 +139,79 @@ def test_coder_blocks_shell_read_after_user_stop_guidance(tmp_path) -> None:
     assert result["coding_ok"] is True
     assert result["commands"] == []
     assert (project / "done.js").exists()
+
+
+def test_coder_rejects_credentials_in_write_actions_and_redacts_model_context(tmp_path) -> None:
+    """模型不得把真实密钥写入源码，后续请求也不能再次看到该值。"""
+
+    secret = "sk-never-write-this-123456"
+    store = ModelStore(tmp_path / "models.json")
+    store.upsert(
+        ModelConfig(
+            id="safe",
+            name="安全测试",
+            base_url="https://api.example.com",
+            api_key=secret,
+            model="safe-model",
+        )
+    )
+    graph = AgentGraph(store, MemoryStore(tmp_path / "mem"))
+
+    class SecretWriter:
+        def __init__(self):
+            self.calls = 0
+            self.last_usage = SimpleNamespace(total=0)
+
+        def chat_json(self, messages, temperature=0.1):
+            self.calls += 1
+            assert secret not in str(messages)
+            if self.calls == 1:
+                return {
+                    "actions": [
+                        {
+                            "tool": "write_file",
+                            "path": "smoke.sh",
+                            "content": f"API_KEY={secret}\n",
+                        }
+                    ],
+                    "done": False,
+                }
+            return {
+                "actions": [
+                    {
+                        "tool": "write_file",
+                        "path": "smoke.sh",
+                        "content": "从私密配置读取密钥\n",
+                    }
+                ],
+                "done": True,
+                "summary": "已安全写入",
+            }
+
+    client = SecretWriter()
+    graph._client = lambda _agent, _state: client
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = coder(
+        graph,
+        {
+            "session_id": "secret-write",
+            "workdir": str(project),
+            "text": f"创建脚本，参考值 {secret}",
+            "repo": {"files": [], "snippets": {}, "stack": []},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert secret not in (project / "smoke.sh").read_text(encoding="utf-8")
+    assert client.calls == 2
 
 
 class ProgressClient:

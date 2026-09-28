@@ -162,7 +162,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
             content = observed[:read_limit]
             if truncated:
                 content += "\n[审查上下文在此截断，磁盘文件仍有后续内容；不得据此断言源码不完整。]"
-            review_files.append(f"## {rel}\n{content}")
+            review_files.append(f"## {rel}\n{graph.model_store.redact_text(content)}")
             budget -= len(content)
         try:
             client = graph._client("verifier", state)
@@ -176,11 +176,13 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                         "role": "user",
                         "content": graph._ctx_text(state)
                         + "\n\n仓库事实摘要（字段和路径以这里及变更文件为准，优先级高于计划假设）：\n"
-                        + str((state.get("repo") or {}).get("snippets") or {})[:24_000]
+                        + graph.model_store.redact_text(
+                            str((state.get("repo") or {}).get("snippets") or {})[:24_000]
+                        )
                         + "\n\n变更文件：\n"
                         + "\n\n".join(review_files)
                         + "\n\n已运行检查：\n"
-                        + str(tests),
+                        + graph.model_store.redact_text(tests),
                     },
                 ],
                 temperature=0,
@@ -209,6 +211,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
             )
             ok = False
     state = graph._apply_guidance(state, checkpoint="验证阶段结束前")
+    tests = graph.model_store.redact(tests)
     graph.memory.append(
         state["workdir"],
         state["session_id"],

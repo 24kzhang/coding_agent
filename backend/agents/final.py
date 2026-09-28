@@ -44,7 +44,7 @@ def final(graph: AgentGraph, state: AgentState) -> AgentState:
     # duration_ms 使用 run() 写入的单调时钟起点计算，不受系统时间变化影响。
     duration_ms = int((time.monotonic() - float(state.get("started_at", time.monotonic()))) * 1000)
     # result 是返回给前端的结构化 TaskResult 字典。
-    result = {
+    result = graph.model_store.redact({
         "ok": ok,
         "summary": summary,
         "files": state.get("changes", []),
@@ -54,7 +54,8 @@ def final(graph: AgentGraph, state: AgentState) -> AgentState:
         "doc_path": (state.get("repo") or {}).get("doc_path"),
         "tokens": int(state.get("tokens", 0)),
         "duration_ms": duration_ms,
-    }
+    })
+    summary = graph.model_store.redact_text(summary)
     if state.get("executing_plan") and ok:
         # 只有执行和验证都成功才结束计划生命周期；失败或中断时保留计划供用户重试。
         graph.memory.append(

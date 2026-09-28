@@ -27,7 +27,7 @@ def repo(graph: AgentGraph, state: AgentState) -> AgentState:
         if budget <= 0:
             break
         # chunk 是文件开头片段；后续 Coder 可通过 read_file 分段读取完整内容。
-        chunk = fs.read(rel, min(7000, budget))
+        chunk = graph.model_store.redact_text(fs.read(rel, min(7000, budget)))
         snippets[rel] = chunk
         budget -= len(chunk)
     # stack 是根据文件名粗略识别的技术栈。

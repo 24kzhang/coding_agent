@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +41,41 @@ class ModelStore:
         # 将原始 dict 转成 Pydantic 模型，保证字段类型和默认值一致。
         return [ModelConfig(**item) for item in data.get("models", [])]
 
+    def redact_text(self, value: Any) -> str:
+        """从任意可展示文本中移除已配置密钥和常见凭据字面量。"""
+
+        text = str(value)
+        # 真实配置值优先精确替换。过短测试值不参与，避免把普通字母误删。
+        for model in self.all():
+            secret = str(model.api_key or "")
+            if len(secret) >= 8:
+                text = text.replace(secret, "[密钥已脱敏]")
+        # 即使模型凭空生成了一个未配置的密钥，也不能让它进入源码、事件或记忆。
+        token_pattern = re.compile(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b")
+        return token_pattern.sub("[密钥已脱敏]", text)
+
+    def redact(self, value: Any) -> Any:
+        """递归脱敏事件、结果和记忆载荷，同时保留原有结构。"""
+
+        if isinstance(value, dict):
+            return {str(key): self.redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self.redact(item) for item in value)
+        if isinstance(value, str):
+            return self.redact_text(value)
+        return value
+
+    def contains_secret(self, value: Any) -> bool:
+        """判断工具参数是否含真实或疑似凭据，供写入前的权限闸门使用。"""
+
+        text = str(value)
+        return self.redact_text(text) != text
+
     def model_map(self) -> AgentModelMap:
         """读取每个智能体绑定的模型 id。"""
 
-        # data 是 models.json 的完整内容。
-        data = self._read()
         profiles = self.profiles()
         return AgentModelMap(
             **{name: str(profile["model_id"]) for name, profile in profiles.model_dump().items()}
@@ -256,7 +287,7 @@ class ModelStore:
                 mapped[agent] = fallback
         data["agent_models"] = mapped
         profiles = self.profiles().model_dump()
-        for name, profile in profiles.items():
+        for profile in profiles.values():
             if profile["model_id"] == model_id:
                 profile["model_id"] = fallback
         data["agent_profiles"] = profiles

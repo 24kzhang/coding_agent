@@ -472,6 +472,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "content": graph._multimodal_content(stable_text, state, dynamic_text),
             },
         ]
+        # 任何真实或疑似密钥都不能再次发送给模型。受控 model_copy 不依赖模型看到密钥。
+        messages = graph.model_store.redact(messages)
         # usage_before 用对象身份区分“本次响应已产生用量但解析失败”和“请求前就失败”；
         # 后一种情况不能重复累计上一轮用量。
         usage_before = getattr(client, "last_usage", None)
@@ -686,7 +688,22 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             inspection_command = tool == "run_command" and _is_inspection_command(
                 str(action.get("cmd", ""))
             )
-            if reads_forbidden and (tool in {"list_files", "read_file", "search_files"} or inspection_command):
+            secret_write = tool != "model_copy" and tool in {
+                "append_file",
+                "replace_block",
+                "replace_file",
+                "run_command",
+                "write_file",
+            } and graph.model_store.contains_secret(action)
+            if secret_write:
+                observation = {
+                    "ok": False,
+                    "text": (
+                        "拒绝执行：工具参数包含真实或疑似凭据。密钥只能通过 model_copy "
+                        "写入被忽略的私密配置；源码、脚本、命令和测试必须使用占位符或从配置读取。"
+                    ),
+                }
+            elif reads_forbidden and (tool in {"list_files", "read_file", "search_files"} or inspection_command):
                 duplicate_read_failures += 1
                 observation = {
                     "ok": False,
@@ -758,12 +775,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             else:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
+            observation = graph.model_store.redact(observation)
             seen_actions.add(signature)
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and path:
                 marker = "\n"
                 raw_text = str(observation["text"])
-                file_observations[path] = _middle_trim(raw_text.split(marker, 1)[-1], FILE_CONTEXT_LIMIT)
+                file_observations[path] = _middle_trim(
+                    graph.model_store.redact_text(raw_text.split(marker, 1)[-1]),
+                    FILE_CONTEXT_LIMIT,
+                )
                 observations.append(f"已读取当前文件：{path}")
             else:
                 observations.append(_observation_brief(action, observation))
@@ -776,7 +797,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     try:
                         # 定位失败后立即把真实磁盘内容提升为最近观察。部分模型会忽略较早的
                         # 文件快照并继续猜旧文本，这条短观察能让下一步直接使用现有锚点。
-                        refreshed = fs.read(path, FILE_CONTEXT_LIMIT)
+                        refreshed = graph.model_store.redact_text(
+                            fs.read(path, FILE_CONTEXT_LIMIT)
+                        )
                         file_observations[path] = refreshed
                         read_paths.add(path)
                         observations.append(
@@ -832,7 +855,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             try:
                 # 工具成功写入后，以磁盘为唯一事实源重新加载文件。下一轮模型可直接基于这个
                 # 最新快照继续 replace_file，不需要经过“修改 -> 再读 -> 再修改”的空转循环。
-                file_observations[mutated_path] = fs.read(mutated_path, FILE_CONTEXT_LIMIT)
+                file_observations[mutated_path] = graph.model_store.redact_text(
+                    fs.read(mutated_path, FILE_CONTEXT_LIMIT)
+                )
                 read_paths.add(mutated_path)
                 observations.append(f"已自动刷新修改后的当前文件：{mutated_path}；下一轮禁止重复读取，可直接继续修改。")
             except (OSError, ValueError):
@@ -880,6 +905,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         coding_summary = "Coding 在最大 ReAct 步数内没有明确完成任务。"
     # unique_changes 去重并排序，保证最终结果稳定。
     unique_changes = sorted(dict.fromkeys(changes))
+    safe_commands = graph.model_store.redact(commands)
+    safe_summary = graph.model_store.redact_text(coding_summary)
     graph.memory.append(
         state["workdir"],
         state["session_id"],
@@ -887,15 +914,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         "react",
         "summary",
         f"变更文件：{unique_changes}",
-        {"commands": commands, "ok": coding_ok, "summary": coding_summary},
+        {"commands": safe_commands, "ok": coding_ok, "summary": safe_summary},
     )
     return {
         **state,
         "changes": unique_changes,
-        "commands": commands,
+        "commands": safe_commands,
         "retry": retry + 1,
         "coding_ok": coding_ok,
-        "coding_summary": coding_summary,
+        "coding_summary": safe_summary,
         "coded_guidance_revision": int(state.get("guidance_revision", 0)),
-        "error": "" if coding_ok else coding_summary,
+        "error": "" if coding_ok else safe_summary,
     }

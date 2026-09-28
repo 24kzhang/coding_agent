@@ -175,7 +175,7 @@ class AgentGraph:
             "tokens": int(final.get("tokens", 0)),
             "duration_ms": int((time.monotonic() - final.get("started_at", time.monotonic())) * 1000),
         }
-        return TaskResult(**result)
+        return TaskResult(**self.model_store.redact(result))
 
     def _shell(self, state: AgentState) -> ShellTool | ContainerShellTool:
         """按本轮状态选择并缓存命令执行器。"""
@@ -216,7 +216,7 @@ class AgentGraph:
             "manager" if name != "manager" else "user",
             "handoff",
             f"派发给 {name}：{self._trim(guided_state.get('text', ''), 240)}",
-            {
+            self.model_store.redact({
                 "id": task_id,
                 "parent_id": None,
                 "sender": "manager" if name != "manager" else "user",
@@ -230,7 +230,7 @@ class AgentGraph:
                 "constraints": [],
                 "acceptance": [],
                 "budget": {"retry": int(guided_state.get("retry", 0))},
-            },
+            }),
         )
         result = node(self, guided_state)
         self.memory.append_task(
@@ -239,7 +239,7 @@ class AgentGraph:
             name,
             "outcome",
             f"{name} 已完成本阶段",
-            {
+            self.model_store.redact({
                 "task_id": task_id,
                 "status": "failed" if result.get("error") else "ok",
                 "summary": self._trim(
@@ -252,7 +252,7 @@ class AgentGraph:
                 "artifact_refs": list(result.get("changes") or [])[-20:],
                 "checks": list(result.get("tests") or [])[-8:],
                 "error": result.get("error") or None,
-            },
+            }),
         )
         return result
 
@@ -1493,7 +1493,9 @@ class AgentGraph:
         """让结构化智能节点可选调用共享只读 MCP，再返回节点原有 JSON。"""
 
         tools = self._ensure_mcp_tools(state, shared_only=True)
-        conversation = self._optional_mcp_system(state, messages, tools)
+        conversation = self.model_store.redact(
+            self._optional_mcp_system(state, messages, tools)
+        )
         seen: set[str] = set()
         for _step in range(4):
             data = client.chat_json(conversation, **kwargs)
@@ -1543,7 +1545,9 @@ class AgentGraph:
         """让文本智能节点可选调用共享只读 MCP，再返回节点原有纯文本。"""
 
         tools = self._ensure_mcp_tools(state, shared_only=True)
-        conversation = self._optional_mcp_system(state, messages, tools)
+        conversation = self.model_store.redact(
+            self._optional_mcp_system(state, messages, tools)
+        )
         seen: set[str] = set()
         for _step in range(4):
             text = client.chat(conversation, **kwargs)
@@ -1866,6 +1870,8 @@ class AgentGraph:
     def _emit(self, state: AgentState, agent: str, kind: str, msg: str, tokens: int = 0, data: dict[str, Any] | None = None) -> None:
         """记录并向外发送一条 AgentEvent。"""
 
+        safe_msg = self.model_store.redact_text(msg)
+        safe_data = self.model_store.redact(data or {})
         # event_id 是本次任务内递增编号。
         self.event_id += 1
         # event 是前端事件流消费的结构化事件。
@@ -1874,9 +1880,9 @@ class AgentGraph:
             ts=utc_stamp(),
             agent=agent,
             kind=kind,
-            msg=self._trim(str(msg), 3000),
+            msg=self._trim(safe_msg, 3000),
             tokens=tokens,
-            data=data or {},
+            data=safe_data,
         )
         # 同步把事件写入会话记忆，便于中断后查看执行到哪一步。
         # JSONL 只保存事件摘要和 token，不重复保存可能很大的命令输出结构。
@@ -1886,7 +1892,7 @@ class AgentGraph:
             agent,
             "event",
             kind,
-            self._trim(str(msg), 3000),
+            self._trim(safe_msg, 3000),
             {"tokens": tokens},
         )
         if self.emit_cb:

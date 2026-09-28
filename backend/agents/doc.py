@@ -67,6 +67,7 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
     if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
         graph._emit(state, "doc", "guidance", "文档生成期间收到新指导，丢弃旧文档草稿并返回 Coding")
         return state
+    content = graph.model_store.redact_text(content)
     if content.startswith("```") and content.endswith("```"):
         # 少数模型仍会包裹代码围栏；仅去掉最外层围栏，不改动正文内部代码块。
         content = re.sub(r"^```(?:markdown|md)?\s*\n", "", content, count=1, flags=re.IGNORECASE)

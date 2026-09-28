@@ -464,7 +464,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             "user",
             "input",
             "message",
-            req.text,
+            model_store.redact_text(req.text),
             {"attachments": [item["id"] for item in attachments]},
         )
         # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
@@ -509,7 +509,10 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             active_run.publish({"type": "result", "data": result.model_dump()})
         except Exception as exc:
             # failure 会写入最终会话回复，历史恢复后仍能看到异常，而不是只留半轮对话。
-            failure = TaskResult(ok=False, summary=f"任务执行失败：{exc}")
+            failure = TaskResult(
+                ok=False,
+                summary=model_store.redact_text(f"任务执行失败：{exc}"),
+            )
             memory_store.append(
                 workdir,
                 req.session_id,
@@ -587,7 +590,7 @@ def submit_guidance(run_id: str, req: GuidanceRequest) -> GuidanceResponse:
         "user",
         "guidance",
         "message",
-        text,
+        model_store.redact_text(text),
         {"run_id": run_id, "guidance_id": guidance.id},
     )
     return GuidanceResponse(

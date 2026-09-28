@@ -82,6 +82,35 @@ def test_model_store_public_view_and_private_copy(tmp_path) -> None:
     assert json.loads(destination.read_text(encoding="utf-8"))["api_key"] == "sk-private-value"
 
 
+def test_model_store_redacts_configured_and_generated_credentials(tmp_path) -> None:
+    """事件、记忆和模型上下文都应递归脱敏真实或疑似密钥。"""
+
+    store = ModelStore(tmp_path / "models.json")
+    configured = "private-config-value-123"
+    generated = "sk-generated-placeholder-123456"
+    store.upsert(
+        ModelConfig(
+            id="safe",
+            name="安全测试",
+            base_url="https://api.example.com",
+            api_key=configured,
+            model="safe-model",
+        )
+    )
+
+    value = {
+        "msg": f"配置值 {configured}",
+        "issues": [f"脚本含 {generated}"],
+    }
+    redacted = store.redact(value)
+
+    assert configured not in str(redacted)
+    assert generated not in str(redacted)
+    assert redacted["msg"].endswith("[密钥已脱敏]")
+    assert store.contains_secret(value) is True
+    assert store.contains_secret({"content": 'api_key = "[已脱敏]"'}) is False
+
+
 def test_llm_url_candidates_for_plain_openai_base() -> None:
     cfg = ModelConfig(
         id="x",

@@ -20,6 +20,7 @@ def answer(graph: AgentGraph, state: AgentState) -> AgentState:
     # 用户没有选择 MCP 时保持原来的单轮答疑，不连接任何外部服务。
     if not state.get("mcp_servers"):
         text = _plain_answer(graph, state, client)
+        text = graph.model_store.redact_text(text)
         graph.memory.append(state["workdir"], state["session_id"], "answer", "llm", "summary", text)
         return {**state, "final": text}
 
@@ -111,6 +112,7 @@ def answer(graph: AgentGraph, state: AgentState) -> AgentState:
             "MCP 工具已连接，但答疑智能体在 6 轮内没有形成最终回答。"
             + (f"\n\n最近结果：{observations[-1]}" if observations else "")
         )
+    final_text = graph.model_store.redact_text(final_text)
     graph.memory.append(state["workdir"], state["session_id"], "answer", "llm", "summary", final_text)
     return {**state, "final": final_text}
 
