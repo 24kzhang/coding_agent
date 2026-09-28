@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from api.schema import ModelConfig
 from backend.agents.coder import (
+    CODER_MAX_STEPS,
     _guidance_forbids_reads,
     _is_dependency_mutation_command,
     _is_discovery_command,
@@ -17,6 +18,12 @@ from backend.agents.graph import AgentGraph
 from backend.memory import MemoryStore
 from llm import LlmClient, LlmError, ModelStore
 from llm.client import LlmUsage
+
+
+def test_coder_keeps_enough_steps_for_full_project_closeout() -> None:
+    """复杂项目单轮必须容纳实现、测试和收尾，同时由运行级预算限制总成本。"""
+
+    assert CODER_MAX_STEPS >= 20
 
 
 def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
