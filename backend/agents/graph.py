@@ -30,9 +30,9 @@ from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
-MAX_CODER_ATTEMPTS = 3
+MAX_CODER_ATTEMPTS = 4
 # 运行级预算防止错误工具循环持续消耗 API。命中缓存的输入不计入未缓存预算。
-MAX_MODEL_CALLS = 36
+MAX_MODEL_CALLS = 44
 MAX_UNCACHED_INPUT_TOKENS = 800_000
 MAX_OUTPUT_TOKENS = 160_000
 
@@ -652,7 +652,7 @@ class AgentGraph:
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
         ]
-        # retry 在每次 Coding 结束后递增。成本治理保留三次“实现 → 验证 → 精确修复”机会，
+        # retry 在每次 Coding 结束后递增。成本治理保留四次“实现 → 验证 → 精确修复”机会，
         # 达到上限后必须停止并报告，不能继续放大协议错误或无进展循环。
         if actionable_failures and int(state.get("retry", 0)) < MAX_CODER_ATTEMPTS:
             return "manager"
