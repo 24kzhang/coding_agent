@@ -1321,6 +1321,21 @@ def test_failed_test_brief_drops_commands_that_now_pass() -> None:
     assert "app.py 仍有错误" in brief
 
 
+def test_failed_test_brief_drops_bare_filename_after_nested_path_is_written() -> None:
+    brief = _test_brief(
+        [
+            {
+                "cmd": "需求实现审查",
+                "ok": False,
+                "issues": ["test_chat.py 缺失，关键对话规则没有测试覆盖"],
+            }
+        ],
+        addressed_paths={"app/tests/test_chat.py"},
+    )
+
+    assert brief == ""
+
+
 def test_dependency_mutation_commands_are_detected() -> None:
     assert _is_dependency_mutation_command("npm --prefix web install --include=dev") is True
     assert _is_dependency_mutation_command("uv add --dev pytest") is True
@@ -1449,6 +1464,71 @@ def test_coder_stops_repeating_addressed_verifier_issue(tmp_path) -> None:
 
     assert result["coding_ok"] is True
     assert client.calls == 2
+
+
+class PrematureRepairDoneClient:
+    """模拟修复模型口头宣布完成，收到拒绝后才创建缺失交付物。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_usage = SimpleNamespace(total=0)
+
+    def chat_json(self, messages, temperature=0.1):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "thought": "测试已经完成",
+                "actions": [],
+                "done": True,
+                "summary": "修复完成",
+            }
+        assert "不能只返回完成标记" in messages[-1]["content"]
+        return {
+            "thought": "创建缺失测试",
+            "actions": [
+                {
+                    "tool": "write_file",
+                    "path": "app/tests/test_chat.py",
+                    "content": "def test_chat_context():\n    assert True\n",
+                }
+            ],
+            "done": True,
+            "summary": "缺失测试已补齐",
+        }
+
+
+def test_coder_rejects_done_while_verifier_reports_missing_deliverables(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    client = PrematureRepairDoneClient()
+    graph._client = lambda agent, state: client
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(project),
+            "text": "补齐缺失测试",
+            "repo": {"files": [], "snippets": {}, "stack": ["Python"]},
+            "changes": [],
+            "commands": [],
+            "tests": [
+                {
+                    "cmd": "需求实现审查",
+                    "ok": False,
+                    "issues": ["test_chat.py 缺失，关键对话规则没有测试覆盖"],
+                }
+            ],
+            "tests_ok": False,
+            "retry": 1,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert client.calls == 2
+    assert (project / "app/tests/test_chat.py").exists()
 
 
 class TooManyActionsClient:

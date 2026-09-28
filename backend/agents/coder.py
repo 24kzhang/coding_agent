@@ -93,7 +93,10 @@ def _test_brief(
                 # 文件已在本轮成功修改后，旧审查文本只能视为“等待重新验证”，不能继续作为
                 # 当前事实反复驱动同一修复。若修改不完整，下一轮 Verifier 会基于新磁盘状态
                 # 再次给出问题；这比让 Coder 永久追逐过期描述更可靠。
-                if addressed and any(path in issue_text for path in addressed):
+                if addressed and any(
+                    path in issue_text or Path(path).name in issue_text
+                    for path in addressed
+                ):
                     continue
                 lines.append(f"- [{cmd}] {_middle_trim(issue_text, 700)}")
             continue
@@ -630,12 +633,21 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # 只执行前 3 个动作，剩余动作留到下一轮，避免一个错误批次破坏多个文件。
             observations.append(f"模型本轮返回 {len(actions)} 个动作，只执行前 3 个；其余动作请下一轮继续。")
             actions = actions[:3]
-        if not actions and data.get("done"):
+        unresolved_missing_delivery = retry > 0 and failed_tests and any(
+            marker in failed_tests
+            for marker in ("缺失", "不存在", "尚未创建", "没有交付")
+        )
+        if not actions and data.get("done") and not unresolved_missing_delivery:
             empty_steps = 0
             coding_ok = True
             coding_summary = graph._clean_summary(data.get("summary"), "Coding 阶段已完成。")
             break
         if not actions:
+            if unresolved_missing_delivery:
+                observations.append(
+                    "验证清单仍明确指出交付物缺失，不能只返回完成标记；"
+                    "下一步必须直接创建缺失文件或测试。"
+                )
             # 部分推理模型即使设置为最低思考，仍可能把整个输出预算耗在 reasoning，
             # 最终只返回一个没有动作的合法空结构。继续在同一模型上重试既不会推进任务，
             # 还会按完整输出上限重复计费；首次触顶就切备用模型。
