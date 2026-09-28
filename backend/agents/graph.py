@@ -32,7 +32,9 @@ from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 4
 # 运行级预算防止错误工具循环持续消耗 API。命中缓存的输入不计入未缓存预算。
-MAX_MODEL_CALLS = 60
+# 完整桌面应用的真实验收显示 60 次会在测试和构建通过后截断最后的视觉/烟测修复；
+# 72 次仍显著低于旧版失控的 99 次，同时保留未缓存输入与输出 token 双重硬闸门。
+MAX_MODEL_CALLS = 72
 MAX_UNCACHED_INPUT_TOKENS = 800_000
 MAX_OUTPUT_TOKENS = 160_000
 

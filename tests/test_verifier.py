@@ -4,7 +4,12 @@ import json
 
 from backend.agents.graph import AgentGraph
 from backend.agents.prompts import CODER_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
-from backend.agents.verifier import _reject_critical_warnings, _typescript_project_checks, verifier
+from backend.agents.verifier import (
+    _private_model_config_facts,
+    _reject_critical_warnings,
+    _typescript_project_checks,
+    verifier,
+)
 from backend.memory import MemoryStore
 from backend.tools import FsTool
 from llm import ModelStore
@@ -390,3 +395,27 @@ def test_verifier_reads_complete_normal_source_instead_of_false_truncation(tmp_p
     )
 
     assert result["tests_ok"] is True
+
+
+def test_private_model_config_facts_verify_secret_without_exposing_it(tmp_path) -> None:
+    """语义审查应确认受控复制成功，但提示中不得包含真实密钥。"""
+
+    fs = FsTool(str(tmp_path / "project"))
+    fs.write(
+        ".local/model.json",
+        json.dumps(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "sk-private-value",
+                "model": "deepseek-flash",
+            }
+        ),
+    )
+
+    facts = _private_model_config_facts(fs, [".local/model.json"])
+
+    assert len(facts) == 1
+    assert "model='deepseek-flash'" in facts[0]
+    assert "api_key_nonempty=True" in facts[0]
+    assert "api_key_is_redaction_placeholder=False" in facts[0]
+    assert "sk-private-value" not in facts[0]

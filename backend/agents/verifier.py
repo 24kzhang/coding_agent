@@ -21,6 +21,37 @@ _CRITICAL_WARNING_MARKERS = (
 )
 
 
+def _private_model_config_facts(fs: FsTool, files: list[str]) -> list[str]:
+    """只向审查模型提供私密配置的可验证事实，绝不暴露凭据正文。"""
+
+    facts: list[str] = []
+    for rel in files:
+        if not rel.endswith(".local/model.json"):
+            continue
+        try:
+            data = json.loads(fs.read(rel, 80_000))
+        except (json.JSONDecodeError, OSError, ValueError):
+            facts.append(f"{rel}：文件存在，但不是合法 JSON。")
+            continue
+        if not isinstance(data, dict):
+            facts.append(f"{rel}：文件存在，但顶层不是对象。")
+            continue
+        api_key = data.get("api_key")
+        placeholder_values = {
+            "",
+            "[密钥已脱敏]",
+            "[已脱敏]",
+            "[已脱敏，执行时使用原始需求中的用户凭据]",
+        }
+        facts.append(
+            f"{rel}：文件存在且为合法 JSON；model={data.get('model')!r}；"
+            f"base_url_nonempty={bool(str(data.get('base_url') or '').strip())}；"
+            f"api_key_nonempty={bool(str(api_key or '').strip())}；"
+            f"api_key_is_redaction_placeholder={str(api_key or '').strip() in placeholder_values}。"
+        )
+    return facts
+
+
 def _reject_critical_warnings(result: dict[str, Any]) -> dict[str, Any]:
     """把会掩盖真实异步失败的运行时警告转换为验证失败。"""
 
@@ -148,6 +179,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
         budget = 60_000
         # verify 没有本轮 changes，改用仓库读取智能体选择的关键文件作为只读审查依据。
         review_targets = list(state.get("changes", [])) or list((state.get("repo") or {}).get("selected") or [])
+        private_config_facts = _private_model_config_facts(fs, review_targets)
         for rel in review_targets[:16]:
             if budget <= 0:
                 break
@@ -181,6 +213,13 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                         )
                         + "\n\n变更文件：\n"
                         + "\n\n".join(review_files)
+                        + (
+                            "\n\n私密配置安全核验（以下事实由程序直接读取磁盘后生成，优先级高于"
+                            "变更文件中的脱敏占位文本；不得把脱敏展示误判为磁盘占位符）：\n"
+                            + "\n".join(private_config_facts)
+                            if private_config_facts
+                            else ""
+                        )
                         + "\n\n已运行检查：\n"
                         + graph.model_store.redact_text(tests),
                     },
