@@ -950,6 +950,53 @@ def test_coder_switches_model_after_repeated_invalid_json(tmp_path, monkeypatch)
     assert any(event.kind == "model" and "fallback" in event.msg for event in events)
 
 
+class ExhaustedReasoningClient:
+    """模拟模型把完整输出预算都耗在推理却没有返回动作。"""
+
+    cfg = SimpleNamespace(id="reasoning-heavy", model="reasoning-heavy")
+    last_usage = LlmUsage(completion=6_000, reasoning=6_000)
+
+    def chat_json(self, messages, temperature=0.1, *, plain_text=False, max_tokens=None):
+        return {"thought": "", "actions": [], "done": False}
+
+
+def test_coder_switches_model_after_output_budget_exhausted_without_action(
+    tmp_path, monkeypatch
+) -> None:
+    """输出触顶但没有动作时应立即换模，不能空耗五个回合。"""
+
+    events = []
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph._client = lambda agent, state: ExhaustedReasoningClient()
+    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
+    monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
+    FallbackCoderClient.instances = []
+
+    result = coder(
+        graph,
+        {
+            "session_id": "s1",
+            "workdir": str(tmp_path / "project"),
+            "text": "创建入口",
+            "repo": {"files": [], "snippets": {}, "stack": ["Python"]},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert FallbackCoderClient.instances
+    assert any(
+        event.kind == "model" and "输出预算耗尽但没有工具动作" in event.msg
+        for event in events
+    )
+
+
 class RepeatedKnownReadClient:
     """模拟模型无视当前快照，反复读取同一失败文件。"""
 

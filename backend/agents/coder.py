@@ -634,6 +634,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             coding_summary = graph._clean_summary(data.get("summary"), "Coding 阶段已完成。")
             break
         if not actions:
+            # 部分推理模型即使设置为最低思考，仍可能把整个输出预算耗在 reasoning，
+            # 最终只返回一个没有动作的合法空结构。继续在同一模型上重试既不会推进任务，
+            # 还会按完整输出上限重复计费；首次触顶就切备用模型。
+            completion = int(getattr(getattr(client, "last_usage", None), "completion", 0) or 0)
+            if completion >= int(CODER_OUTPUT_TOKENS * 0.95) and switch_coder_model(
+                "输出预算耗尽但没有工具动作"
+            ):
+                observations.append(
+                    f"上一模型消耗 {completion} 输出 token 却没有工具动作；"
+                    "已立即切换模型，下一步只执行一个小型写入或验证动作。"
+                )
+                continue
             empty_steps += 1
             observations.append("本轮既没有工具动作也没有完成标记，请读取、修改或验证后再继续。")
             graph._emit(
