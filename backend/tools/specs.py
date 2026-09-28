@@ -7,16 +7,53 @@ def tool_specs() -> list[dict[str, Any]]:
     """返回 Coding 原生函数工具及其本地执行策略。"""
 
     string = {"type": "string"}
+    # 原生函数参数同样计入模型输出。限制单次正文大小，避免模型把多个大文件塞进
+    # 一次响应后在输出上限处截断，造成整批 JSON 无法解析和重复计费。
+    short_text = {"type": "string", "maxLength": 10_000}
+    match_text = {"type": "string", "maxLength": 6_000}
     integer = {"type": "integer"}
     array = {"type": "array", "items": string}
     definitions = [
         ("read_file", "读取工作区文本文件的一段内容", {"path": string, "start": integer, "max_chars": integer}, ["path"], "allow", "read"),
         ("list_files", "列出工作区内受支持的文本文件", {}, [], "allow", "read"),
         ("search_files", "在工作区文本文件中搜索内容", {"query": string, "max_results": integer}, ["query"], "allow", "read"),
-        ("write_file", "写入完整文本文件", {"path": string, "content": string}, ["path", "content"], "allow", "write"),
-        ("append_file", "向文本文件末尾追加内容", {"path": string, "content": string}, ["path", "content"], "allow", "write"),
-        ("replace_file", "精确替换文件中的文本", {"path": string, "old": string, "new": string, "expected": integer}, ["path", "old", "new"], "allow", "write"),
-        ("replace_block", "按开始和结束锚点替换代码块", {"path": string, "start_marker": string, "end_marker": string, "content": string}, ["path", "start_marker", "end_marker", "content"], "allow", "write"),
+        (
+            "write_file",
+            "写入一个完整文本文件；正文不得超过 10000 字符，更长文件先写首块再用 append_file 分块追加",
+            {"path": string, "content": short_text},
+            ["path", "content"],
+            "allow",
+            "write",
+        ),
+        (
+            "append_file",
+            "向一个文本文件末尾追加不超过 10000 字符的一块内容",
+            {"path": string, "content": short_text},
+            ["path", "content"],
+            "allow",
+            "write",
+        ),
+        (
+            "replace_file",
+            "精确替换文件中的一小段文本",
+            {"path": string, "old": match_text, "new": short_text, "expected": integer},
+            ["path", "old", "new"],
+            "allow",
+            "write",
+        ),
+        (
+            "replace_block",
+            "按开始和结束锚点替换不超过 10000 字符的代码块",
+            {
+                "path": string,
+                "start_marker": match_text,
+                "end_marker": match_text,
+                "content": short_text,
+            },
+            ["path", "start_marker", "end_marker", "content"],
+            "allow",
+            "write",
+        ),
         ("assert_text_absent", "断言指定文件中不存在禁用文本", {"paths": array, "texts": array}, ["paths", "texts"], "allow", "read"),
         ("run_command", "在工作区运行一个受限命令", {"cmd": string}, ["cmd"], "ask", "write"),
         ("git_status", "读取 Git 工作区状态", {}, [], "allow", "read"),

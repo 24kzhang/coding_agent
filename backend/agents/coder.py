@@ -571,7 +571,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     f"第 {step} 轮模型服务暂时不可用：{error_text}。退避后重试相同任务。"
                 )
             else:
-                observations.append(f"第 {step} 轮输出格式无效：{error_text}。请严格使用{protocol}。")
+                if "原生工具调用参数不是合法 JSON" in error_text:
+                    observations.append(
+                        f"第 {step} 轮原生工具参数在输出上限处截断。下一轮只能返回一个写入动作，"
+                        "正文不得超过 10000 字符；长文件先 write_file 写首块，后续回合再用 "
+                        "append_file 分块追加。不要在同一响应中生成多个文件。"
+                    )
+                else:
+                    observations.append(
+                        f"第 {step} 轮输出格式无效：{error_text}。请严格使用{protocol}。"
+                    )
             if transient_error:
                 retry_delay = CODER_TRANSIENT_RETRY_DELAYS[
                     min(transient_failures - 1, len(CODER_TRANSIENT_RETRY_DELAYS) - 1)
