@@ -141,6 +141,68 @@ def test_coder_blocks_shell_read_after_user_stop_guidance(tmp_path) -> None:
     assert (project / "done.js").exists()
 
 
+def test_read_stop_guidance_resets_prior_idle_budget(tmp_path) -> None:
+    """指导后的读取拒绝不能沿用旧空转计数，模型仍应获得改写机会。"""
+
+    class GuidedIdleClient:
+        def __init__(self):
+            self.calls = 0
+            self.last_usage = SimpleNamespace(total=0)
+
+        def chat_json(self, messages, temperature=0.1):
+            self.calls += 1
+            if self.calls <= 3:
+                return {
+                    "actions": [
+                        {
+                            "tool": "search_files",
+                            "query": f"pattern-{self.calls}",
+                            "path": ".",
+                        }
+                    ],
+                    "done": False,
+                }
+            return {
+                "actions": [
+                    {
+                        "tool": "write_file",
+                        "path": "fixed.py",
+                        "content": "VALUE = 1\n",
+                    }
+                ],
+                "done": True,
+                "summary": "已按指导直接修复",
+            }
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "known.py").write_text("VALUE = 0\n", encoding="utf-8")
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    client = GuidedIdleClient()
+    graph._client = lambda _agent, _state: client
+
+    result = coder(
+        graph,
+        {
+            "session_id": "guided-idle",
+            "workdir": str(project),
+            "text": "完成修复",
+            "guidance": ["停止继续读取，立即完成写入。"],
+            "repo": {"files": ["known.py"], "snippets": {}, "stack": ["Python"]},
+            "changes": ["known.py"],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 1,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert client.calls == 4
+    assert (project / "fixed.py").exists()
+
+
 def test_coder_rejects_credentials_in_write_actions_and_redacts_model_context(tmp_path) -> None:
     """模型不得把真实密钥写入源码，后续请求也不能再次看到该值。"""
 

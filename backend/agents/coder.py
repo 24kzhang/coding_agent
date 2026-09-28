@@ -717,6 +717,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             elif reads_forbidden and (tool in {"list_files", "read_file", "search_files"} or inspection_command):
                 duplicate_read_failures += 1
+                # 新指导把后续合法动作收窄为“直接写入或验证”。这次被权限层拒绝的旧式读取
+                # 不应继承并耗尽指导到达前的空转预算，否则模型还没获得下一次改写机会就会退出。
+                idle_after_mutation = 0
                 observation = {
                     "ok": False,
                     "text": (
