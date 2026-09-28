@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from backend.agents.coder import (
+    _guidance_forbids_reads,
     _is_dependency_mutation_command,
     _is_discovery_command,
+    _is_inspection_command,
     _observation_brief,
     _test_brief,
     coder,
@@ -33,7 +35,7 @@ def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
                 capabilities=["tools"],
                 efforts=["minimal", "low", "medium", "high", "max"],
             )
-            self.default_effort = "high"
+            self.default_effort = "low"
             self.last_usage = LlmUsage()
             self.calls = 0
 
@@ -79,8 +81,60 @@ def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
     assert result["coding_ok"] is True
     assert result["tokens"] == 8_010
     assert result["output_tokens"] == 6_010
-    assert client.default_effort == "low"
-    assert any(event.kind == "model" and "降为 low" in event.msg for event in events)
+    assert client.default_effort == "minimal"
+    assert any(event.kind == "model" and "降为 minimal" in event.msg for event in events)
+
+
+def test_coder_blocks_shell_read_after_user_stop_guidance(tmp_path) -> None:
+    """用户要求停止读取后，cat/grep 不得绕过权限层继续消耗调用。"""
+
+    class GuidedClient:
+        def __init__(self):
+            self.calls = 0
+            self.last_usage = SimpleNamespace(total=0)
+
+        def chat_json(self, messages, temperature=0.1):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "actions": [{"tool": "run_command", "cmd": "cat known.js"}],
+                    "done": False,
+                }
+            assert "用户已明确要求停止读取和搜索" in messages[-1]["content"]
+            return {
+                "actions": [
+                    {"tool": "write_file", "path": "done.js", "content": "console.log('ok');\n"}
+                ],
+                "done": True,
+                "summary": "已完成",
+            }
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "known.js").write_text("const known = true;\n", encoding="utf-8")
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    client = GuidedClient()
+    graph._client = lambda _agent, _state: client
+    result = coder(
+        graph,
+        {
+            "session_id": "guided-write",
+            "workdir": str(project),
+            "text": "完成入口",
+            "guidance": ["停止继续读取，立即完成写入。"],
+            "repo": {"files": ["known.js"], "snippets": {}, "stack": ["JavaScript"]},
+            "changes": [],
+            "commands": [],
+            "tests": [],
+            "tests_ok": True,
+            "retry": 0,
+            "tokens": 0,
+        },
+    )
+
+    assert result["coding_ok"] is True
+    assert result["commands"] == []
+    assert (project / "done.js").exists()
 
 
 class ProgressClient:
@@ -225,9 +279,9 @@ def test_coder_stops_after_repeated_reads_without_progress(tmp_path) -> None:
         },
     )
 
-    assert client.calls == 7
+    assert client.calls == 4
     assert result["coding_ok"] is False
-    assert "连续六轮只有失败、读取或状态查询" in result["coding_summary"]
+    assert "连续三轮只有失败、读取或状态查询" in result["coding_summary"]
 
 
 class OwnedRewriteClient:
@@ -1147,6 +1201,14 @@ def test_dependency_mutation_commands_are_detected() -> None:
     assert _is_dependency_mutation_command("npm --prefix web install --include=dev") is True
     assert _is_dependency_mutation_command("uv add --dev pytest") is True
     assert _is_dependency_mutation_command("npm --prefix web run test") is False
+
+
+def test_shell_inspection_and_read_stop_guidance_are_detected() -> None:
+    assert _is_inspection_command("cat app/web/js/api.js") is True
+    assert _is_inspection_command("grep -n function app.js") is True
+    assert _is_inspection_command("uv run pytest -q") is False
+    assert _guidance_forbids_reads({"guidance": ["不要再搜索或读取，立即完成写入。"]}) is True
+    assert _guidance_forbids_reads({"guidance": ["请先查看相关文件。"]}) is False
 
 
 class RepairContextClient:

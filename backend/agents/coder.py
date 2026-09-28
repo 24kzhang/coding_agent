@@ -120,7 +120,7 @@ def _repair_paths(tests: list[dict], changes: list[str], current_files: list[str
     for rel in changes:
         if rel in current and rel not in found:
             found.append(rel)
-    return found[:6]
+    return found[:10]
 
 
 def _task_brief(state: AgentState) -> str:
@@ -190,6 +190,35 @@ def _is_discovery_command(command: str) -> bool:
     # 仓库读取智能体已经提供稳定清单，Coding 不应再用这些命令绕过 list_files 限制。
     program = argv[0].rsplit("/", 1)[-1].lower()
     return program in {"find", "ls", "pwd", "tree"}
+
+
+def _is_inspection_command(command: str) -> bool:
+    """识别用 shell 绕过文件快照工具的只读检查命令。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    program = Path(argv[0]).name.lower()
+    return program in {"awk", "cat", "grep", "head", "rg", "sed", "tail", "wc"}
+
+
+def _guidance_forbids_reads(state: AgentState) -> bool:
+    """用户明确要求停止读取或搜索后，由权限层阻止模型继续空转。"""
+
+    latest = "\n".join(str(item) for item in (state.get("guidance") or [])[-3:])
+    return any(
+        marker in latest
+        for marker in (
+            "不要再搜索或读取",
+            "停止继续读取",
+            "禁止继续读取",
+            "不要再读取",
+            "不要再搜索",
+        )
+    )
 
 
 def _is_dependency_mutation_command(command: str) -> bool:
@@ -328,7 +357,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
 
     # task_brief 会在每个规划检查点刷新，以便运行中指导进入下一次模型请求。
     task_brief = _task_brief(state)
-    repo_brief = _repo_brief(repo, include_snippets=retry == 0)
+    # Repo 节点每轮都基于当前磁盘重建少量相关片段。修复轮继续携带尚未预读的片段，
+    # 已有权威快照的路径则去重，避免旧摘要与当前磁盘内容同时进入提示。
+    repo_context = dict(repo)
+    repo_context["snippets"] = {
+        path: content
+        for path, content in (repo.get("snippets") or {}).items()
+        if path not in file_observations
+    }
+    repo_brief = _repo_brief(repo_context, include_snippets=True)
 
     def prune_snapshots_after_timeout() -> None:
         """模型超时后只保留任务明确点名的文件，缩小下一轮输入并允许其他文件按需重读。"""
@@ -377,7 +414,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
         current_snapshots: list[str] = []
         snapshot_budget = SNAPSHOT_BUDGET
-        for path, content in list(file_observations.items())[-4:]:
+        for path, content in list(file_observations.items())[-8:]:
             if snapshot_budget <= 0:
                 break
             snapshot = _middle_trim(content, min(FILE_CONTEXT_LIMIT, snapshot_budget))
@@ -483,10 +520,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if (
                 "原生工具调用参数不是合法 JSON" in error_text
                 and isinstance(client, LlmClient)
-                and client.default_effort not in {"minimal", "low"}
+                and client.default_effort != "minimal"
             ):
                 supported = set(getattr(client.cfg, "efforts", []))
-                lowered = "low" if "low" in supported else "minimal" if "minimal" in supported else ""
+                lowered = (
+                    "minimal"
+                    if client.default_effort == "low" and "minimal" in supported
+                    else "low"
+                    if "low" in supported
+                    else "minimal"
+                    if "minimal" in supported
+                    else ""
+                )
                 if lowered:
                     previous_effort = client.default_effort
                     client.default_effort = lowered
@@ -610,7 +655,20 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             tool = str(action.get("tool") or "")
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
-            if signature in seen_actions and tool == "read_file" and path in read_paths:
+            reads_forbidden = _guidance_forbids_reads(state)
+            inspection_command = tool == "run_command" and _is_inspection_command(
+                str(action.get("cmd", ""))
+            )
+            if reads_forbidden and (tool in {"list_files", "read_file", "search_files"} or inspection_command):
+                duplicate_read_failures += 1
+                observation = {
+                    "ok": False,
+                    "text": (
+                        "用户已明确要求停止读取和搜索。当前上下文足以执行；"
+                        "下一步只能写入、精确修改或运行测试与构建。"
+                    ),
+                }
+            elif signature in seen_actions and tool == "read_file" and path in read_paths:
                 duplicate_read_failures += 1
                 observation = {
                     "ok": False,
@@ -641,6 +699,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 observation = {
                     "ok": False,
                     "text": "拒绝使用 shell 重复枚举仓库：当前文件清单已经在提示中。请直接读取目标文件、写入实现或运行验证命令。",
+                }
+            elif inspection_command:
+                duplicate_read_failures += 1
+                observation = {
+                    "ok": False,
+                    "text": (
+                        "拒绝使用 shell 的 cat/grep/sed 等命令绕过文件上下文管理。"
+                        "需要新内容时使用 read_file/search_files；当前已知文件应直接修改。"
+                    ),
                 }
             elif (
                 tool == "write_file"
@@ -726,7 +793,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             graph._emit(state, "coder", "tool", observation["text"], data=observation)
             if (
                 not observation.get("ok")
-                and tool == "read_file"
+                and (tool == "read_file" or inspection_command)
                 and duplicate_read_failures >= 2
                 and switch_coder_model("重复读取已知文件")
             ):
@@ -779,8 +846,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             coding_summary = graph._clean_summary(data.get("summary"), "Coding 阶段已完成。")
             graph._emit(state, "coder", "done", coding_summary)
             break
-        if idle_after_mutation >= 6:
-            coding_summary = "Coding 已产生文件变更，但连续六轮只有失败、读取或状态查询，没有新的实现进展，也没有明确完成任务。"
+        if idle_after_mutation >= 3:
+            coding_summary = "Coding 已产生文件变更，但连续三轮只有失败、读取或状态查询，没有新的实现进展，也没有明确完成任务。"
             break
     if not coding_ok and not coding_summary:
         coding_summary = "Coding 在最大 ReAct 步数内没有明确完成任务。"
