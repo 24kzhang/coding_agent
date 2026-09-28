@@ -318,6 +318,59 @@ def test_planner_retries_one_transient_repair_failure(tmp_path, monkeypatch) -> 
     assert any(event.kind == "error" and "重试一次" in event.msg for event in events)
 
 
+def test_planner_places_dynamic_repair_text_after_images(tmp_path, monkeypatch) -> None:
+    """计划修订应保持任务与图片前缀稳定，把变化的初稿和问题追加到末尾。"""
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    captured = []
+
+    class Usage:
+        total = 3
+
+    class RepairClient:
+        last_usage = Usage()
+        cfg = SimpleNamespace(id="repair")
+
+        def chat_json(self, messages):
+            captured.append(messages[-1]["content"])
+            if len(captured) == 1:
+                return {"status": "plan", "markdown": "# 初稿"}
+            return {"status": "plan", "markdown": "# 已修复"}
+
+    monkeypatch.setattr(graph, "_client", lambda *_args: RepairClient())
+    monkeypatch.setattr(graph, "_ctx_text", lambda _state: "稳定任务上下文")
+    monkeypatch.setattr(
+        "backend.agents.planner._plan_quality_issues",
+        lambda _graph, _state, markdown: [] if "已修复" in markdown else ["缺少合同"],
+    )
+    result = planner(
+        graph,
+        {
+            "session_id": "plan-cache",
+            "workdir": str(tmp_path / "project"),
+            "text": "创建网站",
+            "attachments": [
+                {
+                    "name": "home.png",
+                    "path": str(tmp_path / "home.png"),
+                    "mime": "image/png",
+                }
+            ],
+            "tokens": 0,
+        },
+    )
+
+    repair_content = captured[1]
+    assert result["plan"]["status"] == "plan"
+    assert [item["type"] for item in repair_content] == [
+        "input_text",
+        "input_image",
+        "input_text",
+    ]
+    assert repair_content[0]["text"] == "稳定任务上下文"
+    assert "待修订计划初稿" in repair_content[-1]["text"]
+
+
 def test_planner_switches_repair_model_when_quality_stagnates(tmp_path, monkeypatch) -> None:
     """同一模型修订后问题数不下降时，应换备用模型继续，而不是重复无效调用。"""
 

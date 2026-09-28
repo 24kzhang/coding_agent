@@ -1772,8 +1772,13 @@ class AgentGraph:
         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
         return client
 
-    def _multimodal_content(self, text: str, state: AgentState) -> str | list[dict[str, str]]:
-        """把安全附件引用附在当前模型输入上，base64 仅在 HTTP 边界生成。"""
+    def _multimodal_content(
+        self,
+        text: str,
+        state: AgentState,
+        trailing_text: str = "",
+    ) -> str | list[dict[str, str]]:
+        """按“稳定文本、图片、动态文本”组织输入，扩大供应商前缀缓存命中。"""
 
         attachments = [
             item
@@ -1781,7 +1786,7 @@ class AgentGraph:
             if item.get("path") and item.get("mime")
         ]
         if not attachments:
-            return text
+            return text + trailing_text
         content: list[dict[str, str]] = [{"type": "input_text", "text": text}]
         content.extend(
             {
@@ -1791,6 +1796,8 @@ class AgentGraph:
             }
             for item in attachments
         )
+        if trailing_text:
+            content.append({"type": "input_text", "text": trailing_text})
         return content
 
     """把当前上下文包序列化成模型输入文本。"""

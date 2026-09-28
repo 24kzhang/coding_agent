@@ -1128,6 +1128,8 @@ def test_coder_repair_prompt_is_compact_and_grounded_in_current_files(tmp_path) 
     assert "[server.py 当前内容]" in client.prompt
     assert "BROKEN = True" in client.prompt
     assert "旧快照" not in client.prompt
+    assert client.prompt.index("修复服务") < client.prompt.index("当前是第")
+    assert client.prompt.index("仓库摘要") < client.prompt.index("已完成进度")
     assert len(client.prompt) < 35_000
 
 

@@ -440,11 +440,11 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                         {
                             "role": "user",
                             "content": graph._multimodal_content(
-                                context_text
-                                + "\n\n模型刚才生成了澄清问题，但当前用户需求已经足够执行。"
+                                context_text,
+                                state,
+                                "\n\n模型刚才生成了澄清问题，但当前用户需求已经足够执行。"
                                 "请按以下推荐答案直接生成完整可执行计划，不要再返回 questions：\n"
                                 + _recommended_plan_answers(data["questions"]),
-                                state,
                             ),
                         },
                     ]
@@ -479,13 +479,13 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 {
                     "role": "user",
                     "content": graph._multimodal_content(
-                        context_text
-                        + "\n\n待修订计划初稿：\n"
+                        context_text,
+                        state,
+                        "\n\n待修订计划初稿：\n"
                         + str(best_data.get("markdown") or "")
                         + "\n\n必须逐项修复以下问题，并返回一份自洽、可直接执行的完整计划：\n- "
                         + "\n- ".join(best_issues)
                         + "\n不得只追加勘误；要消除初稿中的冲突和错误字段。",
-                        state,
                     ),
                 },
             ]

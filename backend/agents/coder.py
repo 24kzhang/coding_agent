@@ -392,8 +392,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "\n已进入收尾阶段：禁止仅为确认而读取文件。若实现已完成，必须返回 actions=[]、done=true；"
                 "若仍有缺口，只执行直接修复缺口的写入或测试命令。\n"
             )
-        user_text = (
-            f"当前是第 {step}/{max_steps} 步。当前模式：{'失败修复' if retry else '首次实现'}。\n"
+        # stable_text 在同一 Coding 循环中尽量保持不变，并放在图片之前，供 DeepSeek
+        # 从首 token 开始复用前缀缓存。步数、进度和工具观察等变化内容统一追加到末尾。
+        stable_text = (
+            task_brief
+            + "\n\n仓库摘要：\n"
+            + repo_brief
+        )
+        dynamic_text = (
+            f"\n\n当前是第 {step}/{max_steps} 步。当前模式：{'失败修复' if retry else '首次实现'}。\n"
             + f"当前磁盘文件：{manifest}\n"
             + f"已完成进度：{progress}\n"
             + f"已读取且当前可直接修改的文件：{readable}\n"
@@ -404,9 +411,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             + "run_command 已经在项目工作目录执行，命令中禁止使用 cd，也不要添加工作目录前缀。\n"
             + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
             + finish_instruction
-            + task_brief
-            + "\n\n仓库摘要：\n"
-            + repo_brief
             + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
             + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
             + "\n\n最近工具观察：\n"
@@ -421,7 +425,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             },
             {
                 "role": "user",
-                "content": graph._multimodal_content(user_text, state),
+                "content": graph._multimodal_content(stable_text, state, dynamic_text),
             },
         ]
         try:
