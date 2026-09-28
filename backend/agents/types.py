@@ -92,3 +92,13 @@ class AgentState(TypedDict, total=False):
     result: dict[str, Any]
     # 本次任务累计 token 估算。
     tokens: int
+    # 本次任务已经发起的模型调用次数。
+    model_calls: int
+    # 本次任务累计命中的输入缓存 token。
+    cached_input_tokens: int
+    # 本次任务累计未命中的输入 token。
+    uncached_input_tokens: int
+    # 本次任务累计输出 token。
+    output_tokens: int
+    # 本次任务累计推理 token；它属于输出 token 的子集。
+    reasoning_tokens: int

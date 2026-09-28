@@ -24,12 +24,18 @@ class LlmBalanceError(LlmError):
 
 @dataclass
 class LlmUsage:
-    """统一记录 token 用量；部分兼容接口不返回 usage 时使用估算值。"""
+    """统一记录 token 用量，并拆分缓存与推理开销。"""
 
     # 输入侧 token 数，对应 OpenAI usage.prompt_tokens。
     prompt: int = 0
     # 输出侧 token 数，对应 OpenAI usage.completion_tokens。
     completion: int = 0
+    # cached 是输入中命中供应商前缀缓存的 token 数。
+    cached: int = 0
+    # cache_miss 是未命中缓存、需要重新计费或计算的输入 token 数。
+    cache_miss: int = 0
+    # reasoning 是 completion 中用于内部推理的 token 数，不与 completion 重复累加。
+    reasoning: int = 0
 
     @property
     def total(self) -> int:
@@ -571,11 +577,31 @@ class LlmClient:
         usage = data.get("usage") or {}
         prompt = int(usage.get("input_tokens") or 0)
         completion = int(usage.get("output_tokens") or 0)
+        input_details = usage.get("input_tokens_details") or {}
+        output_details = usage.get("output_tokens_details") or {}
+        cached = int(
+            input_details.get("cached_tokens")
+            or usage.get("prompt_cache_hit_tokens")
+            or 0
+        )
+        cache_miss = int(
+            usage.get("prompt_cache_miss_tokens")
+            or max(prompt - cached, 0)
+        )
+        reasoning = int(output_details.get("reasoning_tokens") or 0)
         if prompt or completion:
-            return LlmUsage(prompt=prompt, completion=completion)
+            return LlmUsage(
+                prompt=prompt,
+                completion=completion,
+                cached=min(cached, prompt),
+                cache_miss=min(cache_miss, prompt),
+                reasoning=min(reasoning, completion),
+            )
+        estimated_prompt = self.estimate_tokens(self._messages_text(messages))
         return LlmUsage(
-            prompt=self.estimate_tokens(self._messages_text(messages)),
+            prompt=estimated_prompt,
             completion=self.estimate_tokens(str(data.get("output_text") or data.get("output") or "")),
+            cache_miss=estimated_prompt,
         )
 
     @staticmethod
@@ -822,13 +848,33 @@ class LlmClient:
         prompt = int(usage.get("prompt_tokens") or 0)
         # completion 是输出 token 数。
         completion = int(usage.get("completion_tokens") or 0)
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
+        cached = int(
+            usage.get("prompt_cache_hit_tokens")
+            or prompt_details.get("cached_tokens")
+            or 0
+        )
+        cache_miss = int(
+            usage.get("prompt_cache_miss_tokens")
+            or max(prompt - cached, 0)
+        )
+        reasoning = int(completion_details.get("reasoning_tokens") or 0)
         if prompt or completion:
-            return LlmUsage(prompt=prompt, completion=completion)
+            return LlmUsage(
+                prompt=prompt,
+                completion=completion,
+                cached=min(cached, prompt),
+                cache_miss=min(cache_miss, prompt),
+                reasoning=min(reasoning, completion),
+            )
         # prompt_text 是所有输入消息拼接后的文本，用于估算输入 token。
         prompt_text = self._messages_text(messages)
         # completion_text 是 choices 的 JSON 字符串，用于估算输出 token。
         completion_text = json.dumps(data.get("choices", []), ensure_ascii=False)
+        estimated_prompt = self.estimate_tokens(prompt_text)
         return LlmUsage(
-            prompt=self.estimate_tokens(prompt_text),
+            prompt=estimated_prompt,
             completion=self.estimate_tokens(completion_text),
+            cache_miss=estimated_prompt,
         )

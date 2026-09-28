@@ -30,7 +30,7 @@ SNAPSHOT_BUDGET = 48_000
 CODER_OUTPUT_TOKENS = 6_000
 # CODER_MAX_STEPS 给复杂的从零项目保留实现、验证和收尾空间。模型接口偶发重试时，
 # 不能让协议失败过早吃光真正可用于写代码的步骤。
-CODER_MAX_STEPS = 26
+CODER_MAX_STEPS = 14
 # 429/5xx 与连接超时属于模型服务的瞬时故障，不应和无效 ReAct 协议共用“三次即终止”
 # 的预算。一次请求在 LlmClient 内已有短重试，这里再用较长退避跨过网关抖动窗口。
 CODER_MAX_TRANSIENT_FAILURES = 6
@@ -463,7 +463,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     data = client.chat_json(messages, max_tokens=CODER_OUTPUT_TOKENS)
                 else:
                     data = client.chat_json(messages)
-            graph._add_tokens(state, client.last_usage.total)
+            graph._add_tokens(state, client.last_usage)
         except LlmBalanceError:
             raise
         except LlmError as exc:

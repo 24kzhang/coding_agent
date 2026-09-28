@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from backend.agents import graph as graph_module
 from backend.agents.doc import doc
 from backend.agents.final import final
@@ -17,6 +19,7 @@ from backend.agents.planner import (
 from backend.memory import MemoryStore
 from backend.tools import FsTool, ShellTool
 from llm import LlmError, ModelStore
+from llm.client import LlmUsage
 
 
 def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
@@ -44,6 +47,41 @@ def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -
     assert events == [f"init:{tmp_path / 'project'}", "ready", "close"]
     native = graph._shell({"workdir": str(tmp_path / "project"), "container_shell": False})
     assert isinstance(native, ShellTool)
+
+
+def test_graph_emits_usage_breakdown_and_enforces_budget(tmp_path, monkeypatch) -> None:
+    """运行级用量应可观察，并在未缓存输入超限后立即停止。"""
+
+    events = []
+    graph = AgentGraph(
+        ModelStore(tmp_path / "models.json"),
+        MemoryStore(tmp_path / "mem"),
+        emit=events.append,
+    )
+    state = {
+        "session_id": "budget",
+        "workdir": str(tmp_path / "project"),
+        "tokens": 0,
+    }
+    graph._add_tokens(
+        state,
+        LlmUsage(prompt=100, completion=30, cached=80, cache_miss=20, reasoning=21),
+    )
+
+    assert state["tokens"] == 130
+    assert state["model_calls"] == 1
+    assert state["cached_input_tokens"] == 80
+    assert state["uncached_input_tokens"] == 20
+    assert state["output_tokens"] == 30
+    assert events[-1].data["reasoning_tokens"] == 21
+
+    monkeypatch.setattr(graph_module, "MAX_UNCACHED_INPUT_TOKENS", 20)
+    with pytest.raises(graph_module.RunBudgetError, match="未缓存输入"):
+        graph._add_tokens(
+            state,
+            LlmUsage(prompt=1, completion=1, cache_miss=1),
+        )
+    assert events[-1].data["reason"] == "run_budget_exceeded"
 
 
 def test_planner_retries_transient_gateway_errors(tmp_path, monkeypatch) -> None:

@@ -30,7 +30,15 @@ from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
-MAX_CODER_ATTEMPTS = 7
+MAX_CODER_ATTEMPTS = 3
+# 运行级预算防止错误工具循环持续消耗 API。命中缓存的输入不计入未缓存预算。
+MAX_MODEL_CALLS = 36
+MAX_UNCACHED_INPUT_TOKENS = 800_000
+MAX_OUTPUT_TOKENS = 160_000
+
+
+class RunBudgetError(RuntimeError):
+    """模型调用达到运行级成本上限，必须停止当前运行。"""
 
 # Emit 是事件回调类型，AgentGraph 通过它把 AgentEvent 推给 FastAPI 流式接口。
 Emit = Callable[[AgentEvent], None]
@@ -144,6 +152,11 @@ class AgentGraph:
             "error": "",
             # tokens 是本轮模型调用累计 token 估算。
             "tokens": 0,
+            "model_calls": 0,
+            "cached_input_tokens": 0,
+            "uncached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
         }
         # final 是 LangGraph 执行完后返回的最终状态；无论成功失败都清理本轮容器。
         try:
@@ -1484,7 +1497,7 @@ class AgentGraph:
         seen: set[str] = set()
         for _step in range(4):
             data = client.chat_json(conversation, **kwargs)
-            self._add_tokens(state, client.last_usage.total)
+            self._add_tokens(state, client.last_usage)
             actions = [
                 item
                 for item in self._normalize_actions(data.get("actions"), tools)
@@ -1534,7 +1547,7 @@ class AgentGraph:
         seen: set[str] = set()
         for _step in range(4):
             text = client.chat(conversation, **kwargs)
-            self._add_tokens(state, client.last_usage.total)
+            self._add_tokens(state, client.last_usage)
             data: dict[str, Any] = {}
             candidate = text.strip()
             if candidate.startswith("```"):
@@ -1911,11 +1924,66 @@ class AgentGraph:
             )
         return state
 
-    def _add_tokens(self, state: AgentState, tokens: int) -> None:
-        """累计 token 估算，并发出 usage 事件。"""
+    def _add_tokens(self, state: AgentState, usage: object) -> None:
+        """累计一次模型调用的分项用量，并执行运行级成本闸门。"""
 
-        state["tokens"] = int(state.get("tokens", 0)) + tokens
-        self._emit(state, "llm", "usage", f"本次模型调用约消耗 {tokens} token", tokens=tokens)
+        if isinstance(usage, int):
+            prompt = 0
+            completion = usage
+            cached = 0
+            cache_miss = 0
+            reasoning = 0
+            total = usage
+        else:
+            total = int(getattr(usage, "total", 0) or 0)
+            prompt = int(getattr(usage, "prompt", 0) or 0)
+            completion = int(getattr(usage, "completion", 0) or 0)
+            cached = int(getattr(usage, "cached", 0) or 0)
+            cache_miss = int(
+                getattr(usage, "cache_miss", max(prompt - cached, 0))
+                or max(prompt - cached, 0)
+            )
+            reasoning = int(getattr(usage, "reasoning", 0) or 0)
+        state["tokens"] = int(state.get("tokens", 0)) + total
+        state["model_calls"] = int(state.get("model_calls", 0)) + 1
+        state["cached_input_tokens"] = int(state.get("cached_input_tokens", 0)) + cached
+        state["uncached_input_tokens"] = int(state.get("uncached_input_tokens", 0)) + cache_miss
+        state["output_tokens"] = int(state.get("output_tokens", 0)) + completion
+        state["reasoning_tokens"] = int(state.get("reasoning_tokens", 0)) + reasoning
+        self._emit(
+            state,
+            "llm",
+            "usage",
+            (
+                f"输入 {prompt} token（缓存命中 {cached}、未命中 {cache_miss}），"
+                f"输出 {completion} token（其中推理 {reasoning}）"
+            ),
+            tokens=total,
+            data={
+                "prompt_tokens": prompt,
+                "cached_input_tokens": cached,
+                "uncached_input_tokens": cache_miss,
+                "output_tokens": completion,
+                "reasoning_tokens": reasoning,
+                "model_calls": state["model_calls"],
+            },
+        )
+        exceeded = ""
+        if state["model_calls"] > MAX_MODEL_CALLS:
+            exceeded = f"模型调用次数超过 {MAX_MODEL_CALLS}"
+        elif state["uncached_input_tokens"] > MAX_UNCACHED_INPUT_TOKENS:
+            exceeded = f"未缓存输入超过 {MAX_UNCACHED_INPUT_TOKENS} token"
+        elif state["output_tokens"] > MAX_OUTPUT_TOKENS:
+            exceeded = f"输出超过 {MAX_OUTPUT_TOKENS} token"
+        if exceeded:
+            self._emit(
+                state,
+                "manager",
+                "error",
+                f"运行成本预算已触发：{exceeded}，已停止后续模型调用并保留现场。",
+                data={"reason": "run_budget_exceeded"},
+            )
+            raise RunBudgetError(exceeded)
 
     def _trim(self, text: str, max_chars: int) -> str:
         """保留文本最后 max_chars 个字符，常用于限制 memory 进入上下文的长度。"""

@@ -273,6 +273,64 @@ def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_pa
     assert client.last_usage.total == 15
 
 
+def test_responses_usage_splits_cache_and_reasoning(tmp_path) -> None:
+    """Responses 用量应拆分缓存命中、未命中和推理 token。"""
+
+    cfg = ModelConfig(
+        id="deepseek",
+        name="DeepSeek",
+        base_url="https://api.deepseek.com",
+        api_key="k",
+        model="deepseek-flash",
+        protocol="responses",
+    )
+    client = LlmClient(cfg)
+    usage = client._responses_usage(
+        {
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "input_tokens_details": {"cached_tokens": 80},
+                "output_tokens_details": {"reasoning_tokens": 21},
+            }
+        },
+        [{"role": "user", "content": "测试"}],
+    )
+
+    assert usage.total == 130
+    assert usage.cached == 80
+    assert usage.cache_miss == 20
+    assert usage.reasoning == 21
+
+
+def test_chat_usage_supports_deepseek_cache_fields() -> None:
+    """Chat Completions 应读取 DeepSeek 的缓存命中与未命中字段。"""
+
+    cfg = ModelConfig(
+        id="deepseek",
+        name="DeepSeek",
+        base_url="https://api.deepseek.com",
+        api_key="k",
+        model="deepseek-chat",
+    )
+    usage = LlmClient(cfg)._usage(
+        {
+            "usage": {
+                "prompt_tokens": 90,
+                "completion_tokens": 18,
+                "prompt_cache_hit_tokens": 72,
+                "prompt_cache_miss_tokens": 18,
+                "completion_tokens_details": {"reasoning_tokens": 11},
+            }
+        },
+        [{"role": "user", "content": "测试"}],
+    )
+
+    assert usage.cached == 72
+    assert usage.cache_miss == 18
+    assert usage.reasoning == 11
+
+
 def test_responses_api_retries_transient_status(monkeypatch) -> None:
     """Responses API 在执行工具前遇到瞬时服务错误时，应使用同一请求重试一次。"""
 
