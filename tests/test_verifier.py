@@ -291,21 +291,21 @@ def test_read_only_verify_failure_never_routes_to_coder(tmp_path) -> None:
     assert graph.route_after_verifier(state) == "final"
 
 
-def test_complex_project_allows_additional_repair_rounds(tmp_path) -> None:
-    """复杂项目第五轮仍有可修复问题时，应继续修复而不是提前交付失败。"""
+def test_complex_project_stops_at_repair_budget(tmp_path) -> None:
+    """复杂项目可精确修复，但达到三轮成本上限后必须停止。"""
 
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
     state = {
         "task_type": "code_gen",
         "tests_ok": False,
-        "retry": 5,
+        "retry": 2,
         "tests": [{"cmd": "需求实现审查", "ok": False, "issues": ["缺少配置文件"]}],
     }
 
     # 验证失败先回到主管，由主管决定修复、重规划或请求澄清。
     assert graph.route_after_verifier(state) == "manager"
 
-    state["retry"] = 7
+    state["retry"] = 3
     assert graph.route_after_verifier(state) == "final"
 
 

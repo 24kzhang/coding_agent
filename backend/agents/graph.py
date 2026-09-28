@@ -652,8 +652,8 @@ class AgentGraph:
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
         ]
-        # retry 在每次 Coding 结束后递增。复杂项目常需要多轮“实现 → 语义审查 → 精确修复”，
-        # 尤其模型接口偶发超时会消耗整轮步骤；保留五次总尝试仍有明确硬上限。
+        # retry 在每次 Coding 结束后递增。成本治理保留三次“实现 → 验证 → 精确修复”机会，
+        # 达到上限后必须停止并报告，不能继续放大协议错误或无进展循环。
         if actionable_failures and int(state.get("retry", 0)) < MAX_CODER_ATTEMPTS:
             return "manager"
         # 测试通过且任务需要文档时进入 doc。
