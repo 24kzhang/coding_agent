@@ -1218,6 +1218,12 @@ class AgentGraph:
                 if test_targets:
                     target_text = " ".join(test_targets)
                     commands.append(f"uv run{project_arg} pytest -q {target_text}")
+                # 常规 build/smoke 脚本属于项目显式交付的验收入口，Verifier 必须独立重跑。
+                scripts_dir = project_dir / "scripts"
+                for script_name in ("build.py", "smoke.py", "smoke_test.py"):
+                    script_path = (scripts_dir / script_name).as_posix()
+                    if script_path in files:
+                        commands.append(f"uv run{project_arg} python {script_path}")
             # 没有 pyproject.toml 的 Python 脚本仓库，仅在确实存在测试时调用系统 pytest。
             if not python_manifests:
                 test_targets = sorted(

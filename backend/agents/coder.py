@@ -243,6 +243,28 @@ def _is_dependency_mutation_command(command: str) -> bool:
     return False
 
 
+def _is_verification_command(command: str) -> bool:
+    """识别能够作为实现完成证据的测试、构建、语法检查或烟测命令。"""
+
+    lowered = f" {command.strip().lower()}"
+    markers = (
+        " pytest",
+        "node --check ",
+        "npm run test",
+        "npm run build",
+        " run test",
+        " run build",
+        "python -m compileall",
+        "ruff check",
+        "mypy ",
+        "pyright ",
+        "smoke.py",
+        "smoke_test.py",
+        "build.py",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool) -> list[dict]:
     """构造原生工具清单；用户停止读取后不再向模型暴露只读文件工具。"""
 
@@ -378,6 +400,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     addressed_failure_paths: set[str] = set()
     # passed_failure_commands 记录修复后已经成功的旧失败命令，避免原错误日志继续误导模型。
     passed_failure_commands: set[str] = set()
+    # successful_verification_commands 记录本轮真实通过的测试、构建和烟测。
+    successful_verification_commands: set[str] = set()
     if state.get("tests") and not state.get("tests_ok", True):
         # 如果上一轮验证失败，把测试结果作为观察反馈给模型修复。
         failed_tests = _test_brief(state["tests"])
@@ -855,6 +879,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     command = str(action.get("cmd") or "")
                     dependency_mutated = dependency_mutated or _is_dependency_mutation_command(command)
                     passed_failure_commands.add(command)
+                    if _is_verification_command(command):
+                        successful_verification_commands.add(command)
                     failed_tests = _test_brief(
                         state.get("tests", []),
                         addressed_failure_paths,
@@ -932,7 +958,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             graph._emit(state, "coder", "done", coding_summary)
             break
         if idle_after_mutation >= 3:
-            coding_summary = "Coding 已产生文件变更，但连续三轮只有失败、读取或状态查询，没有新的实现进展，也没有明确完成任务。"
+            if len(successful_verification_commands) >= 2 and not failed_tests:
+                coding_ok = True
+                coding_summary = (
+                    "Coding 已完成实现并通过多项测试、构建或烟测；"
+                    "模型随后连续只读确认，现交由独立 Verifier 做最终需求审查。"
+                )
+                graph._emit(state, "coder", "done", coding_summary)
+            else:
+                coding_summary = "Coding 已产生文件变更，但连续三轮只有失败、读取或状态查询，没有新的实现进展，也没有明确完成任务。"
             break
     if not coding_ok and not coding_summary:
         coding_summary = "Coding 在最大 ReAct 步数内没有明确完成任务。"

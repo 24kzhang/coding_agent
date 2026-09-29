@@ -239,6 +239,23 @@ def test_nested_frontend_backend_verification_uses_project_scoped_commands(tmp_p
     ]
 
 
+def test_python_project_runs_declared_build_and_smoke_scripts(tmp_path) -> None:
+    """项目自带的常规构建与烟测脚本必须由 Verifier 独立重跑。"""
+
+    fs = FsTool(str(tmp_path / "repo"))
+    fs.write("app/pyproject.toml", "[project]\nname='demo'\nversion='0.1.0'\n")
+    fs.write("app/server/main.py", "print('ok')\n")
+    fs.write("app/tests/test_app.py", "def test_ok(): assert True\n")
+    fs.write("app/scripts/build.py", "print('build')\n")
+    fs.write("app/scripts/smoke.py", "print('smoke')\n")
+    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+
+    commands = graph._verification_commands(fs, fs.list())
+
+    assert "uv run --project app python app/scripts/build.py" in commands
+    assert "uv run --project app python app/scripts/smoke.py" in commands
+
+
 def test_static_javascript_verification_includes_node_syntax_check(tmp_path) -> None:
     """无 package.json 的静态页面也必须验证 JavaScript 入口语法。"""
 

@@ -9,6 +9,7 @@ from backend.agents.coder import (
     _is_dependency_mutation_command,
     _is_discovery_command,
     _is_inspection_command,
+    _is_verification_command,
     _native_coder_specs,
     _observation_brief,
     _test_brief,
@@ -24,6 +25,14 @@ def test_coder_keeps_enough_steps_for_full_project_closeout() -> None:
     """复杂项目单轮必须容纳实现、测试和收尾，同时由运行级预算限制总成本。"""
 
     assert CODER_MAX_STEPS >= 20
+
+
+def test_coder_recognizes_real_verification_commands() -> None:
+    assert _is_verification_command("uv run --project app pytest -q app/tests")
+    assert _is_verification_command("uv run --project app python app/scripts/smoke.py")
+    assert _is_verification_command("node --check app/web/js/app.js")
+    assert not _is_verification_command("node --version")
+    assert not _is_verification_command("python -c \"print('status')\"")
 
 
 def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
