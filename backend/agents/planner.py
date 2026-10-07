@@ -382,6 +382,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             except LlmError as exc:
                 graph._emit(state, "planner", "error", f"自动采用推荐选项生成计划失败：{str(exc)[:120]}")
     if data.get("status") == "plan":
+        graph.memory.append(state["workdir"], state["session_id"], "planner", "plan", "draft",
+                            "计划初稿", graph.model_store.redact(data))
         # Plan 初稿必须先通过确定性合同审查；不合格时按上限自动修订，用户只看到最终计划。
         normalized_markdown = str(data.get("markdown") or "")
         best_data = {**data, "markdown": normalized_markdown}
@@ -413,7 +415,9 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                         + str(best_data.get("markdown") or "")
                         + "\n\n必须逐项修复以下问题，并返回一份自洽、可直接执行的完整计划：\n- "
                         + "\n- ".join(best_issues)
-                        + "\n不得只追加勘误；要消除初稿中的冲突和错误字段。",
+                        + '\n不得只追加勘误；要消除初稿中的冲突和错误字段。当前阶段只能返回 '
+                        + '{"status":"plan","title":"中文标题","markdown":"完整执行计划"}；'
+                        + '不能返回 questions 或仅返回修改摘要。可选工程决策采用推荐选项。',
                     ),
                 },
             ]
@@ -452,11 +456,21 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 client = LlmClient(next_cfg)
                 continue
             if repaired.get("status") != "plan" or not repaired.get("markdown"):
-                break
+                graph.memory.append(state["workdir"], state["session_id"], "planner", "plan", "invalid_revision",
+                                    "修订未返回执行计划", graph.model_store.redact(repaired))
+                # 修订输出格式异常只消耗本次机会，不得跳过余下修订预算。
+                current_id = str(getattr(getattr(client, "cfg", None), "id", ""))
+                next_cfg = next((cfg for cfg in fallback_configs if cfg.id != current_id), None)
+                if next_cfg is not None:
+                    client = LlmClient(next_cfg)
+                    graph._emit(state, "planner", "model", f"修订未返回计划，切换到 {next_cfg.id} 继续修订")
+                continue
             repaired = {
                 **repaired,
                 "markdown": str(repaired["markdown"]),
             }
+            graph.memory.append(state["workdir"], state["session_id"], "planner", "plan", "revision",
+                                "候选修订计划", graph.model_store.redact(repaired))
             current_repair_model = str(getattr(getattr(client, "cfg", None), "id", ""))
             repair_counts[current_repair_model] = repair_counts.get(current_repair_model, 0) + 1
             repaired_issues = _plan_quality_issues(graph, state, str(repaired["markdown"]))

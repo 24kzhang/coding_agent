@@ -29,6 +29,24 @@ def isolate_plan_semantic_review(monkeypatch):
     monkeypatch.setattr("backend.agents.planner._semantic_plan_issues", lambda *_args: [])
 
 
+def test_planner_uses_remaining_repairs_after_invalid_revision(tmp_path, monkeypatch):
+    """错误修订格式不应跳过剩余预算，也不能把摘要当成执行计划。"""
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    replies = iter([
+        {"status": "plan", "markdown": "初稿"},
+        {"status": "questions", "questions": []},
+        {"status": "plan", "markdown": "完整修订"},
+    ])
+    client = SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    monkeypatch.setattr(graph, "_client", lambda *_args: client)
+    monkeypatch.setattr(graph, "_ctx_text", lambda *_args: "创建通用工具")
+    monkeypatch.setattr("backend.agents.planner._plan_quality_issues", lambda _graph, _state, md: [] if md == "完整修订" else ["遗漏合同"])
+    result = planner(graph, {"session_id": "s1", "workdir": str(tmp_path / "proj"), "text": "创建通用工具"})
+    assert result["plan"]["markdown"] == "完整修订"
+    assert any(r["k"] == "invalid_revision" for r in graph.memory.read_session(str(tmp_path / "proj"), "s1"))
+
+
 def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
     """容器模式共享一个执行器，原生模式仍返回既有 ShellTool。"""
 
