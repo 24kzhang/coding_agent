@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from backend.agents.loop import LoopGuard
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.tools import FsTool, GitTool, tool_specs
@@ -457,6 +458,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     duplicate_read_failures = 0
     # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
     max_steps = CODER_MAX_STEPS
+    loop_guard = LoopGuard()
     for step in range(1, max_steps + 1):
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
@@ -467,12 +469,19 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         recent_observations = [_middle_trim(item, 1_200) for item in observations[-6:]]
         # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
         current_snapshots: list[str] = []
+        visible_complete_paths: set[str] = set()
         snapshot_budget = SNAPSHOT_BUDGET
         for path, content in list(file_observations.items())[-8:]:
             if snapshot_budget <= 0:
                 break
             snapshot = _middle_trim(content, min(FILE_CONTEXT_LIMIT, snapshot_budget))
-            current_snapshots.append(f"[{path} 当前内容]\n{snapshot}")
+            metadata = fs.last_reads.get(path, {})
+            segment = ""
+            if not metadata.get("complete", True) or int(metadata.get("total_chars", 0)) > len(content):
+                segment = f"；仅包含字符 {metadata.get('start', 0)}～{metadata.get('end', len(content))}，文件共 {metadata.get('total_chars', '未知')} 字符，禁止据此整体覆盖"
+            if metadata.get("complete") and snapshot == content and int(metadata.get("total_chars", 0)) == len(content):
+                visible_complete_paths.add(path)
+            current_snapshots.append(f"[{path} 当前内容{segment}]\n{snapshot}")
             snapshot_budget -= len(snapshot)
         # messages 是本轮发给 Coding 模型的上下文。
         progress = "、".join(progress_items[-30:]) or "尚未执行成功工具"
@@ -538,6 +547,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # 后一种情况不能重复累计上一轮用量。
         usage_before = getattr(client, "last_usage", None)
         try:
+            output_limit = graph._check_model_budget(state, CODER_OUTPUT_TOKENS)
             # data 是模型返回的 ReAct JSON。
             if (
                 isinstance(client, LlmClient)
@@ -548,18 +558,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 data = client.chat_tools(
                     messages,
                     native_specs,
-                    max_tokens=CODER_OUTPUT_TOKENS,
+                    max_tokens=output_limit,
                 )
             elif "longcat" in model_name or empty_steps >= 2:
                 # LongCat 的普通文本模式会稳定返回原生工具标签；直接使用该协议，避免先用
                 # response_format 连续得到空对象。其他模型只有连续空响应后才进入兼容模式。
                 if isinstance(client, LlmClient):
-                    data = client.chat_json(messages, plain_text=True, max_tokens=CODER_OUTPUT_TOKENS)
+                    data = client.chat_json(messages, plain_text=True, max_tokens=output_limit)
                 else:
                     data = client.chat_json(messages, plain_text=True)
             else:
                 if isinstance(client, LlmClient):
-                    data = client.chat_json(messages, max_tokens=CODER_OUTPUT_TOKENS)
+                    data = client.chat_json(messages, max_tokens=output_limit)
                 else:
                     data = client.chat_json(messages)
             graph._add_tokens(state, client.last_usage)
@@ -676,6 +686,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # 只执行前 3 个动作，剩余动作留到下一轮，避免一个错误批次破坏多个文件。
             observations.append(f"模型本轮返回 {len(actions)} 个动作，只执行前 3 个；其余动作请下一轮继续。")
             actions = actions[:3]
+            data = {**data, "done": False}
         unresolved_missing_delivery = retry > 0 and failed_tests and any(
             marker in failed_tests
             for marker in ("缺失", "不存在", "尚未创建", "没有交付")
@@ -719,6 +730,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         empty_steps = 0
         # action_failed 表示本批动作至少有一个失败，模型必须观察并修复后才能 done。
         action_failed = False
+        step_signatures: list[str] = []
         # batch_progress 表示本批至少有一个成功且不是纯 Git 状态查询的动作。
         batch_progress = False
         # switched_this_step 表示本轮因工具策略失败切换了模型，应立即进入下一轮重新规划。
@@ -737,6 +749,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 break
             # signature 用稳定 JSON 表示本次动作，相同参数和内容的动作不会重复执行。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
+            step_signatures.append(signature)
             tool = str(action.get("tool") or "")
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
             inspection_command = tool == "run_command" and _is_inspection_command(
@@ -749,7 +762,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "run_command",
                 "write_file",
             } and graph.model_store.contains_secret(action)
-            if secret_write:
+            if action.get("_error"):
+                observation = {"ok": False, "text": str(action["_error"])}
+            elif secret_write:
                 observation = {
                     "ok": False,
                     "text": (
@@ -824,6 +839,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         "小改动使用 replace_file，确实需要整体整理时才使用 write_file。"
                     ),
                 }
+            elif (
+                tool == "write_file"
+                and path
+                and fs.safe(path).exists()
+                and path not in visible_complete_paths
+            ):
+                observation = {
+                    "ok": False,
+                    "text": f"拒绝用局部快照整体覆盖文件：{path}。请精确替换已读取片段，或读取完整文件后重写。",
+                }
             elif tool in {"append_file", "replace_block", "replace_file"} and path and fs.safe(path).exists() and path not in read_paths:
                 observation = {
                     "ok": False,
@@ -889,6 +914,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if tool == "read_file" and path:
                     read_paths.add(path)
                 elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
+                    successful_verification_commands.clear()
+                    passed_failure_commands.clear()
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。
                     mutated_paths.add(path)
                     if path not in current_files:
@@ -937,6 +964,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 + "。请只处理仍显示的失败项；若清单为空，完成必要测试后立即结束本轮。"
             )
         if mutated_paths or dependency_mutated:
+            if dependency_mutated:
+                successful_verification_commands.clear()
+                passed_failure_commands.clear()
             # 文件或依赖状态变化后，之前运行过的同一测试已经不再是重复动作，必须允许复验。
             seen_actions = {item for item in seen_actions if '"tool": "run_command"' not in item}
         # 同一批中只要已有真实写入或验证命令成功，就属于有效推进；
@@ -947,8 +977,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         elif mutation_count or changes:
             idle_after_mutation += 1
         if guidance_replan:
+            loop_guard.history.clear()
             observations.append("工具批次执行期间收到新指导，已保留完成的原子动作并取消剩余旧动作。")
             continue
+        if loop_guard.record("\n".join(step_signatures), progress=batch_progress):
+            coding_summary = "检测到连续重复或交替工具空转，保留当前文件并交由验证阶段提供具体修复反馈。"
+            graph._emit(state, "coder", "error", coding_summary)
+            break
         if data.get("done"):
             if action_failed:
                 observations.append("本轮存在失败动作，不能标记完成；请根据观察修复。")

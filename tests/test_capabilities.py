@@ -558,7 +558,8 @@ def test_graph_only_allows_discovered_mcp_tools(tmp_path: Path) -> None:
         state,
     )
 
-    assert rejected == []
+    assert rejected[0]["tool"] == "invalid_action"
+    assert "未知工具" in rejected[0]["_error"]
     assert result["ok"] is True
     assert fake.calls == [("docs", "lookup", {"query": "LangGraph"})]
 

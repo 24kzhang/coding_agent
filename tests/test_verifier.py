@@ -418,15 +418,16 @@ def test_private_model_config_facts_verify_secret_without_exposing_it(tmp_path) 
     """语义审查应确认受控复制成功，但提示中不得包含真实密钥。"""
 
     fs = FsTool(str(tmp_path / "project"))
-    fs.write(
-        ".local/model.json",
+    private = fs.root / ".local/model.json"
+    private.parent.mkdir()
+    private.write_text(
         json.dumps(
             {
                 "base_url": "https://example.test/v1",
                 "api_key": "sk-private-value",
                 "model": "deepseek-flash",
             }
-        ),
+        ), encoding="utf-8",
     )
 
     facts = _private_model_config_facts(fs, [".local/model.json"])

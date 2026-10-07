@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -11,6 +14,9 @@ class FsTool:
     ignored_dirs = {
         ".git",
         ".idea",
+        ".local",
+        ".aws",
+        ".ssh",
         ".mypy_cache",
         ".next",
         ".pytest_cache",
@@ -93,6 +99,20 @@ class FsTool:
         self.root = Path(workdir).resolve()
         # 如果用户选择的是空目录或还不存在的目录，自动创建，方便 agent 直接开始写项目。
         self.root.mkdir(parents=True, exist_ok=True)
+        # 读取元数据用于检测分段快照和外部并发修改，不把全文交给模型。
+        self.last_reads: dict[str, dict[str, object]] = {}
+
+    def version(self, rel: str) -> str:
+        """计算当前磁盘内容版本，精确编辑不能覆盖读取后的外部修改。"""
+
+        return sha256(self.safe(rel).read_bytes()).hexdigest()
+
+    def assert_unchanged(self, rel: str) -> None:
+        """仅在存在读取基线时检查；工具自身的写入会更新基线。"""
+
+        baseline = self.last_reads.get(rel)
+        if baseline and self.version(rel) != baseline["version"]:
+            raise ValueError(f"文件在读取后被外部修改：{rel}，必须重新读取再编辑")
 
     def safe(self, rel: str) -> Path:
         """把相对路径转换成受控绝对路径，并阻止访问项目目录外的文件。"""
@@ -118,6 +138,8 @@ class FsTool:
                 path = Path(current) / name
                 if name in self.ignored_names or path.suffix.lower() in self.binary_suffixes:
                     continue
+                if self.is_sensitive(path) or path.is_symlink():
+                    continue
                 files.append(str(path.relative_to(self.root)))
                 if len(files) >= max_files:
                     return files
@@ -132,10 +154,18 @@ class FsTool:
         if not path.is_file():
             raise FileNotFoundError(f"文件不存在：{rel}")
         # text 使用替换模式读取，少量非 UTF-8 字节不会让整个任务中断。
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
         # safe_start 和 safe_max 阻止模型传入负数或超大读取范围。
         safe_start = max(int(start), 0)
         safe_max = min(max(int(max_chars), 1), 80_000)
+        self.last_reads[rel] = {
+            "version": sha256(raw).hexdigest(),
+            "start": safe_start,
+            "end": min(safe_start + safe_max, len(text)),
+            "total_chars": len(text),
+            "complete": safe_start == 0 and safe_max >= len(text),
+        }
         return text[safe_start : safe_start + safe_max]
 
     def write(self, rel: str, content: str) -> str:
@@ -146,10 +176,22 @@ class FsTool:
         self._ensure_not_sensitive(path)
         # 写入嵌套目录文件时自动创建父目录。
         path.parent.mkdir(parents=True, exist_ok=True)
-        # temp_path 与目标同目录，写完后原子替换，避免中断留下半个代码文件。
-        temp_path = path.with_name(f".{path.name}.agent.tmp")
-        temp_path.write_text(content, encoding="utf-8")
-        temp_path.replace(path)
+        self.assert_unchanged(rel)
+        # 唯一临时文件避免两个操作互相覆盖，保留脚本执行权限；失败不遗留半成品。
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp_path = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_path, mode)
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        if rel in self.last_reads:
+            self.last_reads[rel]["version"] = self.version(rel)
         return str(path.relative_to(self.root))
 
     def append(self, rel: str, content: str) -> str:
@@ -158,11 +200,9 @@ class FsTool:
         # path 是经过 safe 校验后的目标文件路径。
         path = self.safe(rel)
         self._ensure_not_sensitive(path)
-        # 追加前同样要确保父目录存在。
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(content)
-        return str(path.relative_to(self.root))
+        self.assert_unchanged(rel)
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        return self.write(rel, text + content)
 
     def replace(self, rel: str, old: str, new: str, expected: int = 1) -> str:
         """精确替换已有文本；匹配数量不符时拒绝写入。"""
@@ -170,6 +210,9 @@ class FsTool:
         # path 和 text 分别是受控文件路径及当前完整内容。
         path = self.safe(rel)
         self._ensure_not_sensitive(path)
+        if not old or expected < 1:
+            raise ValueError("精确替换的旧文本不能为空，匹配数量必须为正整数")
+        self.assert_unchanged(rel)
         text = path.read_text(encoding="utf-8", errors="replace")
         # actual 是 old 在当前文件中的真实出现次数，用于防止替错位置。
         actual = text.count(old)
@@ -185,6 +228,7 @@ class FsTool:
         # path/text 是受工作目录约束的目标文件及当前完整内容，所有定位都在真实磁盘版本上完成。
         path = self.safe(rel)
         self._ensure_not_sensitive(path)
+        self.assert_unchanged(rel)
         text = path.read_text(encoding="utf-8", errors="replace")
         # start_marker 必须唯一，避免同名函数或重复标题让工具替换到错误代码块。
         if not start_marker or text.count(start_marker) != 1:
@@ -254,6 +298,8 @@ class FsTool:
 
         # name 是小写文件名；.env.example 明确是模板，不按真实凭据处理。
         name = path.name.lower()
+        if any(part in {".local", ".aws", ".ssh"} for part in path.relative_to(self.root).parts[:-1]):
+            return True
         if name == ".env.example" or name.endswith(".example"):
             return False
         return name in self.sensitive_names or name.startswith(".env.") or path.suffix.lower() in self.sensitive_suffixes

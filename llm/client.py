@@ -36,6 +36,15 @@ class LlmUsage:
     cache_miss: int = 0
     # reasoning 是 completion 中用于内部推理的 token 数，不与 completion 重复累加。
     reasoning: int = 0
+    # 估算值与供应商返回值分开，缓存和成本结论不能建立在估算命中上。
+    estimated: bool = False
+
+    def __post_init__(self) -> None:
+        self.prompt = max(0, self.prompt)
+        self.completion = max(0, self.completion)
+        self.cached = max(0, min(self.cached, self.prompt))
+        self.cache_miss = min(self.prompt, max(self.cache_miss, self.prompt - self.cached))
+        self.reasoning = max(0, min(self.reasoning, self.completion))
 
     @property
     def total(self) -> int:
@@ -127,7 +136,7 @@ class LlmClient:
         effort: str | None = None,
     ) -> str:
         """按模型配置选择 Responses 或 Chat Completions。"""
-
+        self.last_usage = LlmUsage()
         protocol = self.cfg.protocol
         if protocol == "auto":
             model = self.cfg.model.lower()
@@ -164,7 +173,7 @@ class LlmClient:
         effort: str | None = None,
     ) -> dict[str, Any]:
         """使用供应商原生函数工具，并转换为 Agent 内部动作格式。"""
-
+        self.last_usage = LlmUsage()
         protocol = self.cfg.protocol
         if protocol == "auto":
             model = self.cfg.model.lower()
@@ -602,6 +611,7 @@ class LlmClient:
             prompt=estimated_prompt,
             completion=self.estimate_tokens(str(data.get("output_text") or data.get("output") or "")),
             cache_miss=estimated_prompt,
+            estimated=True,
         )
 
     @staticmethod
@@ -877,4 +887,5 @@ class LlmClient:
             prompt=estimated_prompt,
             completion=self.estimate_tokens(completion_text),
             cache_miss=estimated_prompt,
+            estimated=True,
         )

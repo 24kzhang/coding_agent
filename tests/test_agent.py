@@ -237,8 +237,8 @@ def test_planner_keeps_successful_plan_in_session_memory_only(tmp_path, monkeypa
     assert graph._latest_saved_plan(str(workdir), "plan-memory")["markdown"].startswith("# 可执行计划")
 
 
-def test_plan_quality_requires_visible_attachment_reference_codes(tmp_path) -> None:
-    """图片任务的计划必须逐张关联附件并抄录图内参考编号。"""
+def test_plan_quality_requires_observed_attachment_design_details(tmp_path) -> None:
+    """图片任务必须描述可核验视觉信息，不能假定每张图片都有固定编号。"""
 
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
@@ -262,8 +262,8 @@ def test_plan_quality_requires_visible_attachment_reference_codes(tmp_path) -> N
         "mobile.png 参考编号 FIT-MOBILE-27。",
     )
 
-    assert any("参考编号" in item for item in missing)
-    assert not any("参考编号" in item for item in complete)
+    assert any("视觉要素" in item for item in missing)
+    assert not any("视觉要素" in item for item in complete)
 
 
 def test_planner_retries_one_transient_repair_failure(tmp_path, monkeypatch) -> None:
@@ -595,8 +595,8 @@ currentMessages.push({ role: 'user', content: question });
     issues = _plan_quality_issues(graph, state, markdown)
 
     assert any("model_name" in item for item in issues)
-    assert any("/api/exercises" in item for item in issues)
-    assert any("pytest" in item for item in issues)
+    assert any("数据访问合同" in item for item in issues)
+    assert any("自动化测试" in item for item in issues)
     assert any("typecheck" in item for item in issues)
     assert any("npm run build" in item for item in issues)
     assert any("所有原始字段" in item for item in issues)

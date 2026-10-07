@@ -235,10 +235,10 @@ def test_shell_forces_uv_init_to_stay_out_of_parent_workspace(tmp_path, monkeypa
 
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(wait=lambda **_options: 0)
 
     monkeypatch.setattr("backend.tools.shell.shutil.which", lambda command: f"/usr/bin/{command}")
-    monkeypatch.setattr("backend.tools.shell.subprocess.run", fake_run)
+    monkeypatch.setattr("backend.tools.shell.subprocess.Popen", fake_run)
 
     result = ShellTool(str(tmp_path)).run("uv init --package")
 
@@ -253,11 +253,11 @@ def test_shell_drops_virtualenv_outside_selected_project(tmp_path, monkeypatch) 
 
     def fake_run(argv, **kwargs):
         captured["env"] = kwargs["env"]
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(wait=lambda **_options: 0)
 
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path.parent / "agent" / ".venv"))
     monkeypatch.setattr("backend.tools.shell.shutil.which", lambda command: f"/usr/bin/{command}")
-    monkeypatch.setattr("backend.tools.shell.subprocess.run", fake_run)
+    monkeypatch.setattr("backend.tools.shell.subprocess.Popen", fake_run)
 
     result = ShellTool(str(tmp_path / "user-project")).run("uv run pytest -q")
 

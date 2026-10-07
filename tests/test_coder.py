@@ -437,7 +437,7 @@ def test_coder_stops_after_repeated_reads_without_progress(tmp_path) -> None:
 
     assert client.calls == 4
     assert result["coding_ok"] is False
-    assert "连续三轮只有失败、读取或状态查询" in result["coding_summary"]
+    assert "空转" in result["coding_summary"]
 
 
 class OwnedRewriteClient:
@@ -1624,8 +1624,16 @@ class TooManyActionsClient:
 
     def __init__(self) -> None:
         self.last_usage = SimpleNamespace(total=0)
+        self.calls = 0
 
     def chat_json(self, messages, temperature=0.1):
+        self.calls += 1
+        if self.calls > 1:
+            return {
+                "actions": [{"tool": "write_file", "path": f"file_{index}.py", "content": f"VALUE = {index}\n"} for index in (3, 4)],
+                "done": True,
+                "summary": "剩余文件也已完成",
+            }
         return {
             "thought": "一次创建多个文件",
             "actions": [
@@ -1658,8 +1666,8 @@ def test_coder_executes_at_most_three_actions_per_step(tmp_path) -> None:
     )
 
     assert result["coding_ok"] is True
-    assert result["changes"] == ["file_0.py", "file_1.py", "file_2.py"]
-    assert not (tmp_path / "project" / "file_3.py").exists()
+    assert result["changes"] == [f"file_{index}.py" for index in range(5)]
+    assert (tmp_path / "project" / "file_3.py").exists()
 
 
 class ShellScanClient:

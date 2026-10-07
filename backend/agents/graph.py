@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 import uuid
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
+from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
@@ -1116,21 +1118,46 @@ class AgentGraph:
             if isinstance(item, dict) and item.get("action")
         }
         allowed.update(dynamic_allowed)
-        # actions 不是列表时视为无动作；协议层最多保留 3 个，强制 Coding 分批推进。
+        schemas = {item["name"]: item["parameters"] for item in tool_specs()}
+        # 协议错误不能转换成空动作并被 done 掩盖；批次执行上限由 Coder 明确处理。
+        if raw is not None and not isinstance(raw, list):
+            return [{"tool": "invalid_action", "_error": "actions 必须是列表"}]
         actions = raw if isinstance(raw, list) else []
         normalized: list[dict[str, Any]] = []
-        for item in actions[:3]:
+        for item in actions[:32]:
             if not isinstance(item, dict):
+                normalized.append({"tool": "invalid_action", "_error": "工具动作必须是对象"})
                 continue
             # tool 必须命中白名单，未知工具会作为无效动作被忽略。
             tool = str(item.get("tool") or "")
             if tool not in allowed:
+                normalized.append({"tool": "invalid_action", "_error": f"未知工具：{tool or '未指定'}"})
                 continue
             action = {**item, "tool": tool}
-            if tool == "read_file" and int(action.get("start", 0) or 0) == 0:
+            schema = schemas.get(tool, {})
+            problems = [f"缺少 {key}" for key in schema.get("required", []) if key not in action]
+            for key, rule in schema.get("properties", {}).items():
+                if key not in action:
+                    continue
+                value = action[key]
+                kind = rule.get("type")
+                valid = {
+                    "string": isinstance(value, str),
+                    "integer": isinstance(value, int) and not isinstance(value, bool),
+                    "array": isinstance(value, list) and all(isinstance(part, str) for part in value),
+                }.get(kind, True)
+                if not valid:
+                    problems.append(f"{key} 类型必须为 {kind}")
+                if valid and kind == "integer" and value < (1 if key in {"expected", "max_chars", "max_results"} else 0):
+                    problems.append(f"{key} 超出有效范围")
+            if problems:
+                action["_error"] = f"工具参数无效：{tool}，" + "；".join(problems)
+                normalized.append(action)
+                continue
+            if tool == "read_file" and action.get("start", 0) == 0:
                 # Coding prompt 的普通源码快照上限是 24K。部分模型仍会沿用较小的读取值，
                 # 在首段读取时统一抬高，避免 13K~24K 的常见前端文件被截断后反复重读。
-                action["max_chars"] = max(int(action.get("max_chars", 0) or 0), 24_000)
+                action["max_chars"] = max(action.get("max_chars", 0), 24_000)
             normalized.append(action)
         return normalized
 
@@ -1145,12 +1172,7 @@ class AgentGraph:
         # 没有 package.json 的静态 JavaScript 项目通常没有 npm 脚本，仍应对主入口执行原生语法检查。
         javascript_files = [rel for rel in files if rel.endswith((".js", ".mjs"))]
         if javascript_files and not node_manifests:
-            # primary_js 优先常见入口名；只选择一个入口以免占满最多四条验证命令的预算。
-            primary_js = sorted(
-                javascript_files,
-                key=lambda rel: (Path(rel).name not in {"app.js", "main.js", "index.js"}, len(Path(rel).parts), rel),
-            )[0]
-            commands.append(f"node --check {primary_js}")
+            commands.extend(f"node --check {shlex.quote(rel)}" for rel in sorted(javascript_files))
         # python_files 用于判断是否存在 Python 代码和测试目录。
         python_files = [rel for rel in files if rel.endswith(".py")]
         if python_files:
@@ -1161,10 +1183,10 @@ class AgentGraph:
             if compile_targets:
                 # 语法编译不需要安装目标项目，--no-project 避免坏打包配置掩盖真实语法结果。
                 prefix = "uv run --no-project " if python_manifests else ""
-                commands.append(prefix + "python -m compileall -q " + " ".join(compile_targets))
+                commands.append(prefix + "python -m compileall -q " + " ".join(map(shlex.quote, compile_targets)))
             for manifest in python_manifests:
                 project_dir = Path(manifest).parent
-                project_arg = "" if project_dir == Path(".") else f" --project {project_dir.as_posix()}"
+                project_arg = "" if project_dir == Path(".") else f" --project {shlex.quote(project_dir.as_posix())}"
                 # dry-run 单独验证依赖解析和项目打包配置，不修改目标项目环境。
                 commands.append(f"uv sync{project_arg} --dry-run")
                 # 测试必须限定到该 Python 项目，避免父目录或其他子项目的测试串入。
@@ -1202,10 +1224,10 @@ class AgentGraph:
                             module = ".".join(entry_path.with_suffix("").parts)
                             commands.append(f"uv run{project_arg} python -m {module}")
                         else:
-                            commands.append(f"uv run{project_arg} python {entry}")
+                            commands.append(f"uv run{project_arg} python {shlex.quote(entry)}")
                 test_targets = sorted(
                     {
-                        (project_dir / "tests").as_posix()
+                        Path(*Path(rel).parts[:Path(rel).parts.index("tests") + 1]).as_posix()
                         for rel in project_python
                         if "tests" in Path(rel).relative_to(project_dir).parts
                     }
@@ -1216,19 +1238,19 @@ class AgentGraph:
                     }
                 )
                 if test_targets:
-                    target_text = " ".join(test_targets)
+                    target_text = " ".join(map(shlex.quote, test_targets))
                     commands.append(f"uv run{project_arg} pytest -q {target_text}")
                 # 常规 build/smoke 脚本属于项目显式交付的验收入口，Verifier 必须独立重跑。
                 scripts_dir = project_dir / "scripts"
                 for script_name in ("build.py", "smoke.py", "smoke_test.py"):
                     script_path = (scripts_dir / script_name).as_posix()
                     if script_path in files:
-                        commands.append(f"uv run{project_arg} python {script_path}")
+                        commands.append(f"uv run{project_arg} python {shlex.quote(script_path)}")
             # 没有 pyproject.toml 的 Python 脚本仓库，仅在确实存在测试时调用系统 pytest。
             if not python_manifests:
                 test_targets = sorted(
                     {
-                        "tests"
+                        Path(*Path(rel).parts[:Path(rel).parts.index("tests") + 1]).as_posix()
                         for rel in python_files
                         if "tests" in Path(rel).parts
                     }
@@ -1239,7 +1261,7 @@ class AgentGraph:
                     }
                 )
                 if test_targets:
-                    commands.append("pytest -q " + " ".join(test_targets))
+                    commands.append("pytest -q " + " ".join(map(shlex.quote, test_targets)))
 
         for manifest in node_manifests:
             project_dir = Path(manifest).parent
@@ -1252,9 +1274,9 @@ class AgentGraph:
             if isinstance(scripts, dict):
                 for script in ["lint", "test", "typecheck", "build"]:
                     if script in scripts:
-                        prefix = "npm" if project_dir == Path(".") else f"npm --prefix {project_dir.as_posix()}"
+                        prefix = "npm" if project_dir == Path(".") else f"npm --prefix {shlex.quote(project_dir.as_posix())}"
                         commands.append(f"{prefix} run {script}")
-        return list(dict.fromkeys(commands))[:8]
+        return list(dict.fromkeys(commands))
 
     """执行 Coding 智能体返回的单个工具动作。"""
     def _do_action(
@@ -1331,7 +1353,13 @@ class AgentGraph:
                 # start/max_chars 支持读取大文件的后续片段。
                 start = int(action.get("start", 0))
                 max_chars = int(action.get("max_chars", 12000))
-                return {"ok": True, "text": f"读取文件：{rel}（从字符 {start} 开始）\n{fs.read(rel, max_chars, start)}"}
+                content = fs.read(rel, max_chars, start)
+                metadata = fs.last_reads[rel]
+                return {
+                    "ok": True,
+                    "text": f"读取文件：{rel}（从字符 {start} 开始，共 {metadata['total_chars']} 字符，完整={metadata['complete']}）\n{content}",
+                    "read": metadata,
+                }
             if tool == "search_files":
                 # results 是结构化内容命中列表，方便模型继续精确读取目标文件。
                 results = fs.search(str(action.get("query", "")), int(action.get("max_results", 50)))
@@ -1506,7 +1534,15 @@ class AgentGraph:
         )
         seen: set[str] = set()
         for _step in range(4):
-            data = client.chat_json(conversation, **kwargs)
+            limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or 6_000))
+            call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
+            usage_before = getattr(client, "last_usage", None)
+            try:
+                data = client.chat_json(conversation, **call_kwargs)
+            except LlmError:
+                if getattr(client, "last_usage", None) is not usage_before:
+                    self._add_tokens(state, client.last_usage)
+                raise
             self._add_tokens(state, client.last_usage)
             actions = [
                 item
@@ -1558,7 +1594,15 @@ class AgentGraph:
         )
         seen: set[str] = set()
         for _step in range(4):
-            text = client.chat(conversation, **kwargs)
+            limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or 4_000))
+            call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
+            usage_before = getattr(client, "last_usage", None)
+            try:
+                text = client.chat(conversation, **call_kwargs)
+            except LlmError:
+                if getattr(client, "last_usage", None) is not usage_before:
+                    self._add_tokens(state, client.last_usage)
+                raise
             self._add_tokens(state, client.last_usage)
             data: dict[str, Any] = {}
             candidate = text.strip()
@@ -1901,7 +1945,7 @@ class AgentGraph:
             "event",
             kind,
             self._trim(safe_msg, 3000),
-            {"tokens": tokens},
+            {"tokens": tokens, **({"usage": safe_data} if kind == "usage" else {})},
         )
         if self.emit_cb:
             self.emit_cb(event)
@@ -1945,6 +1989,24 @@ class AgentGraph:
             )
         return state
 
+    def _check_model_budget(self, state: AgentState, output_limit: int) -> int:
+        """付费请求之前检查预算，失败请求也计入请求次数上限。"""
+
+        calls = max(int(state.get("model_requests", 0)), int(state.get("model_calls", 0)))
+        reason = ""
+        if calls >= MAX_MODEL_CALLS:
+            reason = f"模型调用次数达到 {MAX_MODEL_CALLS}"
+        elif int(state.get("uncached_input_tokens", 0)) >= MAX_UNCACHED_INPUT_TOKENS:
+            reason = f"未缓存输入达到 {MAX_UNCACHED_INPUT_TOKENS} token"
+        remaining = MAX_OUTPUT_TOKENS - int(state.get("output_tokens", 0))
+        if remaining <= 0:
+            reason = f"输出达到 {MAX_OUTPUT_TOKENS} token"
+        if reason:
+            self._emit(state, "manager", "error", f"请求前成本检查已阻止后续调用：{reason}", data={"reason": "run_budget_exceeded"})
+            raise RunBudgetError(reason)
+        state["model_requests"] = calls + 1
+        return min(max(1, output_limit), remaining)
+
     def _add_tokens(self, state: AgentState, usage: object) -> None:
         """累计一次模型调用的分项用量，并执行运行级成本闸门。"""
 
@@ -1987,6 +2049,7 @@ class AgentGraph:
                 "output_tokens": completion,
                 "reasoning_tokens": reasoning,
                 "model_calls": state["model_calls"],
+                "estimated": bool(getattr(usage, "estimated", False)),
             },
         )
         exceeded = ""

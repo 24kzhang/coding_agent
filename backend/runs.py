@@ -4,6 +4,7 @@ import queue
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from backend.clock import utc_stamp
 
@@ -111,6 +112,11 @@ class RunRegistry:
             current_id = self.by_session.get(session_id)
             if current_id and current_id in self.by_id:
                 raise RunConflictError(f"会话已有任务正在执行：{current_id}")
+            root = Path(workdir).resolve()
+            for current in self.by_id.values():
+                active_root = Path(current.workdir).resolve()
+                if root == active_root or root in active_root.parents or active_root in root.parents:
+                    raise RunConflictError(f"工作目录已有重叠运行：{current.id}，请等待其完成后再开始")
             run = ActiveRun(
                 id=uuid.uuid4().hex[:16],
                 session_id=session_id,

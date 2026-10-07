@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -46,6 +48,18 @@ def prepare_command(
         argv.insert(2, "--no-workspace")
     if program_name in ShellTool.dangerous_programs:
         return {"ok": False, "code": 126, "out": "", "err": f"高风险命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
+    # 包装器不能把被拒绝的程序变成合法命令，例如 uv run rm、env rm。
+    if program_name in {"uv", "env", "timeout", "npx", "npm"} and any(
+        Path(arg).name.lower() in ShellTool.dangerous_programs for arg in argv[1:]
+    ):
+        return {"ok": False, "code": 126, "out": "", "err": "拒绝通过包装器执行高风险程序", "cmd": clean, "argv": argv}
+    if program_name == "git" and any(
+        arg in {"-C", "-c", "--git-dir", "--work-tree"} or arg.startswith(("--git-dir=", "--work-tree=", "-C", "-c"))
+        for arg in argv[1:]
+    ):
+        return {"ok": False, "code": 126, "out": "", "err": "Git 命令不得重定向仓库或覆盖执行配置", "cmd": clean, "argv": argv}
+    if program_name == "git" and any(arg in ShellTool.dangerous_git for arg in argv[1:]):
+        return {"ok": False, "code": 126, "out": "", "err": "拒绝通过 Git 全局参数绕过危险子命令检查", "cmd": clean, "argv": argv}
     if program_name == "git" and len(argv) > 1 and argv[1].lower() in ShellTool.dangerous_git:
         return {"ok": False, "code": 126, "out": "", "err": f"高风险 Git 命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
     if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not (root / ".git").is_dir():
@@ -58,7 +72,7 @@ def prepare_command(
             "argv": argv,
         }
 
-    interpreter_names = {"node", "python", "python3", "ruby", "perl"}
+    interpreter_names = {"node", "python", "python3", "ruby", "perl", "sh", "bash", "zsh", "fish", "powershell", "pwsh"}
     has_inline_script = program_name in interpreter_names and any(arg in {"-c", "-e"} for arg in argv[1:])
     if not has_inline_script:
         has_inline_script = any(
@@ -70,17 +84,27 @@ def prepare_command(
 
     container_root = Path(workspace).resolve() if workspace else None
     for index, arg in enumerate(argv[1:], start=1):
-        if arg.startswith(("http://", "https://")) or arg.startswith("-"):
+        option = ""
+        candidate = arg
+        if arg.startswith("-"):
+            if "=" not in arg:
+                continue
+            option, candidate = arg.split("=", 1)
+        if candidate.startswith(("http://", "https://")):
             continue
-        if ".." in Path(arg).parts:
+        if ".." in Path(candidate).parts:
             return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
-        arg_path = Path(arg).expanduser()
+        arg_path = Path(candidate).expanduser()
         if not arg_path.is_absolute():
+            resolved_relative = (root / arg_path).resolve()
+            if root != resolved_relative and root not in resolved_relative.parents:
+                return {"ok": False, "code": 126, "out": "", "err": f"命令参数通过链接越出项目目录：{arg}", "cmd": clean, "argv": argv}
             continue
         resolved_arg = arg_path.resolve()
         if root == resolved_arg or root in resolved_arg.parents:
             if container_root is not None:
-                argv[index] = str(container_root / resolved_arg.relative_to(root))
+                mapped = str(container_root / resolved_arg.relative_to(root))
+                argv[index] = f"{option}={mapped}" if option else mapped
             continue
         if container_root is not None and (container_root == resolved_arg or container_root in resolved_arg.parents):
             continue
@@ -146,35 +170,51 @@ class ShellTool:
         cache_root = Path(tempfile.gettempdir()) / "coding-agent-cache" / cache_key
         env["UV_CACHE_DIR"] = str(cache_root / "uv")
         env["NPM_CONFIG_CACHE"] = str(cache_root / "npm")
-        try:
-            # proc 不使用 shell，模型输入不会被二次解释为重定向或命令替换。
-            proc = subprocess.run(
-                argv,
-                cwd=self.root,
-                shell=False,
-                text=True,
-                capture_output=True,
-                timeout=max(1, min(int(timeout), 900)),
-                env=env,
-            )
-        except subprocess.TimeoutExpired as exc:
-            # stdout/stderr 在超时时可能是 bytes 或 str，统一转换后截断。
-            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
-            return {"ok": False, "code": 124, "out": stdout[-12000:], "err": (stderr + "\n命令执行超时")[-12000:], "cmd": clean, "argv": argv}
-        except OSError as exc:
-            return {"ok": False, "code": 127, "out": "", "err": f"命令启动失败：{exc}", "cmd": clean, "argv": argv}
+        started = time.monotonic()
+        # 日志写入自动清理的临时文件，输出再大也不会无上限占用 Agent 内存。
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            try:
+                proc = subprocess.Popen(
+                    argv, cwd=self.root, shell=False, stdout=stdout, stderr=stderr,
+                    env=env, start_new_session=os.name != "nt",
+                )
+                timed_out = False
+                try:
+                    code = proc.wait(timeout=max(1, min(int(timeout), 900)))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    if os.name != "nt":
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10)
+                    proc.wait()
+                    code = 124
+            except OSError as exc:
+                return {"ok": False, "code": 127, "out": "", "err": f"命令启动失败：{exc}", "cmd": clean, "argv": argv}
+            out, out_size = _bounded_output(stdout)
+            err, err_size = _bounded_output(stderr)
+        if timed_out:
+            err += "\n命令执行超时，已清理命令进程组"
         return {
-            # ok 表示命令是否以 0 退出码结束。
-            "ok": proc.returncode == 0,
-            # code 是原始退出码，方便排查具体失败类型。
-            "code": proc.returncode,
-            # out 只保留最后 12000 字符，避免长日志撑爆上下文。
-            "out": proc.stdout[-12000:],
-            # err 同样只保留最后 12000 字符。
-            "err": proc.stderr[-12000:],
-            # cmd 保留原始命令字符串，方便最终结果和 memory 展示。
-            "cmd": clean,
-            # argv 是按平台规则拆出的参数列表，便于后续审计或测试。
-            "argv": argv,
+            "ok": code == 0, "code": code, "out": out, "err": err,
+            "cmd": clean, "argv": argv, "timed_out": timed_out,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "output_bytes": out_size + err_size,
+            "output_truncated": out_size > 12_000 or err_size > 12_000,
         }
+
+
+def _bounded_output(handle, limit: int = 12_000) -> tuple[str, int]:
+    """长输出保留开头错误与末尾结论，并明确标记省略区间。"""
+
+    size = handle.seek(0, os.SEEK_END)
+    handle.seek(0)
+    if size <= limit:
+        return handle.read().decode("utf-8", errors="replace"), size
+    head = handle.read(limit // 2)
+    handle.seek(-limit // 2, os.SEEK_END)
+    tail = handle.read(limit // 2)
+    return head.decode("utf-8", errors="replace") + "\n[中间命令输出已省略]\n" + tail.decode("utf-8", errors="replace"), size

@@ -31,19 +31,40 @@ def _schema_fields(repo: dict) -> list[str]:
     snippets = repo.get("snippets") if isinstance(repo, dict) else {}
     if not isinstance(snippets, dict):
         return []
+    fields: list[str] = []
     for path, content in snippets.items():
-        if not str(path).endswith(".schema.json"):
+        if not str(path).endswith((".schema.json", "/schema.json")) and str(path) != "schema.json":
             continue
         try:
             schema = json.loads(str(content))
         except json.JSONDecodeError:
             continue
-        definitions = schema.get("$defs") if isinstance(schema, dict) else {}
-        exercise = definitions.get("exercise") if isinstance(definitions, dict) else {}
-        properties = exercise.get("properties") if isinstance(exercise, dict) else {}
+        if not isinstance(schema, dict):
+            continue
+        record = schema
+        visited: set[str] = set()
+        while isinstance(record, dict):
+            ref = record.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/") and ref not in visited:
+                visited.add(ref)
+                resolved = schema
+                for part in ref[2:].split("/"):
+                    resolved = resolved.get(part.replace("~1", "/").replace("~0", "~"), {}) if isinstance(resolved, dict) else {}
+                record = resolved
+                continue
+            if isinstance(record.get("items"), dict):
+                record = record["items"]
+                continue
+            break
+        properties = record.get("properties", {}) if isinstance(record, dict) else {}
+        if not properties:
+            definitions = schema.get("$defs") or schema.get("definitions") or {}
+            candidates = [item.get("properties") for item in definitions.values() if isinstance(item, dict) and isinstance(item.get("properties"), dict)] if isinstance(definitions, dict) else []
+            if len(candidates) == 1:
+                properties = candidates[0]
         if isinstance(properties, dict):
-            return [str(field) for field in properties]
-    return []
+            fields.extend(str(field) for field in properties)
+    return list(dict.fromkeys(fields))
 
 
 def _mentions_field(text: str, field: str) -> bool:
@@ -106,7 +127,7 @@ def _normalize_chat_contract(markdown: str, goal: str) -> str:
                 normalized.append(
                     indent
                     + "- 前端不创建 system、不初始化 system、不过滤 system，也不显示 system；首轮仅发送 "
-                    "`exercise_id`、独立问题字段和空 `messages`；客户端保存服务端返回的完整 messages"
+                    "当前业务对象标识、独立问题字段和空 `messages`；客户端保存服务端返回的完整 messages"
                     "（包含 system/user/assistant），后续原样回传，界面只渲染 user/assistant。"
                 )
                 canonical_added = True
@@ -141,10 +162,10 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
     if data_site:
         # 前端不能只写“读取某 JSON”而不说明浏览器如何访问工作区外的数据。
-        if "/api/exercises" not in markdown:
-            issues.append("缺少可执行的数据访问合同：应规划 `/api/exercises` 等服务端接口")
-        if "pytest" not in plan_lower:
-            issues.append("缺少后端核心接口和数据逻辑的 pytest 自动化测试")
+        if not re.search(r"/api/[\w/{.-]+", markdown) and not any(word in markdown for word in ("静态资源", "公开数据 URL", "静态 JSON")):
+            issues.append("缺少可执行的数据访问合同：应规划明确的数据接口或公开静态资源地址")
+        if not any(word in plan_lower for word in ("pytest", "vitest", "jest", "go test", "cargo test", "自动化测试")):
+            issues.append("缺少核心接口和数据逻辑的自动化测试")
 
     # 一旦计划选择 React + TypeScript，就必须规划独立类型检查和生产构建。
     if "react" in plan_lower and "typescript" in plan_lower:
@@ -158,7 +179,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         re.search(r"(?:所有|完整)\s*\d+\s*个?原始字段", markdown)
     )
     if "所有详细信息" in goal and not complete_detail_claim:
-        issues.append("详情弹窗未明确展示动作 JSON 的所有原始字段")
+        issues.append("详情未明确展示数据记录的所有原始字段")
     if "所有详细信息" in goal and fields and "左侧" in markdown:
         detail_start = markdown.find("左侧")
         detail_section = markdown[detail_start : detail_start + 2_500]
@@ -174,8 +195,9 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
                 "详情左侧的明确字段清单仍有遗漏（媒体路径字段也应作为文本展示）："
                 + "、".join(missing_detail_fields)
             )
-    if fields and "/api/exercises/{" in markdown:
-        detail_api_start = markdown.find("/api/exercises/{")
+    detail_endpoint = re.search(r"/api/[\w/.-]+/\{", markdown)
+    if fields and detail_endpoint:
+        detail_api_start = detail_endpoint.start()
         next_heading = markdown.find("\n### ", detail_api_start + 1)
         detail_api_section = markdown[
             detail_api_start : next_heading if next_heading > detail_api_start else detail_api_start + 3_500
@@ -187,8 +209,8 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             "完整对象",
             "完整详情",
             "完整记录",
-            "返回完整动作详情",
-            "返回完整动作对象",
+            "返回完整实体详情",
+            "返回完整业务对象",
             "返回完整记录",
             "包含全部字段",
             "包含所有字段",
@@ -199,7 +221,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         if not complete_api_claim:
             missing_api_fields = [field for field in fields if not _mentions_field(detail_api_section, field)]
             if missing_api_fields:
-                issues.append("动作详情 API 合同遗漏原始字段：" + "、".join(missing_api_fields))
+                issues.append("详情 API 合同遗漏原始字段：" + "、".join(missing_api_fields))
 
     # 无状态多轮对话必须把首轮 system 连同完整历史交还客户端保存。
     if "第一次提问" in goal or ("首次" in goal and "历史对话" in goal):
@@ -210,7 +232,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             issues.append("未明确首轮响应返回包含 system/user/assistant 的完整 messages")
         for phrase, issue in (
             ("客户端保存", "未明确客户端保存但不渲染 system 历史"),
-            ("服务端", "未明确由服务端根据动作数据构造和验证 system 上下文"),
+            ("服务端", "未明确由服务端根据业务数据构造和验证 system 上下文"),
         ):
             if phrase.lower() not in plan_lower:
                 issues.append(issue)
@@ -222,16 +244,17 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             for line in markdown.splitlines()
         ):
             issues.append("计划又让前端初始化 system，与服务端可信注入方案冲突")
-        contract_fields_present = all(f'"{field}"' in markdown for field in ("exercise_id", "question", "messages"))
+        # 独立问题字段和业务标识由项目合同决定，不写死任何测试项目的名称。
+        contract_fields_present = bool(re.search(r'\{[^{}]*"messages"\s*:\s*\[[^]]*\][^{}]*\}', markdown)) and len(set(re.findall(r'"([A-Za-z_][\w]*)"\s*:', markdown))) >= 2
         if not contract_fields_present:
             issues.append(
-                "聊天接口缺少一份前后端统一请求体合同；必须固定 exercise_id、问题字段和完整 messages 字段名"
+                "聊天接口缺少一份前后端统一请求体合同；必须明确业务标识、独立问题字段和完整 messages 字段名"
             )
         empty_first_messages = bool(re.search(r'"messages"\s*:\s*\[\s*\]', markdown)) or bool(
             re.search(r"messages.{0,16}(?:为空数组|为空|空数组)", markdown, re.IGNORECASE)
         )
         if not empty_first_messages:
-            issues.append("首轮请求示例必须把当前问题只放在 question，并明确 messages 为空数组")
+            issues.append("首轮请求示例必须把当前问题只放在独立问题字段，并明确 messages 为空数组")
         if any(
             marker in plan_lower
             for marker in (
@@ -257,18 +280,18 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             r"(?i)(?:追加|添加).{0,10}(?:新|当前).{0,8}user.{0,24}(?:messages|历史|回传)",
             markdown,
         ):
-            issues.append("使用独立 question 字段时，客户端不得先把当前 user 再追加到 messages，避免服务端重复添加")
-        if re.search(
-            r"(?:服务端|后端).{0,20}(?:保存|维护|存储).{0,30}(?:messages|消息|历史|对话)",
-            markdown,
-            re.IGNORECASE,
-        ) or "exercise_contexts" in markdown:
+            issues.append("使用独立问题字段时，客户端不得先把当前 user 再追加到 messages，避免服务端重复添加")
+        if any(
+            re.search(r"(?:服务端|后端).{0,160}(?:保存|维护|存储).{0,160}(?:messages|消息|历史|对话)", line, re.IGNORECASE)
+            and not re.search(r"(?:不|不得|禁止)(?:保存|维护|存储)", line)
+            for line in markdown.splitlines()
+        ):
             issues.append("聊天接口必须无状态：服务端不得保存 messages 历史，应只验证并使用客户端回传的完整 messages")
 
-    if "videos" in goal_lower and "images-exercises" in goal_lower:
-        excludes_images = bool(re.search(r"(?:不使用|不引用|禁止(?:使用|引用)?).{0,24}(?:`?/?images-exercises)", plan_lower))
-        if "videos" not in plan_lower or not excludes_images:
-            issues.append("未把仅使用 videos GIF、禁止 images-exercises 静图写成明确媒体合同")
+    forbidden_resources = re.findall(r"(?:不用|不要用|不使用|禁止引用|禁止使用)\s*`?/?([a-zA-Z][\w-]*)", goal)
+    for resource in forbidden_resources:
+        if not re.search(r"(?:不使用|不引用|禁止(?:使用|引用)?|不要用).{0,24}`?/?" + re.escape(resource), markdown):
+            issues.append(f"未把禁用资源 {resource} 写成明确资源合同")
 
     selected_skills = {str(item.id).lower() for item in state.get("skills") or []}
     if "web-design-guidelines" in selected_skills:
@@ -286,8 +309,8 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         ]
         if missing_names:
             issues.append("计划未逐张关联图片附件：" + "、".join(missing_names))
-        if not re.search(r"(?i)(?:参考编号|reference\s*(?:id|code)|FIT[-_][A-Z0-9_-]+)", markdown):
-            issues.append("图片附件可能含可见参考编号；必须重新查看原图并逐张准确抄录，不能只写文件名")
+        if not re.search(r"(?:布局|配色|视觉|间距|参考编号|reference\s*(?:id|code))", markdown, re.IGNORECASE):
+            issues.append("图片附件缺少可验证的布局、配色或视觉要素描述，不能只写文件名")
 
     implementation_fences = sum(
         markdown.lower().count(f"```{language}") for language in ("python", "javascript", "typescript", "html", "css")

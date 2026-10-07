@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,11 @@ class ModelStore:
         destination = (root / target).resolve()
         if root not in destination.parents:
             raise ValueError("模型配置只能复制到当前工作区")
+        if ".local" not in destination.relative_to(root).parts[:-1]:
+            raise ValueError("模型配置只能复制到 .local 私密目录")
+        ignore = root / ".gitignore"
+        if ignore.is_symlink():
+            raise ValueError("不能通过符号链接修改忽略配置")
         cfg = self.get(model_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(destination.parent, 0o700)
@@ -252,12 +258,15 @@ class ModelStore:
             "timeout": cfg.timeout,
             "default_effort": cfg.default_effort,
         }
-        temp = destination.with_name(f".{destination.name}.tmp")
-        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.chmod(temp, 0o600)
-        temp.replace(destination)
+        fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            temp.replace(destination)
+        finally:
+            temp.unlink(missing_ok=True)
         os.chmod(destination, 0o600)
-        ignore = root / ".gitignore"
         ignore_text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
         entry = f"{destination.parent.relative_to(root).as_posix().rstrip('/')}/"
         if entry not in {line.strip() for line in ignore_text.splitlines()}:

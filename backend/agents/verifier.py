@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +30,7 @@ def _private_model_config_facts(fs: FsTool, files: list[str]) -> list[str]:
         if not rel.endswith(".local/model.json"):
             continue
         try:
-            data = json.loads(fs.read(rel, 80_000))
+            data = json.loads(fs.safe(rel).read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, ValueError):
             facts.append(f"{rel}：文件存在，但不是合法 JSON。")
             continue
@@ -64,6 +65,17 @@ def _reject_critical_warnings(result: dict[str, Any]) -> dict[str, Any]:
         "ok": False,
         "issues": [f"检测到严重运行时警告：{marker}" for marker in matched],
     }
+
+
+def _reject_empty_tests(result: dict[str, Any]) -> dict[str, Any]:
+    """测试运行器零退出码但没有执行测试时，不得宣称测试通过。"""
+
+    cmd = str(result.get("cmd") or "")
+    output = str(result.get("out") or "") + "\n" + str(result.get("err") or "")
+    is_test = "pytest" in cmd or bool(re.search(r"\brun\s+test\b", cmd))
+    if is_test and result.get("ok") and re.search(r"\b(?:no tests? (?:ran|found)|0 tests?|tests?\s+0|0 passing)\b", output, re.IGNORECASE):
+        return {**result, "ok": False, "issues": ["测试命令未执行任何测试，缺少有效验收证据"]}
+    return result
 
 
 def _typescript_project_checks(fs: FsTool, files: list[str]) -> list[dict[str, Any]]:
@@ -156,12 +168,17 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
         )
 
     if not commands and not static_check and not type_checks:
-        tests.append({"cmd": "静态检查", "ok": True, "out": "没有识别到可运行测试，已跳过。"})
-    # 最多执行八条项目已有验证命令，覆盖常见的嵌套前后端测试与构建。
-    for command in commands[:8]:
+        required = state.get("task_type") in {"code_gen", "code_mod"} or (
+            state.get("task_type") == "verify" and any(Path(rel).suffix in {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".java"} for rel in files)
+        )
+        tests.append({"cmd": "验收入口检查", "ok": not required, "skipped": not required, "out": "没有识别到可运行验收入口，不能证明实现正确。"})
+        ok = ok and not required
+    # 已发现的验收入口全部执行，不能把后半部分子项目默默丢弃。
+    for command in commands:
         # result 是命令执行结果。
         result = shell.run(command, timeout=240)
         result = _reject_critical_warnings(result)
+        result = _reject_empty_tests(result)
         tests.append(result)
         ok = ok and bool(result.get("ok"))
         graph._emit(state, "verifier", "test", f"{command} -> {'通过' if result.get('ok') else '失败'}", data=result)
@@ -227,8 +244,9 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                 temperature=0,
                 plain_text=True,
             )
-            issues = [str(item).strip() for item in review.get("issues", []) if str(item).strip()][:12]
-            review_ok = bool(review.get("ok")) and not issues
+            raw_issues = review.get("issues", [])
+            issues = [str(item).strip() for item in raw_issues if str(item).strip()][:12] if isinstance(raw_issues, list) else ["审查模型返回的 issues 不是列表"]
+            review_ok = review.get("ok") is True and not issues
             review_result = {
                 "cmd": "需求实现审查",
                 "ok": review_ok,

@@ -94,6 +94,8 @@ class AgentState(TypedDict, total=False):
     tokens: int
     # 本次任务已经发起的模型调用次数。
     model_calls: int
+    # 包含接口失败的真实请求尝试数，在付费请求之前推进。
+    model_requests: int
     # 本次任务累计命中的输入缓存 token。
     cached_input_tokens: int
     # 本次任务累计未命中的输入 token。
