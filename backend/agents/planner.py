@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 # Planner 与 Coding 一样会遇到限流、网关 5xx 和短暂连接故障；这些错误不应立刻降级成通用计划。
 _TRANSIENT_MARKERS = ("429", "500", "502", "503", "504", "连接", "Connect", "响应超时", "ReadTimeout")
 _RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
-_MAX_PLAN_REPAIRS = 3
+# 字段/格式校验和独立一致性审查各保留三次修订机会；运行级硬预算仍统一约束成本。
+_MAX_PLAN_REPAIRS = 6
+_MAX_STAGE_REPAIRS = 3
 
 
 def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, markdown: str) -> list[str]:
@@ -392,20 +394,27 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
         normalized_markdown = str(data.get("markdown") or "")
         best_data = {**data, "markdown": normalized_markdown}
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
+        best_stage = "format" if best_issues else "semantic"
         if not best_issues:
             best_issues = _semantic_plan_issues(graph, state, context_text, normalized_markdown)
+        stage_repairs = {"format": 0, "semantic": 0}
         repair_models = {str(getattr(getattr(client, "cfg", None), "id", ""))}
         repair_counts: dict[str, int] = {}
         repair_transient_counts: dict[str, int] = {}
         for repair_index in range(_MAX_PLAN_REPAIRS):
             if not best_issues:
                 break
+            if stage_repairs[best_stage] >= _MAX_STAGE_REPAIRS:
+                break
+            stage_repairs[best_stage] += 1
             graph._emit(
                 state,
                 "planner",
                 "review",
                 f"计划初稿存在 {len(best_issues)} 项执行级问题，"
-                f"正在自动修订（{repair_index + 1}/{_MAX_PLAN_REPAIRS}）",
+                f"正在自动修订（{repair_index + 1}/{_MAX_PLAN_REPAIRS}；"
+                f"{'字段/格式' if best_stage == 'format' else '一致性'} "
+                f"{stage_repairs[best_stage]}/{_MAX_STAGE_REPAIRS}）",
                 data={"issues": best_issues},
             )
             repair_messages = [
@@ -478,6 +487,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             current_repair_model = str(getattr(getattr(client, "cfg", None), "id", ""))
             repair_counts[current_repair_model] = repair_counts.get(current_repair_model, 0) + 1
             repaired_issues = _plan_quality_issues(graph, state, str(repaired["markdown"]))
+            repaired_stage = "format" if repaired_issues else "semantic"
             if not repaired_issues:
                 repaired_issues = _semantic_plan_issues(graph, state, context_text, str(repaired["markdown"]))
             improved = len(repaired_issues) < len(best_issues)
@@ -485,6 +495,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             # 最新候选和它真实未解决的问题，避免一直重修已解决的旧字段问题。
             best_data = repaired
             best_issues = repaired_issues
+            best_stage = repaired_stage
             should_cross_review = repair_counts[current_repair_model] >= 2 and bool(best_issues)
             if repair_index + 1 < _MAX_PLAN_REPAIRS and (
                 not improved or should_cross_review

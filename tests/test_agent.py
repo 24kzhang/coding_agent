@@ -69,6 +69,25 @@ def test_planner_passes_latest_semantic_feedback_to_next_revision(tmp_path, monk
     assert result["plan"]["markdown"] == "完整合同"
 
 
+def test_plan_format_and_semantic_repairs_have_separate_limits(tmp_path, monkeypatch):
+    """格式检查不能用尽一致性审查的修订机会，两阶段仍有共同硬上限。"""
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    calls = []
+
+    def reply(*_args, **_kwargs):
+        calls.append(1)
+        return {"status": "plan", "markdown": f"候选{len(calls)}"}
+
+    monkeypatch.setattr(graph, "_client", lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply))
+    monkeypatch.setattr(graph, "_ctx_text", lambda *_args: "库存工具计划")
+    monkeypatch.setattr("backend.agents.planner._plan_quality_issues", lambda _graph, _state, md: ["字段遗漏"] if int(md[-1]) < 4 else [])
+    monkeypatch.setattr("backend.agents.planner._semantic_plan_issues", lambda _graph, _state, _ctx, md: ["状态冲突"] if int(md[-1]) < 7 else [])
+    result = planner(graph, {"session_id": "s1", "workdir": str(tmp_path / "proj"), "text": "库存工具计划"})
+    assert len(calls) == 7
+    assert result["plan"]["markdown"] == "候选7"
+
+
 def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
     """容器模式共享一个执行器，原生模式仍返回既有 ShellTool。"""
 
