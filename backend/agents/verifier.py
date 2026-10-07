@@ -197,7 +197,9 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
         # verify 没有本轮 changes，改用仓库读取智能体选择的关键文件作为只读审查依据。
         review_targets = list(state.get("changes", [])) or list((state.get("repo") or {}).get("selected") or [])
         private_config_facts = _private_model_config_facts(fs, review_targets)
-        for rel in review_targets[:16]:
+        # 界面源码常排在文件清单末尾，不能因前面的测试/文档占满名额而完全漏审。
+        review_targets.sort(key=lambda rel: ({".css": 0, ".html": 1, ".js": 2, ".ts": 2, ".tsx": 2, ".py": 3}.get(Path(rel).suffix, 4), rel))
+        for rel in review_targets:
             if budget <= 0:
                 break
             try:
@@ -230,6 +232,8 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
                         )
                         + "\n\n变更文件：\n"
                         + "\n\n".join(review_files)
+                        + "\n\n磁盘文件清单（有些文件未进入正文预算，不能据此说它们不存在）：\n"
+                        + "\n".join(files[:250])
                         + (
                             "\n\n私密配置安全核验（以下事实由程序直接读取磁盘后生成，优先级高于"
                             "变更文件中的脱敏占位文本；不得把脱敏展示误判为磁盘占位符）：\n"

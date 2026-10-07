@@ -23,6 +23,7 @@ from backend.agents.prompts import MANAGER_PROMPT
 from backend.agents.repo import repo
 from backend.agents.types import AgentState
 from backend.agents.verifier import verifier
+from backend.agents.web import dialog_style_issues
 from backend.capabilities import McpClient, McpServerConfig
 from backend.clock import utc_stamp
 from backend.memory import MemoryStore
@@ -1787,7 +1788,7 @@ class AgentGraph:
     def _static_web_check(self, fs: FsTool, files: list[str]) -> dict[str, Any] | None:
 
         # html_files 同时覆盖静态站点入口、Flask static 目录和常见模板入口。
-        html_files = [file for file in ["index.html", "static/index.html", "templates/index.html"] if file in files]
+        html_files = [file for file in files if Path(file).name == "index.html"]
         if not html_files:
             return None
         # html 合并所有可识别入口模板，便于检查前端脚本引用的元素。
@@ -1834,6 +1835,7 @@ class AgentGraph:
             issues.append("缺失元素 id：" + "、".join(missing_ids))
         if missing_funcs:
             issues.append("缺失内联事件函数：" + "、".join(missing_funcs))
+        issues.extend(dialog_style_issues(html, css_text, js_text))
         # class 也可能只用于 JS 定位或继承父选择器，未单独声明不能可靠证明功能故障。
         # missing_classes 作为诊断信息返回，但不参与静态接线成败判定。
         return {

@@ -553,3 +553,23 @@ def test_dsml_truncated_batch_duplicate_parameters_and_prose_do_not_execute():
     with pytest.raises(LlmError, match="参数重复"):
         client._parse_dsml_tool_calls('<｜DSML｜ calls>' + duplicate + '</｜DSML｜ calls>')
     assert client._parse_dsml_tool_calls('示例：<｜DSML｜ calls>' + call + '</｜DSML｜ calls>') is None
+
+
+def test_nested_custom_modal_cannot_pass_with_missing_styles(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("portal/web/index.html", '<div id="overlay" class="overlay" role="dialog" aria-modal="true" hidden><p>详情</p></div>')
+    fs.write("portal/web/main.js", 'document.getElementById("overlay");')
+    fs.write("portal/web/style.css", '.card { color: black; }')
+    result = graph._static_web_check(fs, fs.list())
+    assert not result["ok"]
+    assert "自定义模态样式缺失" in result["out"]
+    fs.write("portal/web/style.css", '#overlay { position: fixed; inset: 0; display: grid; }')
+    assert graph._static_web_check(fs, fs.list())["ok"]
+
+
+def test_native_dialog_and_script_only_classes_do_not_require_extra_styles(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("web/index.html", '<dialog aria-modal="true" role="dialog"><span class="script-hook">内容</span></dialog>')
+    assert graph._static_web_check(fs, fs.list())["ok"]
