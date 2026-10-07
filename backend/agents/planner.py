@@ -151,17 +151,19 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             issues.append("前端计划缺少 `npm run build` 生产构建验收")
 
     # 用户要求完整详情时，计划必须明确逐项渲染原始对象，而非只列基础信息。
-    complete_detail_claim = any(phrase in markdown for phrase in ("所有字段", "全部原始字段", "逐字段")) or bool(
-        re.search(r"(?:所有|完整)\s*\d+\s*个?原始字段", markdown)
+    complete_detail_claim = any(phrase in markdown for phrase in ("所有字段", "全部字段", "全部原始字段", "逐字段")) or bool(
+        re.search(r"(?:所有|全部|完整)\s*\d*\s*个?\s*(?:原始)?字段", markdown)
     )
     if "所有详细信息" in goal and not complete_detail_claim:
         issues.append("详情未明确展示数据记录的所有原始字段")
-    if "所有详细信息" in goal and fields and "左侧" in markdown:
-        detail_start = markdown.find("左侧")
-        detail_section = markdown[detail_start : detail_start + 2_500]
+    detail_mentions = list(re.finditer(r"左侧|左栏", markdown))
+    if "所有详细信息" in goal and fields and detail_mentions:
+        # 图像解读可能先提到左栏；应选择实际字段合同最完整的一处，不能只截首个词。
+        detail_sections = [markdown[item.start() : item.start() + 2_500] for item in detail_mentions]
+        detail_section = max(detail_sections, key=lambda section: sum(_mentions_field(section, field) for field in fields))
         dynamic_complete = bool(
             re.search(r"(?:动态遍历|逐项遍历|递归渲染).{0,40}(?:所有|全部|完整).{0,20}字段", detail_section)
-            or re.search(r"左侧.{0,80}(?:所有|全部|完整).{0,20}(?:原始)?字段", detail_section)
+            or re.search(r"(?:左侧|左栏).{0,80}(?:所有|全部|完整).{0,20}(?:原始)?字段", detail_section)
         )
         missing_detail_fields = [] if dynamic_complete else [
             field for field in fields if not _mentions_field(detail_section, field)
@@ -477,9 +479,10 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             if not repaired_issues:
                 repaired_issues = _semantic_plan_issues(graph, state, context_text, str(repaired["markdown"]))
             improved = len(repaired_issues) < len(best_issues)
-            if improved:
-                best_data = repaired
-                best_issues = repaired_issues
+            # 格式检查与语义检查的问题数量不可直接比较质量；下一轮必须看到
+            # 最新候选和它真实未解决的问题，避免一直重修已解决的旧字段问题。
+            best_data = repaired
+            best_issues = repaired_issues
             should_cross_review = repair_counts[current_repair_model] >= 2 and bool(best_issues)
             if repair_index + 1 < _MAX_PLAN_REPAIRS and (
                 not improved or should_cross_review

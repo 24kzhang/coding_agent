@@ -47,6 +47,28 @@ def test_planner_uses_remaining_repairs_after_invalid_revision(tmp_path, monkeyp
     assert any(r["k"] == "invalid_revision" for r in graph.memory.read_session(str(tmp_path / "proj"), "s1"))
 
 
+def test_planner_passes_latest_semantic_feedback_to_next_revision(tmp_path, monkeypatch):
+    """语义问题比格式问题多时，也必须让下轮看到新问题而非旧反馈。"""
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    calls = []
+
+    def reply(messages, **_kwargs):
+        calls.append(messages)
+        if len(calls) == 3:
+            assert "库存索引被删除" in str(messages)
+            assert "新字段合同" in str(messages)
+        return {"status": "plan", "markdown": ["初稿", "新字段合同", "完整合同"][len(calls) - 1]}
+
+    client = SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    monkeypatch.setattr(graph, "_client", lambda *_args: client)
+    monkeypatch.setattr(graph, "_ctx_text", lambda *_args: "实现库存工具")
+    monkeypatch.setattr("backend.agents.planner._plan_quality_issues", lambda _graph, _state, md: ["字段遗漏"] if md == "初稿" else [])
+    monkeypatch.setattr("backend.agents.planner._semantic_plan_issues", lambda _graph, _state, _ctx, md: ["库存索引被删除", "输出格式与读取格式冲突"] if md == "新字段合同" else [])
+    result = planner(graph, {"session_id": "s1", "workdir": str(tmp_path / "proj"), "text": "实现库存工具"})
+    assert result["plan"]["markdown"] == "完整合同"
+
+
 def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
     """容器模式共享一个执行器，原生模式仍返回既有 ShellTool。"""
 

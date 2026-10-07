@@ -63,6 +63,17 @@ def test_plan_semantic_review_balance_failure_propagates(tmp_path, monkeypatch):
         _semantic_plan_issues(graph, {"text": "任务"}, "合同", "计划")
 
 
+def test_plan_checks_actual_field_section_after_image_description(tmp_path):
+    """商品详情的完整字段合同可以位于图像解读之后，不依赖固定措辞。"""
+
+    graph = make_graph(tmp_path)
+    schema = {"type": "object", "properties": {"sku": {}, "price": {}}}
+    state = {"text": "商品详情展示所有详细信息", "repo": {"snippets": {"schema.json": json.dumps(schema)}}}
+    markdown = "图片左侧是商品封面。\n" + "图像说明\n" * 700
+    markdown += "详情左栏展示全部 2 个原始字段：`sku`、`price`。GET /api/products/{sku} 返回完整对象。"
+    assert _plan_quality_issues(graph, state, markdown) == []
+
+
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
     """上轮产物不能消耗新修复轮的实现前诊断机会。"""
     graph = make_graph(tmp_path)
