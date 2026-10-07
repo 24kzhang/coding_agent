@@ -31,12 +31,14 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
                 "你是计划一致性审查员，只审查计划是否可执行，不编写代码。对照原始需求、仓库事实和工具合同，"
                 "检查必须交付的内容、依赖顺序及规则之间是否有真实矛盾。跨步骤或跨请求的必要状态应能在下一步取得；"
                 "检查删除某数据后又依赖它、输出与读取格式不一致、路径或工具参数违反执行合同等问题。"
+                "原始需求中的禁止项、只允许项、次数和先后顺序都是硬约束，必须逐项核对，不能用不同解释弱化约束。"
                 "只报告具体阻碍用户需求的问题，并引用冲突规则；不强制字段名、消息角色、技术栈、客户端或服务端状态架构，"
                 "不要把风格偏好和无关增强当成失败。只返回 JSON："
                 '{"ok":true,"issues":[],"summary":"中文结论"}'
             )},
             {"role": "user", "content": graph._multimodal_content(
-                context, state, "\n\n待审查的完整执行合同：\n" + markdown,
+                context, state, "\n\n待审查的完整执行合同：\n" + markdown
+                + "\n\n再次核对原始用户硬约束（优先于计划中的自我解释）：\n" + graph._plan_goal(state),
             )},
         ], temperature=0, plain_text=True,
     )

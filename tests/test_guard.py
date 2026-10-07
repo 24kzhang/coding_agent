@@ -45,7 +45,7 @@ def test_plan_semantic_review_preserves_real_conflicts_and_tool_contracts(tmp_pa
         return {"ok": False, "issues": ["步骤一清空库存索引，步骤二却依赖该索引结算"]}
 
     monkeypatch.setattr(graph, "_model_json", review)
-    issues = _semantic_plan_issues(graph, {}, "原始需求及真实工具合同", "步骤一清空库存索引；步骤二按索引结算")
+    issues = _semantic_plan_issues(graph, {"text": "结算必须保留已有库存索引"}, "原始需求及真实工具合同", "步骤一清空库存索引；步骤二按索引结算")
     assert issues == ["步骤一清空库存索引，步骤二却依赖该索引结算"]
     assert "原始需求及真实工具合同" in str(captured)
     assert "不强制字段名" in captured[0][0]["content"]
@@ -60,7 +60,7 @@ def test_plan_semantic_review_balance_failure_propagates(tmp_path, monkeypatch):
 
     monkeypatch.setattr(graph, "_model_json", fail)
     with pytest.raises(LlmBalanceError):
-        _semantic_plan_issues(graph, {}, "合同", "计划")
+        _semantic_plan_issues(graph, {"text": "任务"}, "合同", "计划")
 
 
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
