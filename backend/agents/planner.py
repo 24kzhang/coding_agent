@@ -173,13 +173,15 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
                 "详情左侧的明确字段清单仍有遗漏（媒体路径字段也应作为文本展示）："
                 + "、".join(missing_detail_fields)
             )
-    detail_endpoint = re.search(r"/api/[\w/.-]+/\{", markdown)
-    if fields and detail_endpoint:
-        detail_api_start = detail_endpoint.start()
-        next_heading = markdown.find("\n### ", detail_api_start + 1)
-        detail_api_section = markdown[
-            detail_api_start : next_heading if next_heading > detail_api_start else detail_api_start + 3_500
-        ]
+    detail_endpoints = list(re.finditer(r"/api/[\w/.-]+/\{", markdown))
+    if fields and detail_endpoints:
+        detail_api_sections = []
+        for endpoint in detail_endpoints:
+            start = endpoint.start()
+            next_heading = markdown.find("\n### ", start + 1)
+            detail_api_sections.append(markdown[start : next_heading if next_heading > start else start + 3_500])
+        # 媒体说明或测试章节可能先引用接口；检查真实字段合同最完整的定义段。
+        detail_api_section = max(detail_api_sections, key=lambda section: sum(_mentions_field(section, field) for field in fields))
         complete_api_claims = (
             "全部原始字段",
             "所有原始字段",

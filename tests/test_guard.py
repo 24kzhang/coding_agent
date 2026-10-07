@@ -122,6 +122,15 @@ def test_plan_checks_actual_field_section_after_image_description(tmp_path):
     assert _plan_quality_issues(graph, state, markdown) == []
 
 
+def test_plan_checks_endpoint_definition_after_earlier_reference(tmp_path):
+    graph = make_graph(tmp_path)
+    schema = {"type": "object", "properties": {"sku": {}, "price": {}}}
+    state = {"text": "商品详情展示所有详细信息", "repo": {"snippets": {"schema.json": json.dumps(schema)}}}
+    markdown = "媒体存在性由 /api/products/{sku} 检查。\n### 健康接口\nGET /api/health\n"
+    markdown += "### 详情接口\nGET /api/products/{sku} 返回完整对象。左栏展示全部 2 个原始字段：`sku`、`price`。"
+    assert _plan_quality_issues(graph, state, markdown) == []
+
+
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
     """上轮产物不能消耗新修复轮的实现前诊断机会。"""
     graph = make_graph(tmp_path)
