@@ -718,7 +718,7 @@ class MemoryStore:
             events.append(
                 {
                     "id": event_id,
-                    "ts": str(rec.get("ts", "")),
+                    "ts": str(meta.get("event_ts") or rec.get("ts", "")),
                     "agent": str(rec.get("ag", "manager")),
                     "kind": str(rec.get("k", "event")),
                     "msg": str(rec.get("out", "")),

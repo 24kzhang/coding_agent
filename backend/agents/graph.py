@@ -1988,7 +1988,7 @@ class AgentGraph:
             "event",
             kind,
             self._trim(safe_msg, 3000),
-            {"tokens": tokens, "data": safe_data, **({"usage": safe_data} if kind == "usage" else {})},
+            {"tokens": tokens, "data": safe_data, "event_ts": event.ts, **({"usage": safe_data} if kind == "usage" else {})},
         )
         if self.emit_cb:
             self.emit_cb(event)

@@ -854,7 +854,7 @@ def test_direct_greeting_does_not_read_repo_or_write_files(tmp_path) -> None:
     assert [event.agent for event in events] == ["manager", "manager"]
 
 
-def test_event_payload_is_redacted_before_persistence(tmp_path) -> None:
+def test_event_payload_is_redacted_before_persistence(tmp_path, monkeypatch) -> None:
     """事件恢复保留验证数据，但不能把模型密钥写入会话。"""
 
     models = ModelStore(tmp_path / "models.json")
@@ -864,11 +864,14 @@ def test_event_payload_is_redacted_before_persistence(tmp_path) -> None:
     workdir = str(tmp_path / "proj")
     events = []
     graph = AgentGraph(models, MemoryStore(memory_root), emit=events.append)
+    monkeypatch.setattr("backend.agents.graph.utc_stamp", lambda: "2026-10-07T10:00:00Z")
+    monkeypatch.setattr("backend.memory.store.utc_stamp", lambda: "2026-10-07T10:00:01Z")
     graph._emit({"session_id": "s1", "workdir": workdir}, "verifier", "test", "验证通过", 7,
                 {"ok": True, "details": {"out": secret}, "cmd": "pytest"})
 
     restored = MemoryStore(memory_root).list_history()[0]["sessions"][0]["events"][0]
     assert restored["data"] == events[0].data
+    assert restored["ts"] == events[0].ts
     assert restored["tokens"] == 7
     assert secret not in json.dumps(restored)
     assert restored["data"]["ok"] is True
