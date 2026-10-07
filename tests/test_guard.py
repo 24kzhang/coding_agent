@@ -14,7 +14,7 @@ import pytest
 
 from api.schema import ModelConfig
 from backend.agents.coder import coder
-from backend.agents.doc import doc
+from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
 from backend.agents.planner import _normalize_chat_contract, _plan_quality_issues, _schema_fields
@@ -437,3 +437,48 @@ def test_native_output_limit_recovers_with_small_structured_action(tmp_path):
     assert client.native_calls == 1
     assert result["coding_ok"]
     assert result["tokens"] == 6250
+
+
+def test_read_cache_refreshes_visibility_after_context_eviction(tmp_path, monkeypatch):
+    """被上下文预算裁掉的文件必须可重新读取，最近读取的文件优先完整展示。"""
+    from backend.agents import coder as coder_module
+
+    monkeypatch.setattr(coder_module, "SNAPSHOT_BUDGET", 3_000)
+    fs = FsTool(str(tmp_path / "work"))
+    for name in ("a.py", "b.py", "c.py"):
+        fs.write(name, "value = 1\n# " + "x" * 2000 + "\n")
+    graph = make_graph(tmp_path)
+
+    class CacheClient:
+        def __init__(self):
+            self.calls = 0
+            self.last_usage = LlmUsage()
+
+        def chat_json(self, messages, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {"actions": [{"tool": "read_file", "path": "a.py"}]}
+            if self.calls == 2:
+                assert "[a.py 当前内容]" in messages[-1]["content"]
+                return {"actions": [{"tool": "read_file", "path": "b.py"}, {"tool": "read_file", "path": "c.py"}]}
+            if self.calls == 3:
+                return {"actions": [{"tool": "read_file", "path": "a.py"}]}
+            assert "[a.py 当前内容]" in messages[-1]["content"]
+            assert "拒绝重复读取已知文件：a.py" not in messages[-1]["content"]
+            return {"actions": [{"tool": "replace_file", "path": "a.py", "old": "value = 1", "new": "value = 2"}], "done": True}
+
+    client = CacheClient()
+    graph._client = lambda *_args: client
+    result = coder(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "精确修改 a.py", "repo": {"files": fs.list()}})
+    assert result["coding_ok"]
+    assert fs.read("a.py").startswith("value = 2")
+
+
+def test_reference_markdown_does_not_become_document_write_target(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service/pyproject.toml", "[project]\nname='demo'\nversion='1'\n")
+    state = {"text": "参考 docs/spec.md 实现项目，并生成 README.md", "changes": ["service/main.py"]}
+    assert _document_path(graph, state, fs) == "service/README.md"
+    state["text"] = "参考 docs/spec.md，更新 docs/guide.md"
+    assert _document_path(graph, state, fs) == "docs/guide.md"

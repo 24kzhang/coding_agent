@@ -18,8 +18,15 @@ if TYPE_CHECKING:
 def _document_path(graph: AgentGraph, state: AgentState, fs: FsTool) -> str:
     """按显式路径或真实交付项目定位文档，不能默认污染父工作区。"""
 
-    matches = re.findall(r"(?<![\w.-])([\w./-]+\.md)(?![\w.-])", graph._effective_text(state), re.IGNORECASE)
-    explicit = next((path for path in matches if "/" in path or path != "README.md"), None)
+    text = graph._effective_text(state)
+    explicit = None
+    for match in re.finditer(r'[`“"]([^`”"]+\.md)[`”"]|(?<![\w.-])([\w./-]+\.md)(?![\w.-])', text, re.IGNORECASE):
+        prefix = text[max(0, match.start() - 40):match.start()]
+        if not re.search(r"(?:写入|生成|更新|保存|输出|创建|修改|恢复|编写|完善|补充|修订)[^\n。；]{0,40}$", prefix):
+            continue
+        candidate = match.group(1) or match.group(2)
+        explicit = candidate if "/" in candidate or candidate != "README.md" else None
+        break
     if explicit:
         return fs.safe(explicit).relative_to(fs.root).as_posix()
     changes = list(state.get("changes", []))

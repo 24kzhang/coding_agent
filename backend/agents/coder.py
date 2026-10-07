@@ -380,7 +380,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         )
         # repair_paths 只预读验证反馈明确涉及的文件，最多 6 个；无关变更不会占用模型上下文。
         repair_paths = _repair_paths(state.get("tests", []), state.get("changes", []), current_files)
-        for rel in repair_paths:
+        # 最相关的失败文件最后进入缓存，优先保留在下一次模型可见窗口中。
+        for rel in reversed(repair_paths):
             try:
                 file_observations[rel] = fs.read(rel, FILE_CONTEXT_LIMIT)
                 read_paths.add(rel)
@@ -469,8 +470,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
         current_snapshots: list[str] = []
         visible_complete_paths: set[str] = set()
+        visible_cached_paths: set[str] = set()
         snapshot_budget = SNAPSHOT_BUDGET
-        for path, content in list(file_observations.items())[-8:]:
+        for path, content in reversed(list(file_observations.items())[-8:]):
             if snapshot_budget <= 0:
                 break
             snapshot = _middle_trim(content, min(FILE_CONTEXT_LIMIT, snapshot_budget))
@@ -480,6 +482,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 segment = f"；仅包含字符 {metadata.get('start', 0)}～{metadata.get('end', len(content))}，文件共 {metadata.get('total_chars', '未知')} 字符，禁止据此整体覆盖"
             if metadata.get("complete") and snapshot == content and int(metadata.get("total_chars", 0)) == len(content):
                 visible_complete_paths.add(path)
+            if snapshot == content:
+                visible_cached_paths.add(path)
             current_snapshots.append(f"[{path} 当前内容{segment}]\n{snapshot}")
             snapshot_budget -= len(snapshot)
         # messages 是本轮发给 Coding 模型的上下文。
@@ -794,7 +798,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         "下一步只能写入、精确修改或运行测试与构建。"
                     ),
                 }
-            elif signature in seen_actions and tool == "read_file" and path in read_paths:
+            elif signature in seen_actions and tool == "read_file" and path in read_paths and path in visible_cached_paths:
                 duplicate_read_failures += 1
                 observation = {
                     "ok": False,
@@ -803,7 +807,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         "下一步必须直接 replace_file、replace_block、write_file 或运行验证命令。"
                     ),
                 }
-            elif signature in seen_actions and tool not in {"git_diff", "git_status"}:
+            elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file"}:
                 observation = {
                     "ok": False,
                     "text": f"拒绝重复动作：{action.get('tool')} 已执行或拒绝过。下一步必须改用其他动作推进任务。",
@@ -873,6 +877,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if tool == "read_file" and observation.get("ok") and path:
                 marker = "\n"
                 raw_text = str(observation["text"])
+                file_observations.pop(path, None)
                 file_observations[path] = _middle_trim(
                     graph.model_store.redact_text(raw_text.split(marker, 1)[-1]),
                     FILE_CONTEXT_LIMIT,
@@ -892,6 +897,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         refreshed = graph.model_store.redact_text(
                             fs.read(path, FILE_CONTEXT_LIMIT)
                         )
+                        file_observations.pop(path, None)
                         file_observations[path] = refreshed
                         read_paths.add(path)
                         observations.append(
@@ -961,6 +967,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             try:
                 # 工具成功写入后，以磁盘为唯一事实源重新加载文件。下一轮模型可直接基于这个
                 # 最新快照继续 replace_file，不需要经过“修改 -> 再读 -> 再修改”的空转循环。
+                file_observations.pop(mutated_path, None)
                 file_observations[mutated_path] = graph.model_store.redact_text(
                     fs.read(mutated_path, FILE_CONTEXT_LIMIT)
                 )
