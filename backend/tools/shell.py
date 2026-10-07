@@ -5,6 +5,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from hashlib import sha256
@@ -112,7 +113,11 @@ def prepare_command(
         return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
 
     if resolve_executable:
-        executable = shutil.which(argv[0])
+        if argv[0] in {"python", "python3"}:
+            local_python = (cwd or root) / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            executable = str(local_python) if local_python.is_file() else sys.executable
+        else:
+            executable = shutil.which(argv[0])
         if not executable:
             return {"ok": False, "code": 127, "out": "", "err": f"找不到命令：{argv[0]}", "cmd": clean, "argv": argv}
         argv[0] = executable

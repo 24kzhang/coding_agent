@@ -49,6 +49,7 @@ def test_delivery_directory_drives_script_cwd_without_losing_workspace_inputs(tm
     assert result["result"]["out"].splitlines() == [project, "只读输入"]
     assert command_cwd(fs, state, f"uv run --project {project} pytest {project}/tests") == fs.root
     assert command_cwd(fs, state, "uv sync") == output
+    assert prepare_command(fs.root, "python3 tools/probe.py", resolve_executable=True, cwd=output)[1][0] == sys.executable
     with pytest.raises(ValueError, match="禁止写入"):
         from backend.tools.scope import require_delivery_path
         require_delivery_path(fs, delivery_root(fs, state), "outside.py")
