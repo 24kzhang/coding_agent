@@ -11,6 +11,7 @@ from backend.agents.loop import LoopGuard
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.tools import FsTool, GitTool, tool_specs
+from backend.tools.scope import delivery_root
 from llm import LlmBalanceError, LlmClient, LlmError
 from llm.client import LlmOutputLimitError
 
@@ -524,7 +525,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 else ""
             )
             + "若目标文件出现在“已读取且当前可直接修改”列表，禁止再次 read_file；短改动直接 replace_file，长函数直接 replace_block。\n"
-            + "run_command 已经在项目工作目录执行，命令中禁止使用 cd，也不要添加工作目录前缀。\n"
+            + f"文件工具基准工作区：{fs.root}；默认命令工作目录为交付根目录：{delivery_root(fs, state)}。\n"
+            + "项目命令直接使用相对交付目录的路径；明确使用工作区交付前缀或 --project 前缀的命令会在父工作区执行。禁止 cd 或复合 shell 语法。\n"
             + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
             + (
                 "用户已禁止继续读取和搜索：本轮原生工具清单已移除 "
@@ -836,7 +838,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 observation = {
                     "ok": True,
                     "cached": True,
-                    "text": f"使用固定工作目录及现有仓库文本索引（未执行 shell 命令）：{fs.root}；"
+                    "text": f"使用现有仓库文本索引（未执行 shell 命令）；工作区：{fs.root}；默认命令交付目录：{delivery_root(fs, state)}；"
                     + "、".join(current_files) + "。二进制资源不在文本索引中；请按数据中的资源路径验证，直接推进实现。",
                 }
             elif inspection_command:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,30 @@ def delivery_root(fs: FsTool, state: dict[str, Any]) -> Path:
         match = pattern.search(text)
         if match:
             selected = match.group(1)
+        # 直接理解用户声明的交付目录，不要求用户使用内部约定的「目录/...」句式。
+        path = r'(?:`([^`]+)`|“([^”]+)”|"([^"]+)"|([^\s，。；;]+))'
+        declared = re.search(r'(?:项目输出到\s*|(?:交付目录|输出目录|项目根目录)(?:为|是|[:：])\s*)' + path, text)
+        if declared:
+            selected = next(value for value in declared.groups() if value is not None).rstrip("/")
     return fs.safe(selected) if selected else fs.root
+
+
+def command_cwd(fs: FsTool, state: dict[str, Any], command: str) -> Path:
+    """未加工作区前缀的项目命令在交付根目录运行；明确前缀的命令保留父目录。"""
+
+    output = delivery_root(fs, state)
+    if output == fs.root:
+        return output
+    prefix = output.relative_to(fs.root).as_posix()
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return fs.root
+    for argument in argv[1:]:
+        value = argument.split("=", 1)[-1] if argument.startswith("-") else argument
+        if value == prefix or value.startswith(prefix + "/"):
+            return fs.root
+    return output
 
 
 def require_delivery_path(fs: FsTool, root: Path, rel: str) -> None:

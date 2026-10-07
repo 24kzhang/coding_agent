@@ -18,6 +18,7 @@ def prepare_command(
     *,
     resolve_executable: bool,
     workspace: str | None = None,
+    cwd: Path | None = None,
 ) -> tuple[str, list[str]] | dict[str, Any]:
     """解析并校验一条命令；失败时直接返回 ShellTool 的结构化错误。"""
 
@@ -62,7 +63,7 @@ def prepare_command(
         return {"ok": False, "code": 126, "out": "", "err": "拒绝通过 Git 全局参数绕过危险子命令检查", "cmd": clean, "argv": argv}
     if program_name == "git" and len(argv) > 1 and argv[1].lower() in ShellTool.dangerous_git:
         return {"ok": False, "code": 126, "out": "", "err": f"高风险 Git 命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
-    if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not (root / ".git").is_dir():
+    if program_name == "git" and len(argv) > 1 and argv[1].lower() != "init" and not ((cwd or root) / ".git").is_dir():
         return {
             "ok": False,
             "code": 126,
@@ -96,7 +97,7 @@ def prepare_command(
             return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
         arg_path = Path(candidate).expanduser()
         if not arg_path.is_absolute():
-            resolved_relative = (root / arg_path).resolve()
+            resolved_relative = ((cwd or root) / arg_path).resolve()
             if root != resolved_relative and root not in resolved_relative.parents:
                 return {"ok": False, "code": 126, "out": "", "err": f"命令参数通过链接越出项目目录：{arg}", "cmd": clean, "argv": argv}
             continue
@@ -145,10 +146,13 @@ class ShellTool:
         # root 是命令执行目录，所有命令都在用户选择的项目目录内运行。
         self.root = Path(workdir).resolve()
 
-    def run(self, cmd: str, timeout: int = 180) -> dict[str, Any]:
+    def run(self, cmd: str, timeout: int = 180, cwd: Path | None = None) -> dict[str, Any]:
         """在项目目录内执行命令，并返回结构化 stdout/stderr/退出码。"""
 
-        prepared = prepare_command(self.root, cmd, resolve_executable=True)
+        active_dir = Path(cwd).resolve() if cwd is not None else self.root
+        if self.root != active_dir and self.root not in active_dir.parents:
+            return {"ok": False, "code": 126, "out": "", "err": "命令工作目录越出工作区", "cmd": cmd}
+        prepared = prepare_command(self.root, cmd, resolve_executable=True, cwd=active_dir)
         if isinstance(prepared, dict):
             return prepared
         clean, argv = prepared
@@ -178,7 +182,7 @@ class ShellTool:
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
                 proc = subprocess.Popen(
-                    argv, cwd=self.root, shell=False, stdout=stdout, stderr=stderr,
+                    argv, cwd=active_dir, shell=False, stdout=stdout, stderr=stderr,
                     env=env, start_new_session=os.name != "nt",
                 )
                 timed_out = False
@@ -204,6 +208,7 @@ class ShellTool:
         return {
             "ok": code == 0, "code": code, "out": out, "err": err,
             "cmd": clean, "argv": argv, "timed_out": timed_out,
+            "cwd": str(active_dir),
             "duration_ms": int((time.monotonic() - started) * 1000),
             "output_bytes": out_size + err_size,
             "output_truncated": out_size > 12_000 or err_size > 12_000,

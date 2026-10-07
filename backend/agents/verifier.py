@@ -181,7 +181,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     # 已发现的验收入口全部执行，不能把后半部分子项目默默丢弃。
     for command in commands:
         # result 是命令执行结果。
-        result = shell.run(command, timeout=240)
+        result = graph._run_command(fs, shell, state, command, timeout=240)
         result = _reject_critical_warnings(result)
         result = _reject_empty_tests(result)
         tests.append(result)

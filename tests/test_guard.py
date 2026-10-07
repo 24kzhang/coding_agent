@@ -23,6 +23,7 @@ from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
 from backend.tools import FsTool, GitTool, ShellTool
+from backend.tools.scope import command_cwd, delivery_root
 from backend.tools.shell import prepare_command
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError, LlmUsage
@@ -30,6 +31,38 @@ from llm.client import LlmOutputLimitError, LlmUsage
 
 def make_graph(tmp_path):
     return AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+
+
+@pytest.mark.parametrize("project", ["portal", "service"])
+def test_delivery_directory_drives_script_cwd_without_losing_workspace_inputs(tmp_path, project):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    output = fs.root / project
+    state = {"text": f"项目输出到 {output}"}
+    fs.write(f"{project}/tools/probe.py", "from pathlib import Path\nprint(Path.cwd().name)\nprint((Path.cwd().parent / 'catalog.json').read_text())\n")
+    fs.write("catalog.json", "只读输入")
+    shell = ShellTool(str(fs.root))
+    command = f"{shlex.quote(sys.executable)} tools/probe.py"
+    result = graph._do_action({"tool": "run_command", "cmd": command}, fs, shell, GitTool(str(fs.root)), state)
+    assert result["ok"] is True
+    assert result["result"]["cwd"] == str(output)
+    assert result["result"]["out"].splitlines() == [project, "只读输入"]
+    assert command_cwd(fs, state, f"uv run --project {project} pytest {project}/tests") == fs.root
+    assert command_cwd(fs, state, "uv sync") == output
+    with pytest.raises(ValueError, match="禁止写入"):
+        from backend.tools.scope import require_delivery_path
+        require_delivery_path(fs, delivery_root(fs, state), "outside.py")
+
+
+def test_delivery_path_quotes_and_symlinks_are_checked(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    assert delivery_root(fs, {"text": '交付目录："my portal"'}) == fs.root / "my portal"
+    assert delivery_root(fs, {"text": "输出目录不得覆盖现有数据"}) == fs.root
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (fs.root / "portal").symlink_to(outside)
+    with pytest.raises(ValueError, match="工作目录外"):
+        delivery_root(fs, {"text": "项目输出到 portal"})
 
 
 def test_plan_semantic_review_preserves_real_conflicts_and_tool_contracts(tmp_path, monkeypatch):

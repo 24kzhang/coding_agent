@@ -179,8 +179,12 @@ class ContainerShellTool:
             self._stop(self.container_name)
             raise ContainerShellError("容器 Shell 启动失败：Docker 未返回容器 ID")
 
-    def run(self, cmd: str, timeout: int = 180) -> dict[str, Any]:
-        prepared = prepare_command(self.root, cmd, resolve_executable=False, workspace=self.workspace)
+    def run(self, cmd: str, timeout: int = 180, cwd: Path | None = None) -> dict[str, Any]:
+        active_dir = Path(cwd).resolve() if cwd is not None else self.root
+        if self.root != active_dir and self.root not in active_dir.parents:
+            return {"ok": False, "code": 126, "out": "", "err": "命令工作目录越出工作区", "cmd": cmd}
+        mapped_cwd = str(Path(self.workspace) / active_dir.relative_to(self.root))
+        prepared = prepare_command(self.root, cmd, resolve_executable=False, workspace=self.workspace, cwd=active_dir)
         if isinstance(prepared, dict):
             return prepared
         clean, argv = prepared
@@ -199,7 +203,7 @@ class ContainerShellTool:
         assert self.docker is not None
         try:
             proc = subprocess.run(
-                [self.docker, "exec", "--workdir", self.workspace, self.container_id, *argv],
+                [self.docker, "exec", "--workdir", mapped_cwd, self.container_id, *argv],
                 text=True,
                 capture_output=True,
                 timeout=max(1, min(int(timeout), 900)),
@@ -224,6 +228,7 @@ class ContainerShellTool:
             "out": proc.stdout[-12000:],
             "err": proc.stderr[-12000:],
             "cmd": clean,
+            "cwd": str(active_dir),
             "argv": argv,
         }
 

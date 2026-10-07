@@ -29,7 +29,7 @@ from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
-from backend.tools.scope import delivery_root, require_delivery_path
+from backend.tools.scope import command_cwd, delivery_root, require_delivery_path
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError
@@ -206,6 +206,17 @@ class AgentGraph:
         close = getattr(tool, "close", None)
         if callable(close):
             close()
+
+    def _run_command(self, fs: FsTool, shell: ShellTool | ContainerShellTool, state: AgentState,
+                     command: str, timeout: int = 180, create_cwd: bool = False) -> dict[str, Any]:
+        """Coding 与 Verifier 共用交付目录解析，避免命令在错误父目录执行。"""
+
+        cwd = command_cwd(fs, state, command)
+        if create_cwd:
+            cwd.mkdir(parents=True, exist_ok=True)
+        if cwd == fs.root:
+            return shell.run(command, timeout=timeout)
+        return shell.run(command, timeout=timeout, cwd=cwd)
 
     def _run_node(
         self,
@@ -1398,12 +1409,14 @@ class AgentGraph:
                 # cmd 是模型要求执行的命令字符串，ShellTool 会做危险命令检查。
                 cmd = str(action.get("cmd", ""))
                 # res 是命令执行结果。
-                res = shell.run(cmd)
+                res = self._run_command(fs, shell, state or {}, cmd, create_cwd=True)
                 return {"ok": res.get("ok"), "text": f"运行命令：{cmd}\n{res.get('out','')}\n{res.get('err','')}", "cmd": cmd, "result": res}
             if tool == "git_status":
-                return {"ok": True, "text": "Git 状态：\n" + git.status()}
+                active_git = GitTool(str(output_root)) if output_root != fs.root else git
+                return {"ok": True, "text": "Git 状态：\n" + active_git.status()}
             if tool == "git_diff":
-                return {"ok": True, "text": "Git 差异：\n" + git.diff()}
+                active_git = GitTool(str(output_root)) if output_root != fs.root else git
+                return {"ok": True, "text": "Git 差异：\n" + active_git.diff()}
             return {"ok": False, "text": f"未知工具：{tool}"}
         except Exception as exc:
             return {"ok": False, "text": f"工具执行失败：{tool} -> {exc}"}

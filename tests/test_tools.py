@@ -91,6 +91,32 @@ def test_shell_rejects_compound_and_inline_commands(tmp_path) -> None:
     assert shell.run("uv run python -c pass")["code"] == 126
 
 
+def test_container_subdirectory_cwd_preserves_mount_boundary(tmp_path, monkeypatch):
+    """命令在交付子目录执行，输入工作区仍挂载且不能通过链接逃逸。"""
+
+    project = tmp_path / "portal"
+    project.mkdir()
+    calls = []
+    tool = ContainerShellTool(str(tmp_path), image="test")
+    tool.docker = "/usr/bin/docker"
+    tool.container_id = "container"
+    monkeypatch.setattr(tool, "ensure_ready", lambda: None)
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        return CompletedProcess(argv, 0, "完成", "")
+
+    monkeypatch.setattr(container_module.subprocess, "run", run)
+    result = tool.run("python tools/probe.py", cwd=project)
+    assert result["ok"] is True
+    assert calls[0][2:4] == ["--workdir", "/workspace/portal"]
+    assert result["cwd"] == str(project)
+    assert tool.run("python --version", cwd=tmp_path.parent)["code"] == 126
+    (project / "link.py").symlink_to(tmp_path.parent / "outside.py")
+    assert tool.run("python link.py", cwd=project)["code"] == 126
+    assert len(calls) == 1
+
+
 def test_container_shell_starts_once_executes_and_cleans_up(tmp_path, monkeypatch) -> None:
     """同一个容器执行器必须复用容器，并带上挂载和最小权限参数。"""
 
