@@ -294,7 +294,7 @@ def test_coder_rejects_credentials_in_write_actions_and_redacts_model_context(tm
 
 
 class ProgressClient:
-    """模拟模型先重复扫描仓库，看到拒绝观察后再写入文件。"""
+    """模拟模型先重复扫描仓库，看到缓存索引后再写入文件。"""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -304,7 +304,7 @@ class ProgressClient:
         self.calls += 1
         if self.calls == 1:
             return {"thought": "先扫描目录", "actions": [{"tool": "list_files"}], "done": False}
-        assert "拒绝重复调用 list_files" in messages[-1]["content"]
+        assert "使用现有仓库文本索引（未重新扫描）" in messages[-1]["content"]
         return {
             "thought": "仓库已扫描，开始写入",
             "actions": [{"tool": "write_file", "path": "app.py", "content": "print('ok')\n"}],
@@ -313,7 +313,7 @@ class ProgressClient:
         }
 
 
-def test_coder_rejects_repo_rescan_and_moves_to_write(tmp_path) -> None:
+def test_coder_uses_cached_index_and_moves_to_write(tmp_path) -> None:
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
     client = ProgressClient()
     graph._client = lambda agent, state: client
@@ -1436,6 +1436,9 @@ def test_native_tool_specs_hide_file_reads_after_stop_guidance() -> None:
     assert {"list_files", "read_file", "search_files"} <= normal
     assert not {"list_files", "read_file", "search_files"} & restricted
     assert {"write_file", "replace_file", "run_command"} <= restricted
+    indexed = {item["name"] for item in _native_coder_specs([], reads_forbidden=False, repo_ready=True)}
+    assert "list_files" not in indexed
+    assert {"read_file", "write_file", "run_command"} <= indexed
 
 
 class RepairContextClient:
@@ -1671,7 +1674,7 @@ def test_coder_executes_at_most_three_actions_per_step(tmp_path) -> None:
 
 
 class ShellScanClient:
-    """模拟模型用 shell 绕过 list_files 限制后改为直接写入。"""
+    """模拟模型确认目录后根据缓存索引直接写入。"""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -1681,7 +1684,7 @@ class ShellScanClient:
         self.calls += 1
         if self.calls == 1:
             return {"thought": "再次扫描", "actions": [{"tool": "run_command", "cmd": "find . -maxdepth 2"}], "done": False}
-        assert "拒绝使用 shell 重复枚举仓库" in messages[-1]["content"]
+        assert "未执行 shell 命令" in messages[-1]["content"]
         return {
             "thought": "直接实现",
             "actions": [{"tool": "write_file", "path": "main.py", "content": "print('ok')\n"}],
@@ -1690,7 +1693,7 @@ class ShellScanClient:
         }
 
 
-def test_coder_rejects_shell_repository_scan(tmp_path) -> None:
+def test_coder_serves_shell_discovery_from_cached_index(tmp_path) -> None:
     graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
     client = ShellScanClient()
     graph._client = lambda agent, state: client

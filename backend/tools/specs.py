@@ -55,7 +55,7 @@ def tool_specs() -> list[dict[str, Any]]:
             "write",
         ),
         ("assert_text_absent", "断言指定文件中不存在禁用文本", {"paths": array, "texts": array}, ["paths", "texts"], "allow", "read"),
-        ("run_command", "在工作区运行一个独立命令；不支持管道、重定向、分号、&& 等复合 shell 语法，也不支持 python -c/node -e 等解释器内联代码。应写入脚本后运行。只读 cat/grep/sed 或目录枚举须改用文件工具；Git 仅在工作区有独立 .git 目录时可用", {"cmd": string}, ["cmd"], "ask", "write"),
+        ("run_command", "在工作区运行一个独立命令；不支持管道、重定向、分号、&& 等复合 shell 语法，也不支持 python -c/node -e 等解释器内联代码。应写入脚本后运行。只读 cat/grep/sed 须改用文件工具；已有仓库索引时目录确认会返回缓存索引，不重新执行 shell；Git 仅在工作区有独立 .git 目录时可用", {"cmd": string}, ["cmd"], "ask", "write"),
         ("git_status", "读取 Git 工作区状态", {}, [], "allow", "read"),
         ("git_diff", "读取 Git 差异", {}, [], "allow", "read"),
         ("model_copy", "把已配置模型安全复制为 JSON 配置；目标必须位于交付项目的 .local/ 私密目录，默认 .local/model.json。自动写入忽略规则并限制权限；字段包含 id、base_url、model、api_key、protocol、timeout、default_effort，不能选择其他目录或把格式当成 TOML", {"model_id": string, "target": string}, ["model_id"], "allow", "write"),

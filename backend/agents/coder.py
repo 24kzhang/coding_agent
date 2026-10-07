@@ -266,10 +266,12 @@ def _is_verification_command(command: str) -> bool:
     return any(re.search(r"(?:^|[-_])(?:test|typecheck|build|smoke|lint|check)(?:[-_]|$)", Path(name).stem) for name in names)
 
 
-def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool) -> list[dict]:
+def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool, repo_ready: bool = False) -> list[dict]:
     """构造原生工具清单；用户停止读取后不再向模型暴露只读文件工具。"""
 
     specs = tool_specs()
+    if repo_ready:
+        specs = [item for item in specs if item["name"] != "list_files"]
     if reads_forbidden:
         blocked = {"list_files", "read_file", "search_files"}
         specs = [item for item in specs if str(item.get("name")) not in blocked]
@@ -563,7 +565,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 and empty_steps < 2
                 and not native_fallback
             ):
-                native_specs = _native_coder_specs(mcp_tools, reads_forbidden)
+                native_specs = _native_coder_specs(mcp_tools, reads_forbidden, state.get("repo") is not None)
                 data = client.chat_tools(
                     messages,
                     native_specs,
@@ -826,13 +828,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             elif tool == "list_files" and state.get("repo") is not None:
                 observation = {
-                    "ok": False,
-                    "text": "拒绝重复调用 list_files：仓库读取节点已经提供文件索引。请改用 read_file、write_file 或其他实际推进任务的工具。",
+                    "ok": True,
+                    "cached": True,
+                    "text": "使用现有仓库文本索引（未重新扫描）：" + "、".join(current_files) + "。请直接推进实现或验证。",
                 }
             elif tool == "run_command" and state.get("repo") is not None and _is_discovery_command(str(action.get("cmd", ""))):
                 observation = {
-                    "ok": False,
-                    "text": "拒绝使用 shell 重复枚举仓库：当前文件清单已经在提示中。请直接读取目标文件、写入实现或运行验证命令。",
+                    "ok": True,
+                    "cached": True,
+                    "text": f"使用固定工作目录及现有仓库文本索引（未执行 shell 命令）：{fs.root}；"
+                    + "、".join(current_files) + "。二进制资源不在文本索引中；请按数据中的资源路径验证，直接推进实现。",
                 }
             elif inspection_command:
                 duplicate_read_failures += 1
@@ -914,11 +919,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if observation.get("ok"):
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
-                if tool in {"append_file", "assert_text_absent", "model_copy", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__"):
+                if not observation.get("cached") and (tool in {"append_file", "assert_text_absent", "model_copy", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__")):
                     batch_progress = True
                 if tool == "write_file" and path:
                     unchecked_rewrites.add(path)
-                elif tool == "run_command":
+                elif tool == "run_command" and not observation.get("cached"):
                     # 一次成功验证后允许根据新的客观结果继续整体修复。
                     unchecked_rewrites.clear()
                     command = str(action.get("cmd") or "")
@@ -940,7 +945,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     mutated_paths.add(path)
                     if path not in current_files:
                         current_files.append(path)
-                if tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__"):
+                if not observation.get("cached") and (tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__")):
                     mutation_count += 1
             if observation.get("file"):
                 changes.append(str(observation["file"]))
@@ -956,7 +961,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 command = str(observation["cmd"])
                 if _is_verification_command(command) and (observation.get("result") or {}).get("code") != 126:
                     verification_commands.append(command)
-            graph._emit(state, "coder", "tool", observation["text"], data=observation)
+            graph._emit(state, "coder", "tool", observation["text"], data={
+                **observation, "tool": tool,
+                "path": path,
+                "command": "[参数被凭据守卫拒绝]" if secret_write else str(action.get("cmd") or ""),
+            })
             if (
                 not observation.get("ok")
                 and (tool == "read_file" or inspection_command)
