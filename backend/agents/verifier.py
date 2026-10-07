@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
+from backend.tools.scope import delivery_root
 from llm import LlmError
 
 if TYPE_CHECKING:
@@ -133,6 +134,10 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     shell = graph._shell(state)
     # files 是当前项目文件列表。
     files = fs.list()
+    output_root = delivery_root(fs, state)
+    if output_root != fs.root:
+        prefix = output_root.relative_to(fs.root).as_posix() + "/"
+        files = [rel for rel in files if rel.startswith(prefix)]
     # commands 根据项目真实配置生成，不把某个测试框架硬编码为所有项目默认值。
     commands = list(dict.fromkeys(graph._verification_commands(fs, files) + list(state.get("verification_commands", []))))
     # tests 保存每条测试或静态检查的结构化结果。

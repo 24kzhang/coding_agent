@@ -1824,6 +1824,7 @@ class AgentGraph:
         }
         # styled_classes 提取 CSS 中出现的普通类选择器；状态类可依赖组合选择器，同样会被命中。
         css_text = "\n".join(fs.read(file, 60_000) for file in files if file.endswith(".css"))
+        css_text += "\n" + "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL | re.IGNORECASE))
         styled_classes = set(re.findall(r"\.([A-Za-z_-][\w-]*)", css_text))
         # active 等纯状态类通常只和其他类组合使用；若 CSS 完全不存在则不做类名覆盖检查。
         ignored_classes = {"active", "assistant", "disabled", "hidden", "selected", "streaming", "user"}

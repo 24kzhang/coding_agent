@@ -573,3 +573,15 @@ def test_native_dialog_and_script_only_classes_do_not_require_extra_styles(tmp_p
     fs = FsTool(str(tmp_path / "work"))
     fs.write("web/index.html", '<dialog aria-modal="true" role="dialog"><span class="script-hook">内容</span></dialog>')
     assert graph._static_web_check(fs, fs.list())["ok"]
+
+
+def test_inline_modal_styles_are_valid_and_input_pages_are_not_delivery_checks(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("portal/index.html", '<style>#overlay { position:fixed;inset:0; }</style><div id="overlay" role="dialog" aria-modal="true"></div>')
+    assert graph._static_web_check(fs, fs.list())["ok"]
+    fs.write("input/index.html", '<div id="reference" role="dialog" aria-modal="true"></div>')
+    graph._verification_commands = lambda *_args: []
+    graph._ctx_text = lambda *_args: "只检查交付目录"
+    result = verifier(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "所有项目文件必须使用 `portal/...` 相对路径"})
+    assert result["tests_ok"]
