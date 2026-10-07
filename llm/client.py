@@ -760,6 +760,9 @@ class LlmClient:
             lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
         # LongCat 偶尔会忽略 JSON 要求，改用其原生工具标签；这里统一转换为现有 ReAct actions。
+        qwen_result = self._parse_qwen_tool_calls(text)
+        if qwen_result:
+            return qwen_result
         dsml_result = self._parse_dsml_tool_calls(text)
         if dsml_result:
             return dsml_result
@@ -781,6 +784,46 @@ class LlmClient:
                 raise LlmOutputLimitError("模型输出达到预算上限，未返回完整 JSON") from exc
             # 抛出前带上截断后的模型输出，方便定位 prompt 或模型格式问题。
             raise LlmError(f"模型没有返回合法 JSON：{exc}\n{text[:1000]}") from exc
+
+    def _parse_qwen_tool_calls(self, text: str) -> dict[str, Any] | None:
+        """解析 Qwen XML 工具格式；严格校验完整边界，保留代码正文缩进。"""
+
+        start = text.find("<tool_call>")
+        if start < 0:
+            return None
+        suffix = text[start:]
+        calls = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+        if calls.sub("", suffix).strip():
+            raise LlmError("XML 工具调用边界不完整，未执行任何动作")
+        actions: list[dict[str, Any]] = []
+        for call in calls.finditer(suffix):
+            body = call.group(1)
+            function = re.fullmatch(r"<function=([\w.-]+)>\s*(.*?)\s*</function>", body, re.DOTALL)
+            if function is None:
+                raise LlmError("XML 工具函数格式无效")
+            name, parameters_text = function.groups()
+            parameters = re.compile(r"<parameter=([\w.-]+)>(.*?)</parameter>", re.DOTALL)
+            if parameters.sub("", parameters_text).strip():
+                raise LlmError("XML 工具参数边界不完整")
+            arguments: dict[str, Any] = {}
+            for parameter in parameters.finditer(parameters_text):
+                key, value = parameter.groups()
+                if key in arguments:
+                    raise LlmError("XML 工具参数重复")
+                # 模板包裹的一对换行不是正文，正文内部空白和缩进保持不变。
+                value = value.removeprefix("\n").removesuffix("\n")
+                if key in {"expected", "max_chars", "max_results", "start", "arguments", "paths", "texts"}:
+                    try:
+                        parsed: Any = json.loads(value)
+                    except json.JSONDecodeError as exc:
+                        raise LlmError("XML 工具类型参数不是合法 JSON") from exc
+                    arguments[key] = parsed
+                else:
+                    arguments[key] = value
+            actions.append(self._native_action(name, arguments))
+        if not actions:
+            raise LlmError("XML 没有有效工具调用")
+        return self._tool_result(actions, text[:start].strip())
 
     def _parse_dsml_tool_calls(self, text: str) -> dict[str, Any] | None:
         """把供应商 DSML 工具标记转为同一动作协议，参数正文按语法原样保留。"""

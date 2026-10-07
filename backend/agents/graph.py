@@ -1655,6 +1655,9 @@ class AgentGraph:
                 if parsed is None:
                     parser = getattr(client, "_parse_dsml_tool_calls", None)
                     parsed = parser(candidate) if callable(parser) else None
+                if parsed is None:
+                    parser = getattr(client, "_parse_qwen_tool_calls", None)
+                    parsed = parser(candidate) if callable(parser) else None
                 if isinstance(parsed, dict):
                     data = parsed
             actions = [

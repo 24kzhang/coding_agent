@@ -591,3 +591,18 @@ def test_latest_explicit_read_permission_overrides_earlier_stop():
     assert _guidance_forbids_reads({"original_text": "不要再搜索或读取，直接实现"})
     assert not _guidance_forbids_reads({"guidance": ["不要再读取", "允许读取失败涉及的文件"]})
     assert _guidance_forbids_reads({"guidance": ["允许读取文件", "不要再搜索或读取"]})
+
+
+def test_qwen_xml_tools_preserve_code_and_keep_whitelist_enforcement(tmp_path):
+    client = LlmClient(ModelConfig(id="generic", name="测试", base_url="https://example.test", api_key="假密钥", model="generic"))
+    source = '  value = "中文"\n'
+    text = f'直接修改：\n<tool_call>\n<function=replace_file>\n<parameter=path>\nservice/main.py\n</parameter>\n<parameter=old>\nold\n</parameter>\n<parameter=new>\n{source}\n</parameter>\n<parameter=expected>\n1\n</parameter>\n</function>\n</tool_call>'
+    client.chat = lambda *_args, **_kwargs: text
+    result = client.chat_json([], plain_text=True)
+    assert result["actions"][0]["new"] == source
+    assert result["actions"][0]["expected"] == 1
+    assert result["done"] is False
+    with pytest.raises(LlmError, match="边界不完整"):
+        client._parse_qwen_tool_calls(text[:-12])
+    invalid = client._parse_qwen_tool_calls('<tool_call><function=unknown></function></tool_call>')
+    assert make_graph(tmp_path)._normalize_actions(invalid["actions"])[0]["_error"]
