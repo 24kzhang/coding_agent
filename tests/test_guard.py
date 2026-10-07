@@ -32,6 +32,28 @@ def make_graph(tmp_path):
     return AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
 
+def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
+    """上轮产物不能消耗新修复轮的实现前诊断机会。"""
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    fs = FsTool(str(work))
+    for name in ("one.py", "two.py", "three.py", "four.py"):
+        fs.write(name, "value = 1\n")
+    replies = iter([
+        *({"actions": [{"tool": "read_file", "path": name}]} for name in ("one.py", "two.py", "three.py", "four.py")),
+        {"actions": [{"tool": "write_file", "path": "fix.py", "content": "ready = True\n"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(
+        last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies),
+    )
+    result = coder(graph, {
+        "session_id": "repair", "workdir": str(work), "text": "诊断四个相关模块并补充实现",
+        "changes": ["one.py"], "retry": 1,
+    })
+    assert result["coding_ok"]
+    assert (work / "fix.py").read_text() == "ready = True\n"
+
+
 def test_atomic_edits_preserve_mode_and_failed_append_keeps_original(tmp_path, monkeypatch):
     """失败追加不留下部分内容，精确修改保留脚本执行位。"""
     fs = FsTool(str(tmp_path))

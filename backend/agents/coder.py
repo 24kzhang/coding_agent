@@ -1007,7 +1007,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         if batch_progress:
             idle_after_mutation = 0
             duplicate_read_failures = 0
-        elif mutation_count or changes:
+        elif mutation_count:
+            # changes 包含此前轮次的产物，不代表本轮已经完成诊断并开始实现。
+            # 修复轮允许读取不同目标文件；重复/交替读取仍由 LoopGuard 和硬预算约束。
             idle_after_mutation += 1
         if guidance_replan:
             loop_guard.history.clear()
