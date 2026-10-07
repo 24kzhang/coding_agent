@@ -18,18 +18,49 @@ from backend.agents.coder import _guidance_forbids_reads, _is_verification_comma
 from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
-from backend.agents.planner import _plan_quality_issues, _schema_fields
+from backend.agents.planner import _plan_quality_issues, _schema_fields, _semantic_plan_issues
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
 from backend.tools import FsTool, GitTool, ShellTool
 from backend.tools.shell import prepare_command
-from llm import LlmClient, LlmError, ModelStore
+from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError, LlmUsage
 
 
 def make_graph(tmp_path):
     return AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+
+
+def test_plan_semantic_review_preserves_real_conflicts_and_tool_contracts(tmp_path, monkeypatch):
+    """跨步骤合同矛盾进入修订反馈，不通过固定业务规则选择架构。"""
+
+    graph = make_graph(tmp_path)
+    monkeypatch.setattr(graph, "_client", lambda *_args: object())
+    captured = []
+
+    def review(_state, agent, _client, messages, **_kwargs):
+        captured.append(messages)
+        assert agent == "verifier"
+        return {"ok": False, "issues": ["步骤一清空库存索引，步骤二却依赖该索引结算"]}
+
+    monkeypatch.setattr(graph, "_model_json", review)
+    issues = _semantic_plan_issues(graph, {}, "原始需求及真实工具合同", "步骤一清空库存索引；步骤二按索引结算")
+    assert issues == ["步骤一清空库存索引，步骤二却依赖该索引结算"]
+    assert "原始需求及真实工具合同" in str(captured)
+    assert "不强制字段名" in captured[0][0]["content"]
+
+
+def test_plan_semantic_review_balance_failure_propagates(tmp_path, monkeypatch):
+    graph = make_graph(tmp_path)
+    monkeypatch.setattr(graph, "_client", lambda *_args: object())
+
+    def fail(*_args, **_kwargs):
+        raise LlmBalanceError("余额不足")
+
+    monkeypatch.setattr(graph, "_model_json", fail)
+    with pytest.raises(LlmBalanceError):
+        _semantic_plan_issues(graph, {}, "合同", "计划")
 
 
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):

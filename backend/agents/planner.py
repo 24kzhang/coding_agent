@@ -20,6 +20,35 @@ _RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
 _MAX_PLAN_REPAIRS = 3
 
 
+def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, markdown: str) -> list[str]:
+    """独立检查执行合同的规则冲突，接受满足需求的不同实现架构。"""
+
+    client = graph._client("verifier", state)
+    result = graph._model_json(
+        state, "verifier", client,
+        [
+            {"role": "system", "content": (
+                "你是计划一致性审查员，只审查计划是否可执行，不编写代码。对照原始需求、仓库事实和工具合同，"
+                "检查必须交付的内容、依赖顺序及规则之间是否有真实矛盾。跨步骤或跨请求的必要状态应能在下一步取得；"
+                "检查删除某数据后又依赖它、输出与读取格式不一致、路径或工具参数违反执行合同等问题。"
+                "只报告具体阻碍用户需求的问题，并引用冲突规则；不强制字段名、消息角色、技术栈、客户端或服务端状态架构，"
+                "不要把风格偏好和无关增强当成失败。只返回 JSON："
+                '{"ok":true,"issues":[],"summary":"中文结论"}'
+            )},
+            {"role": "user", "content": graph._multimodal_content(
+                context, state, "\n\n待审查的完整执行合同：\n" + markdown,
+            )},
+        ], temperature=0, plain_text=True,
+    )
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        return ["一致性审查未返回有效问题列表"]
+    normalized = [str(issue).strip() for issue in issues if str(issue).strip()][:8]
+    if result.get("ok") is not True and not normalized:
+        return ["一致性审查未确认计划可执行：" + str(result.get("summary") or "缺少结论")]
+    return normalized
+
+
 def _is_transient(error: str) -> bool:
     """判断 Plan 模型错误是否适合退避重试。"""
 
@@ -355,6 +384,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
         normalized_markdown = str(data.get("markdown") or "")
         best_data = {**data, "markdown": normalized_markdown}
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
+        if not best_issues:
+            best_issues = _semantic_plan_issues(graph, state, context_text, normalized_markdown)
         repair_models = {str(getattr(getattr(client, "cfg", None), "id", ""))}
         repair_counts: dict[str, int] = {}
         repair_transient_counts: dict[str, int] = {}
@@ -427,6 +458,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             current_repair_model = str(getattr(getattr(client, "cfg", None), "id", ""))
             repair_counts[current_repair_model] = repair_counts.get(current_repair_model, 0) + 1
             repaired_issues = _plan_quality_issues(graph, state, str(repaired["markdown"]))
+            if not repaired_issues:
+                repaired_issues = _semantic_plan_issues(graph, state, context_text, str(repaired["markdown"]))
             improved = len(repaired_issues) < len(best_issues)
             if improved:
                 best_data = repaired

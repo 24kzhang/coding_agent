@@ -22,6 +22,13 @@ from llm import LlmError, ModelStore
 from llm.client import LlmUsage
 
 
+@pytest.fixture(autouse=True)
+def isolate_plan_semantic_review(monkeypatch):
+    """本模块的路由/修订测试隔离独立审查；其真实合同由专项测试覆盖。"""
+
+    monkeypatch.setattr("backend.agents.planner._semantic_plan_issues", lambda *_args: [])
+
+
 def test_graph_selects_and_closes_shared_shell_per_task(tmp_path, monkeypatch) -> None:
     """容器模式共享一个执行器，原生模式仍返回既有 ShellTool。"""
 
