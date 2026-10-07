@@ -1241,7 +1241,7 @@ class AgentGraph:
                 )
                 if test_targets:
                     target_text = " ".join(map(shlex.quote, test_targets))
-                    commands.append(f"uv run{project_arg} pytest -q {target_text}")
+                    commands.append(f"uv run{project_arg} python -m pytest -q {target_text}")
                 # 常规 build/smoke 脚本属于项目显式交付的验收入口，Verifier 必须独立重跑。
                 scripts_dir = project_dir / "scripts"
                 for script_name in ("build.py", "smoke.py", "smoke_test.py"):

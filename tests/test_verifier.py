@@ -232,7 +232,7 @@ def test_nested_frontend_backend_verification_uses_project_scoped_commands(tmp_p
     assert commands == [
         "uv run --no-project python -m compileall -q backend",
         "uv sync --project backend --dry-run",
-        "uv run --project backend pytest -q backend/tests",
+        "uv run --project backend python -m pytest -q backend/tests",
         "npm --prefix frontend run test",
         "npm --prefix frontend run typecheck",
         "npm --prefix frontend run build",

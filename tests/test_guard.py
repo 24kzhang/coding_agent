@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import shlex
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -202,7 +203,7 @@ def test_verification_covers_all_projects_and_quotes_paths(tmp_path):
     commands = make_graph(tmp_path)._verification_commands(fs, fs.list())
     assert len(commands) > 8
     assert "npm --prefix 'web 3' run build" in commands
-    assert "uv run --project service pytest -q service/src/tests" in commands
+    assert "uv run --project service python -m pytest -q service/src/tests" in commands
 
 
 def test_zero_tests_are_not_a_pass_and_empty_code_has_no_evidence(tmp_path):
@@ -508,3 +509,24 @@ def test_explicit_delivery_prefix_restricts_writes_and_private_copy(tmp_path, pr
     assert not (fs.root / ".local").exists()
     assert not (fs.root / ".gitignore").exists()
     assert _document_path(graph, state, fs) == f"{project}/README.md"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None or os.name == "nt", reason="需要 uv 与 POSIX 可执行测试替身")
+def test_project_python_rejects_borrowed_host_test_runner(tmp_path, monkeypatch):
+    """旧命令可错误借用宿主零退出程序，新命令必须暴露项目缺少依赖。"""
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service/pyproject.toml", "[project]\nname='isolated-demo'\nversion='1.0.0'\nrequires-python='>=3.11'\ndependencies=[]\n[tool.uv]\npackage=false\n")
+    fs.write("service/tests/test_core.py", "def test_failure(): assert False\n")
+    host = tmp_path / "host"
+    host.mkdir()
+    runner = host / "pytest"
+    runner.write_text("#!/bin/sh\nprintf '宿主测试替身被借用\\n'\n")
+    runner.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{host}{os.pathsep}{os.environ['PATH']}")
+    shell = ShellTool(str(fs.root))
+    borrowed = shell.run("uv run --project service pytest -q service/tests")
+    assert borrowed["ok"]
+    assert "宿主测试替身" in borrowed["out"]
+    isolated = shell.run("uv run --project service python -m pytest -q service/tests")
+    assert not isolated["ok"]
+    assert "No module named pytest" in isolated["err"]

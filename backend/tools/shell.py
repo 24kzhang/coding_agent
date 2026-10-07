@@ -154,6 +154,9 @@ class ShellTool:
         clean, argv = prepared
         # env 复制当前环境，保留用户已有 PATH 等配置。
         env = os.environ.copy()
+        # 项目解释器不能通过 Agent 的搜索路径借用宿主测试包或模块。
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
         # Agent 自身虚拟环境不应污染另一个所选项目；仅保留位于当前项目内的 VIRTUAL_ENV。
         active_venv = env.get("VIRTUAL_ENV")
         if active_venv:

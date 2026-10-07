@@ -256,6 +256,8 @@ def test_shell_drops_virtualenv_outside_selected_project(tmp_path, monkeypatch) 
         return SimpleNamespace(wait=lambda **_options: 0)
 
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path.parent / "agent" / ".venv"))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path.parent / "agent" / "packages"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path.parent / "agent"))
     monkeypatch.setattr("backend.tools.shell.shutil.which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr("backend.tools.shell.subprocess.Popen", fake_run)
 
@@ -263,6 +265,8 @@ def test_shell_drops_virtualenv_outside_selected_project(tmp_path, monkeypatch) 
 
     assert result["ok"] is True
     assert "VIRTUAL_ENV" not in captured["env"]
+    assert "PYTHONPATH" not in captured["env"]
+    assert "PYTHONHOME" not in captured["env"]
     assert "coding-agent-cache" in captured["env"]["UV_CACHE_DIR"]
     assert "coding-agent-cache" in captured["env"]["NPM_CONFIG_CACHE"]
     assert str(tmp_path / "user-project") not in captured["env"]["UV_CACHE_DIR"]
