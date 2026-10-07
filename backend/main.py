@@ -524,7 +524,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "error", failure.summary)
             # 捕获异常并转成流式 error，避免前端一直等待。
-            active_run.publish({"type": "error", "data": {"msg": str(exc), "result": failure.model_dump()}})
+            active_run.publish({"type": "error", "data": {"msg": model_store.redact_text(str(exc)), "result": failure.model_dump()}})
         finally:
             # None 是流结束哨兵，同时让运行进入可恢复的最近完成列表。
             active_run.publish(None)

@@ -9,7 +9,7 @@ from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
 from backend.tools.scope import delivery_root
-from llm import LlmError
+from llm import LlmBalanceError, LlmError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -265,6 +265,8 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
             tests.append(review_result)
             ok = ok and review_ok
             graph._emit(state, "verifier", "test", f"需求实现审查 -> {'通过' if review_ok else '失败'}", data=review_result)
+        except LlmBalanceError:
+            raise
         except (LlmError, KeyError) as exc:
             # 语义审查是代码任务的必要验收项；不可用时不能伪装为通过，也不能让 Coding 修复基础设施。
             tests.append(

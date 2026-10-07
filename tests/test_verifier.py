@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from backend.agents.graph import AgentGraph
 from backend.agents.prompts import CODER_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
 from backend.agents.verifier import (
@@ -12,15 +14,15 @@ from backend.agents.verifier import (
 )
 from backend.memory import MemoryStore
 from backend.tools import FsTool
-from llm import ModelStore
+from llm import LlmBalanceError, ModelStore
 
 
-def test_agent_prompts_require_durable_stateless_chat_context() -> None:
-    """Plan、Coding、Verifier 必须一致要求首轮上下文进入后续完整历史。"""
+def test_agent_prompts_allow_different_state_architectures() -> None:
+    """各节点校验交互合同，不强制某种业务对象或聊天消息结构。"""
 
-    assert "返回包含该 system、user、assistant 的完整 messages" in PLANNER_PROMPT
-    assert "客户端保存但不渲染 system" in CODER_PROMPT
-    assert "不得要求把正确的可持续 system 历史删除" in VERIFIER_PROMPT
+    assert "生命周期、保存位置与恢复方式" in PLANNER_PROMPT
+    assert "按需求选择客户端、服务端或组合存储" in CODER_PROMPT
+    assert "接受满足合同的不同存储方式" in VERIFIER_PROMPT
     assert "客户端请求体、查询参数和响应类型要与服务端模型完全一致" in CODER_PROMPT
     assert "逐字段比较客户端实际发送的请求体" in VERIFIER_PROMPT
 
@@ -437,3 +439,22 @@ def test_private_model_config_facts_verify_secret_without_exposing_it(tmp_path) 
     assert "api_key_nonempty=True" in facts[0]
     assert "api_key_is_redaction_placeholder=False" in facts[0]
     assert "sk-private-value" not in facts[0]
+
+
+def test_verifier_balance_failure_stops_without_repair(tmp_path, monkeypatch) -> None:
+    """审查阶段余额不足也必须上抛，不能作为代码错误触发额外调用。"""
+
+    workdir = tmp_path / "proj"
+    fs = FsTool(str(workdir))
+    fs.write("main.py", "print('测试')\n")
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    monkeypatch.setattr(graph, "_verification_commands", lambda *_args: [])
+    monkeypatch.setattr(graph, "_client", lambda *_args: object())
+    monkeypatch.setattr(graph, "_ctx_text", lambda *_args: "实现并验收")
+
+    def fail(*_args, **_kwargs):
+        raise LlmBalanceError("余额不足")
+
+    monkeypatch.setattr(graph, "_model_json", fail)
+    with pytest.raises(LlmBalanceError, match="余额不足"):
+        verifier(graph, {"session_id": "s1", "workdir": str(workdir), "task_type": "code_gen", "changes": ["main.py"]})
