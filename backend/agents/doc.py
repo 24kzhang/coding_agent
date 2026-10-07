@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,23 @@ if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
 
 
+def _document_path(graph: AgentGraph, state: AgentState, fs: FsTool) -> str:
+    """按显式路径或真实交付项目定位文档，不能默认污染父工作区。"""
+
+    matches = re.findall(r"(?<![\w.-])([\w./-]+\.md)(?![\w.-])", graph._effective_text(state), re.IGNORECASE)
+    explicit = next((path for path in matches if "/" in path or path != "README.md"), None)
+    if explicit:
+        return fs.safe(explicit).relative_to(fs.root).as_posix()
+    changes = list(state.get("changes", []))
+    readmes = [rel for rel in changes if Path(rel).name.lower() == "readme.md"]
+    if len(readmes) == 1:
+        return readmes[0]
+    projects = [Path(rel).parent for rel in fs.list() if Path(rel).name in {"pyproject.toml", "package.json"}]
+    affected = [path.as_posix() for path in projects if any(path == Path(".") or path in Path(rel).parents for rel in changes)]
+    parent = Path(os.path.commonpath(affected)) if affected else Path(".")
+    return (parent / "README.md").as_posix()
+
+
 def doc(graph: AgentGraph, state: AgentState) -> AgentState:
     """文档智能体：根据任务、仓库摘要、变更和测试结果写中文文档。"""
 
@@ -23,6 +41,19 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
         return state
     # fs 是受 workdir 限制的文件写入工具。
     fs = FsTool(state["workdir"])
+    try:
+        path = _document_path(graph, state, fs)
+        existing = fs.read(path, 80_000) if fs.safe(path).is_file() else ""
+    except (OSError, ValueError) as exc:
+        failure = {"cmd": "文档目标检查", "ok": False, "out": str(exc)}
+        return {**state, "tests_ok": False, "tests": list(state.get("tests", [])) + [failure], "error": str(exc)}
+    if existing and state.get("task_type") in {"code_gen", "code_mod"} and path in state.get("changes", []) and state.get("tests_ok"):
+        repo_context = {**(state.get("repo") or {}), "doc_path": str(fs.safe(path))}
+        graph._emit(state, "doc", "done", f"保留已交付并通过验证的文档：{path}")
+        return {**state, "repo": repo_context}
+    if existing and not fs.last_reads[path]["complete"]:
+        failure = {"cmd": "文档完整性检查", "ok": False, "out": "已有文档超过读取上限，禁止使用局部上下文整体覆盖"}
+        return {**state, "tests_ok": False, "tests": list(state.get("tests", [])) + [failure], "error": failure["out"]}
     # client 是 doc 智能体对应的模型客户端。
     client = graph._client("doc", state)
     try:
@@ -42,7 +73,8 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
                     + "\n\n变更："
                     + json.dumps(state.get("changes", []), ensure_ascii=False)
                     + "\n\n测试："
-                    + json.dumps(state.get("tests", []), ensure_ascii=False),
+                    + json.dumps(state.get("tests", []), ensure_ascii=False)
+                    + f"\n\n文档目标：{path}\n\n已有文档（保留仍有效的信息）：\n{existing}",
                 },
             ]
         ).strip()
@@ -76,16 +108,6 @@ def doc(graph: AgentGraph, state: AgentState) -> AgentState:
         failure = {"cmd": "文档生成", "ok": False, "out": "文档模型返回空内容"}
         tests = list(state.get("tests", [])) + [failure]
         return {**state, "tests": tests, "tests_ok": False, "error": failure["out"]}
-    # path 从用户任务中的明确 Markdown 路径确定；未指定时使用项目根目录 README.md。
-    path_match = re.search(
-        r"(?<![\w.-])([\w./-]+\.md)(?![\w.-])",
-        graph._effective_text(state),
-        re.IGNORECASE,
-    )
-    path = path_match.group(1) if path_match else "README.md"
-    if Path(path).is_absolute() or ".." in Path(path).parts:
-        # 绝对路径和父级跳转会被强制改为 README.md，防止模型任务文本写出项目目录。
-        path = "README.md"
     # written 是实际写入的相对路径。
     written = fs.write(path, content.rstrip() + "\n")
     # repo_context 复制已有仓库摘要，并补充 doc_path 供最终结果展示。

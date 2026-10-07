@@ -74,6 +74,8 @@ class AgentState(TypedDict, total=False):
     changes: list[str]
     # Coding 智能体执行过的命令列表。
     commands: list[str]
+    # 由真实工具执行产生的验收入口，供独立 Verifier 重跑，避免猜测脚本命名。
+    verification_commands: list[str]
     # 验证智能体产生的测试结果。
     tests: list[dict[str, Any]]
     # 验证结果是否整体通过。

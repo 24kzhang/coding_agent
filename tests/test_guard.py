@@ -9,16 +9,19 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from api.schema import ModelConfig
 from backend.agents.coder import coder
+from backend.agents.doc import doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
 from backend.agents.planner import _normalize_chat_contract, _plan_quality_issues, _schema_fields
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
-from backend.tools import FsTool, ShellTool
+from backend.tools import FsTool, GitTool, ShellTool
 from backend.tools.shell import prepare_command
 from llm import LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError, LlmUsage
@@ -304,3 +307,103 @@ def test_string_done_cannot_claim_completion(tmp_path):
     result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建文件"})
     assert result["coding_ok"]
     assert (tmp_path / "work/done.py").exists()
+
+
+def test_native_text_is_not_completion_and_identity_cannot_be_overridden():
+    assert LlmClient._tool_result([], "接下来我会创建文件")["done"] is False
+    assert LlmClient._tool_result([{"tool": "finish", "summary": "已完成"}], "")["done"] is True
+    with pytest.raises(LlmError, match="不得覆盖"):
+        LlmClient._native_action("read_file", {"tool": "write_file", "path": "x"})
+    with pytest.raises(LlmError):
+        LlmClient._native_action("read_file", [])
+
+
+def test_empty_native_calls_fall_back_to_structured_actions(tmp_path):
+    graph = make_graph(tmp_path)
+
+    class EmptyNativeClient(LlmClient):
+        def __init__(self):
+            self.cfg = SimpleNamespace(id="native", model="generic", capabilities=["tools"])
+            self.default_effort = "low"
+            self.last_usage = LlmUsage()
+            self.native_calls = 0
+
+        def chat_tools(self, *_args, **_kwargs):
+            self.native_calls += 1
+            return self._tool_result([], "准备开始写入")
+
+        def chat_json(self, *_args, **kwargs):
+            assert kwargs["plain_text"] is True
+            return {"actions": [{"tool": "write_file", "path": "ready.py", "content": "ready = True\n"}], "done": True}
+
+    client = EmptyNativeClient()
+    graph._client = lambda *_args: client
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建文件", "model_id": "native"})
+    assert client.native_calls == 2
+    assert result["coding_ok"]
+    assert (tmp_path / "work/ready.py").exists()
+
+
+def test_nested_private_copy_stays_in_project_and_reports_companion_file(tmp_path):
+    graph = make_graph(tmp_path)
+    graph.model_store.upsert(ModelConfig(id="generic", name="测试模型", base_url="https://example.test", api_key="假密钥", model="generic"))
+    fs = FsTool(str(tmp_path / "work"))
+    result = graph._do_action({"tool": "model_copy", "model_id": "generic", "target": "service/.local/model.json"}, fs, ShellTool(str(fs.root)), GitTool(str(fs.root)))
+    assert result["ok"]
+    assert result["files"] == ["service/.local/model.json", "service/.gitignore"]
+    assert not (fs.root / ".gitignore").exists()
+    assert (fs.root / "service/.gitignore").read_text() == ".local/\n"
+
+
+def test_document_node_preserves_verified_nested_readme_without_model_call(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service/README.md", "# 已验收的用户说明\n")
+    graph._client = lambda *_args: pytest.fail("已验收的说明不应再次调用模型覆盖")
+    result = doc(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "生成项目和 README.md", "task_type": "code_gen", "changes": ["service/README.md"], "tests_ok": True})
+    assert result["repo"]["doc_path"] == str(fs.root / "service/README.md")
+    assert not (fs.root / "README.md").exists()
+    assert fs.read("service/README.md") == "# 已验收的用户说明\n"
+
+
+def test_document_model_receives_existing_content_and_nested_target(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service/pyproject.toml", "[project]\nname='demo'\nversion='1'\n")
+    fs.write("service/README.md", "# 用户保留信息\n")
+
+    def generate(_state, _agent, _client, messages):
+        assert "用户保留信息" in messages[1]["content"]
+        assert "文档目标：service/README.md" in messages[1]["content"]
+        return "# 用户保留信息\n\n新增说明。"
+
+    graph._client = lambda *_args: object()
+    graph._model_text = generate
+    result = doc(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "更新项目说明", "task_type": "doc_gen", "changes": ["service/main.py"]})
+    assert "service/README.md" in result["changes"]
+    assert not (fs.root / "README.md").exists()
+
+
+def test_real_verification_commands_are_handed_off_and_independently_repeated(tmp_path):
+    graph = make_graph(tmp_path)
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return {"cmd": command, "ok": True, "code": 0, "out": "校验通过", "err": ""}
+
+    graph._shell = lambda *_args: SimpleNamespace(run=run)
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: {"actions": [{"tool": "run_command", "cmd": "uv run python tools/build_bundle.py"}], "done": True})
+    state = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "运行构建"})
+    assert state["verification_commands"] == ["uv run python tools/build_bundle.py"]
+    result = verifier(graph, state)
+    assert result["tests_ok"]
+    assert calls == ["uv run python tools/build_bundle.py"] * 2
+
+
+def test_stream_output_limit_retains_paid_usage_before_raising():
+    client = LlmClient(ModelConfig(id="generic", name="测试", base_url="https://example.test", api_key="假密钥", model="generic"))
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"}, text='data: {"choices":[{"delta":{"content":"片段"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":6000}}\n\ndata: [DONE]\n\n')
+    with pytest.raises(LlmOutputLimitError):
+        client._stream_text(response, [{"role": "user", "content": "测试"}])
+    assert client.last_usage.total == 6100

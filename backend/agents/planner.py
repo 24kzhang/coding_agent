@@ -496,6 +496,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 "review",
                 f"计划初稿存在 {len(best_issues)} 项执行级问题，"
                 f"正在自动修订（{repair_index + 1}/{_MAX_PLAN_REPAIRS}）",
+                data={"issues": best_issues},
             )
             repair_messages = [
                 {"role": "system", "content": PLANNER_PROMPT},

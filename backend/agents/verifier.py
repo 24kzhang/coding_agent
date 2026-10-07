@@ -134,7 +134,7 @@ def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     # files 是当前项目文件列表。
     files = fs.list()
     # commands 根据项目真实配置生成，不把某个测试框架硬编码为所有项目默认值。
-    commands = graph._verification_commands(fs, files)
+    commands = list(dict.fromkeys(graph._verification_commands(fs, files) + list(state.get("verification_commands", []))))
     # tests 保存每条测试或静态检查的结构化结果。
     tests: list[dict[str, Any]] = []
     # ok 是整体验证状态，任意关键检查失败都会变为 False。

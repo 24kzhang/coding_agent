@@ -243,7 +243,9 @@ class ModelStore:
             raise ValueError("模型配置只能复制到当前工作区")
         if ".local" not in destination.relative_to(root).parts[:-1]:
             raise ValueError("模型配置只能复制到 .local 私密目录")
-        ignore = root / ".gitignore"
+        relative_parts = destination.relative_to(root).parts
+        project_root = root.joinpath(*relative_parts[:relative_parts.index(".local")])
+        ignore = project_root / ".gitignore"
         if ignore.is_symlink():
             raise ValueError("不能通过符号链接修改忽略配置")
         cfg = self.get(model_id)
@@ -268,7 +270,7 @@ class ModelStore:
             temp.unlink(missing_ok=True)
         os.chmod(destination, 0o600)
         ignore_text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
-        entry = f"{destination.parent.relative_to(root).as_posix().rstrip('/')}/"
+        entry = f"{destination.parent.relative_to(project_root).as_posix().rstrip('/')}/"
         if entry not in {line.strip() for line in ignore_text.splitlines()}:
             with ignore.open("a", encoding="utf-8") as fh:
                 if ignore_text and not ignore_text.endswith("\n"):

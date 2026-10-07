@@ -251,6 +251,7 @@ class LlmClient:
                     except (ValueError, json.JSONDecodeError) as exc:
                         raise LlmError("Responses API 没有返回合法 JSON") from exc
                     self.last_usage = self._responses_usage(data, messages)
+                    self._check_completion(data)
                     actions: list[dict[str, Any]] = []
                     summary_parts: list[str] = []
                     for item in data.get("output") or []:
@@ -261,7 +262,7 @@ class LlmClient:
                                 arguments = json.loads(str(item.get("arguments") or "{}"))
                             except json.JSONDecodeError as exc:
                                 raise LlmError("原生工具调用参数不是合法 JSON") from exc
-                            actions.append({"tool": str(item.get("name") or ""), **arguments})
+                            actions.append(self._native_action(str(item.get("name") or ""), arguments))
                         elif item.get("type") == "message":
                             summary_parts.extend(
                                 str(part.get("text") or "")
@@ -311,6 +312,7 @@ class LlmClient:
                 except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise LlmError("Chat Completions 没有返回合法工具响应") from exc
                 self.last_usage = self._usage(data, messages)
+                self._check_completion(data)
                 actions: list[dict[str, Any]] = []
                 for call in message.get("tool_calls") or []:
                     function = call.get("function") or {}
@@ -318,9 +320,17 @@ class LlmClient:
                         arguments = json.loads(str(function.get("arguments") or "{}"))
                     except json.JSONDecodeError as exc:
                         raise LlmError("原生工具调用参数不是合法 JSON") from exc
-                    actions.append({"tool": str(function.get("name") or ""), **arguments})
+                    actions.append(self._native_action(str(function.get("name") or ""), arguments))
                 return self._tool_result(actions, self._content_text(message.get("content") or ""))
         raise LlmError(last_error or "没有可用的模型接口地址")
+
+    @staticmethod
+    def _native_action(name: str, arguments: Any) -> dict[str, Any]:
+        """原生工具的身份来自供应商结构，不能被参数覆盖。"""
+
+        if not isinstance(arguments, dict) or "tool" in arguments:
+            raise LlmError("原生工具调用参数必须是对象，且不得覆盖工具名称")
+        return {"tool": name, **arguments}
 
     @staticmethod
     def _tool_result(actions: list[dict[str, Any]], summary: str) -> dict[str, Any]:
@@ -334,10 +344,10 @@ class LlmClient:
                 "summary": str(finish.get("summary") or summary or "任务已完成。"),
             }
         return {
-            "thought": summary if executable else "",
+            "thought": summary,
             "actions": executable,
-            "done": not executable and bool(summary),
-            "summary": summary,
+            "done": False,
+            "summary": "",
         }
 
     def _chat_completions(
@@ -424,6 +434,7 @@ class LlmClient:
                         self.working_urls[self.cfg.base_url.rstrip("/")] = url
                         data = resp.json()
                         self.last_usage = self._usage(data, messages)
+                        self._check_completion(data)
                         content = data["choices"][0]["message"]["content"]
                         return self._content_text(content)
                     except LlmError:
@@ -497,6 +508,7 @@ class LlmClient:
                         raise LlmError("Responses API 没有返回合法 JSON") from exc
                     self.working_urls[f"responses:{self.cfg.base_url.rstrip('/')}"] = url
                     self.last_usage = self._responses_usage(data, messages)
+                    self._check_completion(data)
                     text = data.get("output_text")
                     if isinstance(text, str) and text:
                         return text
@@ -509,6 +521,9 @@ class LlmClient:
                                 parts.append(part["text"])
                     if parts:
                         return "".join(parts)
+                    limit = min(max_tokens or self.cfg.max_output_tokens, self.cfg.max_output_tokens)
+                    if self.last_usage.completion >= int(limit * 0.95):
+                        raise LlmOutputLimitError("Responses API 推理耗尽输出预算，没有产出正文")
                     raise LlmError("Responses API 响应中没有可用文本")
         raise LlmError(last_error or "Responses API 接口不存在")
 
@@ -619,6 +634,16 @@ class LlmClient:
         )
 
     @staticmethod
+    def _check_completion(data: dict[str, Any]) -> None:
+        """供应商明确报告截断时，部分正文不能伪装成完整结果。"""
+
+        reason = (data.get("incomplete_details") or {}).get("reason")
+        choices = data.get("choices") or []
+        length_stop = any(isinstance(item, dict) and item.get("finish_reason") in {"length", "max_tokens"} for item in choices)
+        if reason in {"max_output_tokens", "max_tokens"} or length_stop:
+            raise LlmOutputLimitError("供应商报告输出预算耗尽，响应尚未完成")
+
+    @staticmethod
     def _messages_text(messages: list[dict[str, Any]]) -> str:
         parts: list[str] = []
         for message in messages:
@@ -659,6 +684,7 @@ class LlmClient:
         # 防止供应商持续发送心跳或模型失控生成导致会话永远不结束。
         deadline = time.monotonic() + max(self.cfg.timeout * 2, 300)
         text_size = 0
+        length_stop = False
         for raw_line in response.iter_lines():
             if time.monotonic() > deadline:
                 raise LlmError("模型流式响应超过总时长上限")
@@ -679,6 +705,7 @@ class LlmClient:
             if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
                 continue
             choice = choices[0]
+            length_stop = length_stop or choice.get("finish_reason") in {"length", "max_tokens"}
             source = choice.get("delta") or choice.get("message") or {}
             if isinstance(source, dict):
                 content = source.get("content")
@@ -689,10 +716,12 @@ class LlmClient:
                     if text_size > 100_000:
                         raise LlmError("模型流式响应正文超过 100000 字符上限")
         text = "".join(parts)
-        if not text:
-            raise LlmError("模型流式响应中没有可用的文本 content")
         usage_source = usage_data or {"choices": [{"message": {"content": text}}]}
         self.last_usage = self._usage(usage_source, messages)
+        if length_stop:
+            raise LlmOutputLimitError("模型流式响应输出预算耗尽，正文尚未完成")
+        if not text:
+            raise LlmError("模型流式响应中没有可用的文本 content")
         return text
 
     def chat_json(

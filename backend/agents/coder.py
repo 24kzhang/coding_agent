@@ -12,6 +12,7 @@ from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.tools import FsTool, GitTool, tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError
+from llm.client import LlmOutputLimitError
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -247,23 +248,18 @@ def _is_dependency_mutation_command(command: str) -> bool:
 def _is_verification_command(command: str) -> bool:
     """识别能够作为实现完成证据的测试、构建、语法检查或烟测命令。"""
 
-    lowered = f" {command.strip().lower()}"
-    markers = (
-        " pytest",
-        "node --check ",
-        "npm run test",
-        "npm run build",
-        " run test",
-        " run build",
-        "python -m compileall",
-        "ruff check",
-        "mypy ",
-        "pyright ",
-        "smoke.py",
-        "smoke_test.py",
-        "build.py",
-    )
-    return any(marker in lowered for marker in markers)
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if any(arg in {"-c", "-e"} for arg in argv):
+        return False
+    names = [Path(arg).name.lower() for arg in argv]
+    if any(name in {"pytest", "ruff", "mypy", "pyright", "compileall", "unittest"} for name in names):
+        return True
+    if "node" in names and "--check" in argv:
+        return True
+    return any(re.search(r"(?:^|[-_])(?:test|typecheck|build|smoke|lint|check)(?:[-_]|$)", Path(name).stem) for name in names)
 
 
 def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool) -> list[dict]:
@@ -394,6 +390,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     changes = list(state.get("changes", []))
     # commands 继承已有命令列表。
     commands = list(state.get("commands", []))
+    verification_commands = list(state.get("verification_commands", []))
     # failed_tests 是每一步都保留的稳定修复清单，不会被后续工具观察挤出上下文。
     failed_tests = ""
     # addressed_failure_paths 记录本轮已经成功修改的失败相关文件。对应旧反馈在本轮中
@@ -553,6 +550,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 isinstance(client, LlmClient)
                 and "tools" in getattr(client.cfg, "capabilities", [])
                 and "longcat" not in model_name
+                and empty_steps < 2
             ):
                 native_specs = _native_coder_specs(mcp_tools, reads_forbidden)
                 data = client.chat_tools(
@@ -582,7 +580,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = graph._trim(str(exc), 240)
             if (
-                "原生工具调用参数不是合法 JSON" in error_text
+                ("原生工具调用参数不是合法 JSON" in error_text or isinstance(exc, LlmOutputLimitError))
                 and isinstance(client, LlmClient)
                 and client.default_effort != "minimal"
             ):
@@ -924,8 +922,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     mutation_count += 1
             if observation.get("file"):
                 changes.append(str(observation["file"]))
+            for related in observation.get("files", []):
+                rel = str(related)
+                if rel not in changes:
+                    changes.append(rel)
+                if rel not in current_files:
+                    current_files.append(rel)
+                mutated_paths.add(rel)
             if observation.get("cmd"):
                 commands.append(str(observation["cmd"]))
+                command = str(observation["cmd"])
+                if _is_verification_command(command) and (observation.get("result") or {}).get("code") != 126:
+                    verification_commands.append(command)
             graph._emit(state, "coder", "tool", observation["text"], data=observation)
             if (
                 not observation.get("ok")
@@ -1022,6 +1030,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         **state,
         "changes": unique_changes,
         "commands": safe_commands,
+        "verification_commands": list(dict.fromkeys(verification_commands)),
         "retry": retry + 1,
         "coding_ok": coding_ok,
         "coding_summary": safe_summary,
