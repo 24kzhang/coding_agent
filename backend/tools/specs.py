@@ -7,6 +7,7 @@ def tool_specs() -> list[dict[str, Any]]:
     """返回 Coding 原生函数工具及其本地执行策略。"""
 
     string = {"type": "string"}
+    public_path = {"type": "string", "description": "相对工作区的普通文本路径；不可读写 .local/、.env、.ssh/、.aws/ 等私密内容。公开配置示例放普通项目目录，真实配置通过 model_copy。"}
     # 原生函数参数同样计入模型输出。限制单次正文大小，避免模型把多个大文件塞进
     # 一次响应后在输出上限处截断，造成整批 JSON 无法解析和重复计费。
     short_text = {"type": "string", "maxLength": 10_000}
@@ -14,13 +15,13 @@ def tool_specs() -> list[dict[str, Any]]:
     integer = {"type": "integer"}
     array = {"type": "array", "items": string}
     definitions = [
-        ("read_file", "读取工作区文本文件的一段内容", {"path": string, "start": integer, "max_chars": integer}, ["path"], "allow", "read"),
+        ("read_file", "读取工作区文本文件的一段内容", {"path": public_path, "start": integer, "max_chars": integer}, ["path"], "allow", "read"),
         ("list_files", "列出工作区内受支持的文本文件", {}, [], "allow", "read"),
         ("search_files", "在工作区文本文件中搜索内容", {"query": string, "max_results": integer}, ["query"], "allow", "read"),
         (
             "write_file",
             "写入一个完整文本文件；正文不得超过 10000 字符，更长文件先写首块再用 append_file 分块追加",
-            {"path": string, "content": short_text},
+            {"path": public_path, "content": short_text},
             ["path", "content"],
             "allow",
             "write",
@@ -28,7 +29,7 @@ def tool_specs() -> list[dict[str, Any]]:
         (
             "append_file",
             "向一个文本文件末尾追加不超过 10000 字符的一块内容",
-            {"path": string, "content": short_text},
+            {"path": public_path, "content": short_text},
             ["path", "content"],
             "allow",
             "write",
@@ -36,7 +37,7 @@ def tool_specs() -> list[dict[str, Any]]:
         (
             "replace_file",
             "精确替换文件中的一小段文本",
-            {"path": string, "old": match_text, "new": short_text, "expected": integer},
+            {"path": public_path, "old": match_text, "new": short_text, "expected": integer},
             ["path", "old", "new"],
             "allow",
             "write",
@@ -45,7 +46,7 @@ def tool_specs() -> list[dict[str, Any]]:
             "replace_block",
             "按开始和结束锚点替换不超过 10000 字符的代码块",
             {
-                "path": string,
+                "path": public_path,
                 "start_marker": match_text,
                 "end_marker": match_text,
                 "content": short_text,

@@ -109,6 +109,12 @@ def test_model_store_redacts_configured_and_generated_credentials(tmp_path) -> N
     assert redacted["msg"].endswith("[密钥已脱敏]")
     assert store.contains_secret(value) is True
     assert store.contains_secret({"content": 'api_key = "[已脱敏]"'}) is False
+    assert store.contains_secret({"content": 'api_key = "TEST_ONLY_KEY"'}) is False
+    facts = store.secret_facts(value)
+    assert facts["configured_matches"] == 1
+    assert facts["token_like_matches"] >= 1
+    assert configured not in str(facts)
+    assert generated not in str(facts)
 
 
 def test_llm_url_candidates_for_plain_openai_base() -> None:

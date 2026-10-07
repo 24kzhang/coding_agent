@@ -98,7 +98,9 @@ CODER_PROMPT = """你是 Coding 智能体，负责真正写入磁盘，不允许
 19. 完成前按真实目录运行前后端测试和构建；若清单位于子目录，使用 `uv --project` 或 `npm --prefix` 等参数。Python 测试依赖必须在项目清单中声明；使用 `uv run --project <目录> python -m pytest` 验证项目自己的解释器，不得借用 Agent 宿主 PATH 中的 pytest 伪造通过。
 20. 创建 TypeScript 项目时必须同时提供 tsconfig.json 和可执行的 typecheck 脚本，并在完成前运行类型检查；Vite build 只转译、不等同于 TypeScript 类型检查。
 21. 前后端分离项目必须逐字段核对 HTTP 契约：客户端请求体、查询参数和响应类型要与服务端模型完全一致；接口测试不能只用与客户端自身类型一致的 Mock 掩盖真实后端差异。
-22. 若任务要求接口错误统一使用简体中文，FastAPI/Pydantic 等框架在进入路由前生成的参数校验错误也必须通过异常处理器转换为稳定的中文结构。"""
+22. 若任务要求接口错误统一使用简体中文，FastAPI/Pydantic 等框架在进入路由前生成的参数校验错误也必须通过异常处理器转换为稳定的中文结构。
+23. 测试替身与公开示例使用明显的无效占位值，如 TEST_ONLY_KEY 或 [密钥占位]；不要生成 sk-/ak_/agt_ 等真实密钥外形的假值，它们也会被凭据守卫拦截。离线单元测试不得依赖真实密钥；用户要求真实模型验收时，在运行时从受控配置读取，不得硬编码或输出凭据。
+24. .local/、.env、.ssh/、.aws/ 等私密路径不能通过普通文件工具读写；真实模型配置只能用 model_copy。公开示例应放在普通项目目录，例如 model.example.json，不能放进 .local/。"""
 
 # LONGCAT_CODER_SUFFIX 在关闭 response_format 时把输出合同一并切换为 LongCat 原生工具标签。
 # 只切换 HTTP 参数而继续要求 JSON，会使部分 LongCat 响应稳定退化成空对象。

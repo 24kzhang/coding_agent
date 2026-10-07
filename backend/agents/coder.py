@@ -789,6 +789,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             elif secret_write:
                 observation = {
                     "ok": False,
+                    "credential_facts": graph.model_store.secret_facts(action),
                     "text": (
                         "拒绝执行：工具参数包含真实或疑似凭据。密钥只能通过 model_copy "
                         "写入被忽略的私密配置；源码、脚本、命令和测试必须使用占位符或从配置读取。"

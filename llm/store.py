@@ -74,6 +74,15 @@ class ModelStore:
         text = str(value)
         return self.redact_text(text) != text
 
+    def secret_facts(self, value: Any) -> dict[str, int]:
+        """只返回拦截类别计数，便于诊断且不保存任何凭据或原始参数。"""
+
+        text = str(value)
+        return {
+            "configured_matches": sum(len(model.api_key) >= 8 and model.api_key in text for model in self.all()),
+            "token_like_matches": len(re.findall(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b", text)),
+        }
+
     def model_map(self) -> AgentModelMap:
         """读取每个智能体绑定的模型 id。"""
 
