@@ -125,6 +125,31 @@ def test_memory_uses_session_id_without_custom_title(tmp_path) -> None:
     assert history[0]["sessions"][0]["title"] == "s1"
 
 
+def test_history_survives_compression_and_process_restart(tmp_path) -> None:
+    """压缩模型上下文后，界面仍应恢复全部消息和结构化事件。"""
+
+    root = tmp_path / "mem"
+    workdir = str(tmp_path / "proj")
+    store = MemoryStore(root)
+    for index in range(90):
+        store.append(workdir, "s1", "user", "input", "message", f"需求 {index}")
+        store.append(
+            workdir, "s1", "verifier", "event", "test", "测试通过" * 80,
+            {"tokens": index, "data": {"ok": True, "cmd": f"检查 {index}", "out": "通过"}},
+        )
+        store.append(workdir, "s1", "manager", "final", "result", f"完成 {index}")
+    store.maybe_compress(workdir, "s1", ctx=100)
+    assert len(store.read_session(workdir, "s1")) < 270
+
+    session = MemoryStore(root).list_history()[0]["sessions"][0]
+
+    assert len(session["messages"]) == 180
+    assert len(session["events"]) == 90
+    assert [event["data"]["cmd"] for event in session["events"]] == [f"检查 {index}" for index in range(90)]
+    assert [event["tokens"] for event in session["events"]] == list(range(90))
+    assert session["interrupted"] is False
+
+
 def test_memory_deletes_session_and_project(tmp_path) -> None:
     store = MemoryStore(tmp_path / "mem")
     workdir = str(tmp_path / "proj")

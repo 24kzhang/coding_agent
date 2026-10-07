@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from api.schema import ModelConfig
 from backend.agents import graph as graph_module
 from backend.agents.doc import doc
 from backend.agents.final import final
@@ -12,7 +13,6 @@ from backend.agents.graph import AgentGraph
 from backend.agents.manager import manager
 from backend.agents.planner import (
     _mentions_field,
-    _normalize_chat_contract,
     _plan_quality_issues,
     planner,
 )
@@ -573,7 +573,7 @@ def test_plan_redaction_handles_json_fields_and_bare_tokens(tmp_path) -> None:
 
 
 def test_plan_quality_review_detects_broken_full_stack_contracts(tmp_path) -> None:
-    """数据网站计划若改配置字段、漏接口/测试或前端构造 system，必须在保存前触发修订。"""
+    """数据网站计划若改配置字段、遗漏接口和自动化测试，必须在保存前触发修订。"""
 
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
@@ -600,13 +600,7 @@ currentMessages.push({ role: 'user', content: question });
     assert any("typecheck" in item for item in issues)
     assert any("npm run build" in item for item in issues)
     assert any("所有原始字段" in item for item in issues)
-    assert any("完整 messages" in item for item in issues)
-    assert any("前端初始化 system" in item for item in issues)
-    assert any("前后端统一请求体" in item for item in issues)
-    assert any("messages 为空数组" in item for item in issues)
-    assert any("不得过滤 system" in item for item in issues)
-    assert any("界面不得渲染" in item for item in issues)
-    assert any("不得先把当前 user" in item for item in issues)
+
 
 
 def test_plan_quality_accepts_explicit_video_only_contract(tmp_path) -> None:
@@ -752,28 +746,6 @@ def test_repo_candidates_exclude_generated_plan_files(tmp_path) -> None:
     assert "docs/plans/old.md" not in candidates
 
 
-def test_chat_contract_normalizer_removes_frontend_system_contradictions() -> None:
-    """Plan 编排层应确定性消除模型反复产生的前端 system 违约行。"""
-
-    markdown = """- 前端初始化 System Prompt
-- UI 渲染所有消息，包括 system
-- currentMessages.push({ role: 'user', content: question })
-- 后续追加新 user 消息后回传完整 messages
-- 页面保持响应式
-"""
-    normalized = _normalize_chat_contract(
-        markdown,
-        "第一次提问添加动作信息，之后传历史对话。",
-    )
-
-    assert "前端初始化 System" not in normalized
-    assert "渲染所有消息" not in normalized
-    assert "currentMessages.push" not in normalized
-    assert "追加新 user" not in normalized
-    assert "前端不创建 system、不初始化 system、不过滤 system，也不显示 system" in normalized
-    assert "页面保持响应式" in normalized
-
-
 def test_plan_quality_accepts_canonical_server_owned_system_contract(tmp_path) -> None:
     """质量门不应把“前端不初始化 system”的规范合同误报为冲突。"""
 
@@ -797,8 +769,8 @@ def test_plan_quality_accepts_canonical_server_owned_system_contract(tmp_path) -
     assert not any("前端初始化 system" in item for item in issues)
 
 
-def test_plan_quality_rejects_server_stored_chat_history(tmp_path) -> None:
-    """聊天历史应由客户端回传，计划不得要求服务端保存 messages 状态。"""
+def test_plan_quality_allows_server_stored_chat_history(tmp_path) -> None:
+    """通用规划允许选择服务端状态，不应注入特定聊天架构。"""
 
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     state = {
@@ -814,7 +786,7 @@ def test_plan_quality_rejects_server_stored_chat_history(tmp_path) -> None:
 
     issues = _plan_quality_issues(graph, state, markdown)
 
-    assert any("服务端不得保存 messages" in item for item in issues)
+    assert issues == []
 
 
 def test_direct_greeting_does_not_read_repo_or_write_files(tmp_path) -> None:
@@ -831,6 +803,26 @@ def test_direct_greeting_does_not_read_repo_or_write_files(tmp_path) -> None:
     assert result.tests == []
     assert not (workdir / "README.md").exists()
     assert [event.agent for event in events] == ["manager", "manager"]
+
+
+def test_event_payload_is_redacted_before_persistence(tmp_path) -> None:
+    """事件恢复保留验证数据，但不能把模型密钥写入会话。"""
+
+    models = ModelStore(tmp_path / "models.json")
+    secret = "test-private-key-123456789"
+    models.upsert(ModelConfig(id="test", name="测试模型", model="test", base_url="https://example.com", api_key=secret))
+    memory_root = tmp_path / "mem"
+    workdir = str(tmp_path / "proj")
+    events = []
+    graph = AgentGraph(models, MemoryStore(memory_root), emit=events.append)
+    graph._emit({"session_id": "s1", "workdir": workdir}, "verifier", "test", "验证通过", 7,
+                {"ok": True, "details": {"out": secret}, "cmd": "pytest"})
+
+    restored = MemoryStore(memory_root).list_history()[0]["sessions"][0]["events"][0]
+    assert restored["data"] == events[0].data
+    assert restored["tokens"] == 7
+    assert secret not in json.dumps(restored)
+    assert restored["data"]["ok"] is True
 
 
 def test_manager_prefers_code_generation_when_doc_is_a_deliverable(tmp_path) -> None:

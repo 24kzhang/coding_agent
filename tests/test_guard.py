@@ -18,7 +18,7 @@ from backend.agents.coder import _guidance_forbids_reads, _is_verification_comma
 from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
-from backend.agents.planner import _normalize_chat_contract, _plan_quality_issues, _schema_fields
+from backend.agents.planner import _plan_quality_issues, _schema_fields
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
@@ -264,9 +264,7 @@ def test_schema_and_plan_contracts_work_for_unrelated_domains(tmp_path):
     graph = make_graph(tmp_path)
     issues = _plan_quality_issues(graph, {"text": "基于商品数据集开发网站，展示所有详细信息", "repo": repo}, "GET /api/products 返回商品列表，GET /api/products/{sku} 返回完整对象。逐字段展示 `sku`、`price`。使用 Vitest 自动化测试。")
     assert issues == []
-    normalized = _normalize_chat_contract("前端初始化 system", "第一次提问传商品信息，之后传历史对话")
-    assert "exercise" not in normalized
-    assert "业务对象标识" in normalized
+
 
 
 def test_plan_accepts_generic_chat_fields_and_unmarked_design_image(tmp_path):

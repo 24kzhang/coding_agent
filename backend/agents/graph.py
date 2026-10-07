@@ -1980,7 +1980,7 @@ class AgentGraph:
             data=safe_data,
         )
         # 同步把事件写入会话记忆，便于中断后查看执行到哪一步。
-        # JSONL 只保存事件摘要和 token，不重复保存可能很大的命令输出结构。
+        # 持久化脱敏后的完整事件数据，历史恢复与实时事件使用同一合同。
         self.memory.append(
             state["workdir"],
             state["session_id"],
@@ -1988,7 +1988,7 @@ class AgentGraph:
             "event",
             kind,
             self._trim(safe_msg, 3000),
-            {"tokens": tokens, **({"usage": safe_data} if kind == "usage" else {})},
+            {"tokens": tokens, "data": safe_data, **({"usage": safe_data} if kind == "usage" else {})},
         )
         if self.emit_cb:
             self.emit_cb(event)

@@ -471,7 +471,7 @@ class MemoryStore:
     def _session_summary(self, workdir: str, path: Path) -> dict[str, Any] | None:
         """把一个会话 jsonl 文件转换成历史弹窗需要的摘要。"""
 
-        records = self._active_records(path)
+        records = self._read_all_records(path, include_summaries=False)
         if not records:
             return None
         # messages 是可恢复到对话窗口的用户消息和最终回复。
@@ -713,7 +713,7 @@ class MemoryStore:
         event_records = [rec for rec in records if rec.get("tl") == "event"]
         events: list[dict[str, Any]] = []
         for event_id, rec in enumerate(event_records, start=1):
-            # memory 为控制体积只保存事件摘要和 token，因此 data 恢复为空对象。
+            # 旧记录兼容 usage 元数据，新记录恢复完整脱敏数据。
             meta = rec.get("m") if isinstance(rec.get("m"), dict) else {}
             events.append(
                 {
@@ -723,7 +723,7 @@ class MemoryStore:
                     "kind": str(rec.get("k", "event")),
                     "msg": str(rec.get("out", "")),
                     "tokens": int(meta.get("tokens", 0) or 0),
-                    "data": {},
+                    "data": meta.get("data") if isinstance(meta.get("data"), dict) else (meta.get("usage") if isinstance(meta.get("usage"), dict) else {}),
                 }
             )
         return events

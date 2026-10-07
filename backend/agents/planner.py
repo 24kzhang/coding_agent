@@ -80,62 +80,6 @@ def _mentions_field(text: str, field: str) -> bool:
     )
 
 
-def _normalize_chat_contract(markdown: str, goal: str) -> str:
-    """把模型反复产生的聊天合同矛盾归一化为服务端可信 system 方案。"""
-
-    if "第一次提问" not in goal and not ("首次" in goal and "历史对话" in goal):
-        return markdown
-    normalized: list[str] = []
-    canonical_added = False
-    for line in markdown.splitlines():
-        lower = line.lower()
-        frontend_system_creation = (
-            "前端" in line
-            and "system" in lower
-            and any(word in line for word in ("初始化", "构造", "创建"))
-            and not any(word in line for word in ("不初始化", "不构造", "不创建", "禁止"))
-        )
-        renders_system = (
-            "system" in lower
-            and any(word in line for word in ("渲染", "显示"))
-            and not any(word in line for word in ("不渲染", "不显示", "禁止渲染", "禁止显示"))
-        )
-        filters_system = any(
-            marker in lower
-            for marker in (
-                "不含 system",
-                "排除 system",
-                "withoutsystem",
-                "role !== 'system'",
-                'role !== "system"',
-            )
-        )
-        appends_current_user = bool(
-            re.search(
-                r"(?i)(?:messages|history|currentmessages)\s*\.(?:push|append)\s*\(\s*\{[^}]*role[^}]*user",
-                line,
-            )
-        ) or bool(
-            re.search(
-                r"(?i)(?:追加|添加).{0,10}(?:新|当前).{0,8}user.{0,24}(?:messages|历史|回传)",
-                line,
-            )
-        )
-        if frontend_system_creation or renders_system or filters_system or appends_current_user:
-            if not canonical_added:
-                indent = line[: len(line) - len(line.lstrip())]
-                normalized.append(
-                    indent
-                    + "- 前端不创建 system、不初始化 system、不过滤 system，也不显示 system；首轮仅发送 "
-                    "当前业务对象标识、独立问题字段和空 `messages`；客户端保存服务端返回的完整 messages"
-                    "（包含 system/user/assistant），后续原样回传，界面只渲染 user/assistant。"
-                )
-                canonical_added = True
-            continue
-        normalized.append(line)
-    return "\n".join(normalized)
-
-
 def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) -> list[str]:
     """按用户硬约束和仓库事实检查计划初稿，返回需要模型修订的问题。"""
 
@@ -223,83 +167,6 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             if missing_api_fields:
                 issues.append("详情 API 合同遗漏原始字段：" + "、".join(missing_api_fields))
 
-    # 无状态多轮对话必须把首轮 system 连同完整历史交还客户端保存。
-    if "第一次提问" in goal or ("首次" in goal and "历史对话" in goal):
-        complete_history = "完整 messages" in plan_lower or bool(
-            re.search(r"完整.{0,12}(?:messages|消息历史)", plan_lower)
-        )
-        if not complete_history or not all(role in plan_lower for role in ("system", "user", "assistant")):
-            issues.append("未明确首轮响应返回包含 system/user/assistant 的完整 messages")
-        for phrase, issue in (
-            ("客户端保存", "未明确客户端保存但不渲染 system 历史"),
-            ("服务端", "未明确由服务端根据业务数据构造和验证 system 上下文"),
-        ):
-            if phrase.lower() not in plan_lower:
-                issues.append(issue)
-        if any(
-            "system" in line.lower()
-            and "前端" in line
-            and any(word in line for word in ("初始化", "构造", "创建"))
-            and not any(word in line for word in ("不初始化", "不构造", "不创建", "禁止初始化", "禁止构造", "禁止创建"))
-            for line in markdown.splitlines()
-        ):
-            issues.append("计划又让前端初始化 system，与服务端可信注入方案冲突")
-        # 独立问题字段和业务标识由项目合同决定，不写死任何测试项目的名称。
-        contract_fields_present = bool(re.search(r'\{[^{}]*"messages"\s*:\s*\[[^]]*\][^{}]*\}', markdown)) and len(set(re.findall(r'"([A-Za-z_][\w]*)"\s*:', markdown))) >= 2
-        if not contract_fields_present:
-            issues.append(
-                "聊天接口缺少一份前后端统一请求体合同；必须明确业务标识、独立问题字段和完整 messages 字段名"
-            )
-        empty_first_messages = bool(re.search(r'"messages"\s*:\s*\[\s*\]', markdown)) or bool(
-            re.search(r"messages.{0,16}(?:为空数组|为空|空数组)", markdown, re.IGNORECASE)
-        )
-        if not empty_first_messages:
-            issues.append("首轮请求示例必须把当前问题只放在独立问题字段，并明确 messages 为空数组")
-        if any(
-            marker in plan_lower
-            for marker in (
-                "不含 system",
-                "排除 system",
-                "withoutsystem",
-                "role !== 'system'",
-                'role !== "system"',
-            )
-        ):
-            issues.append("客户端不得过滤 system；后续必须原样回传服务端返回的完整 messages")
-        if any(
-            "system" in line.lower()
-            and any(word in line for word in ("渲染", "显示"))
-            and not any(word in line for word in ("不渲染", "不显示", "禁止渲染", "禁止显示"))
-            for line in markdown.splitlines()
-        ):
-            issues.append("system 消息只能由客户端保存用于回传，界面不得渲染或显示")
-        if re.search(
-            r"(?i)(?:messages|history|currentmessages)\s*\.(?:push|append)\s*\(\s*\{[^}]*role[^}]*user",
-            markdown,
-        ) or re.search(
-            r"(?i)(?:追加|添加).{0,10}(?:新|当前).{0,8}user.{0,24}(?:messages|历史|回传)",
-            markdown,
-        ):
-            issues.append("使用独立问题字段时，客户端不得先把当前 user 再追加到 messages，避免服务端重复添加")
-        if any(
-            re.search(r"(?:服务端|后端).{0,160}(?:保存|维护|存储).{0,160}(?:messages|消息|历史|对话)", line, re.IGNORECASE)
-            and not re.search(r"(?:不|不得|禁止)(?:保存|维护|存储)", line)
-            for line in markdown.splitlines()
-        ):
-            issues.append("聊天接口必须无状态：服务端不得保存 messages 历史，应只验证并使用客户端回传的完整 messages")
-
-    forbidden_resources = re.findall(r"(?:不用|不要用|不使用|禁止引用|禁止使用)\s*`?/?([a-zA-Z][\w-]*)", goal)
-    for resource in forbidden_resources:
-        if not re.search(r"(?:不使用|不引用|禁止(?:使用|引用)?|不要用).{0,24}`?/?" + re.escape(resource), markdown):
-            issues.append(f"未把禁用资源 {resource} 写成明确资源合同")
-
-    selected_skills = {str(item.id).lower() for item in state.get("skills") or []}
-    if "web-design-guidelines" in selected_skills:
-        required_guidelines = ("aria-label", "focus-visible", "prefers-reduced-motion")
-        missing_guidelines = [item for item in required_guidelines if item not in plan_lower]
-        if missing_guidelines:
-            issues.append("所选 web-design-guidelines 关键验收遗漏：" + "、".join(missing_guidelines))
-
     attachments = list(state.get("attachments") or [])
     if attachments:
         missing_names = [
@@ -322,14 +189,11 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
 
 
 def _should_auto_answer_plan_questions(graph: AgentGraph, state: AgentState) -> bool:
-    """信息足够的建站任务不应让 Plan 模式额外追问推荐选项。"""
+    """用户要求直接交付时，同轮采用可选工程决策的推荐项。"""
 
     goal = graph._plan_goal(state)
-    goal_lower = goal.lower()
-    data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
-    has_model_config = ("apikey" in goal_lower or "api_key" in goal_lower) and "base_url" in goal_lower and "model_name" in goal_lower
-    asks_one_shot = any(phrase in goal for phrase in ("一次性生成", "一次性", "直接生成", "不需要确认"))
-    return bool(data_site and (has_model_config or asks_one_shot))
+    # 自动选择只服从用户的一次性交付指令，不依赖项目领域或配置字段。
+    return any(phrase in goal for phrase in ("一次性生成", "一次性", "直接生成", "不需要确认", "按推荐选项"))
 
 
 def _recommended_plan_answers(questions: list[dict]) -> str:
@@ -478,10 +342,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 graph._emit(state, "planner", "error", f"自动采用推荐选项生成计划失败：{str(exc)[:120]}")
     if data.get("status") == "plan":
         # Plan 初稿必须先通过确定性合同审查；不合格时按上限自动修订，用户只看到最终计划。
-        normalized_markdown = _normalize_chat_contract(
-            str(data.get("markdown") or ""),
-            graph._plan_goal(state),
-        )
+        normalized_markdown = str(data.get("markdown") or "")
         best_data = {**data, "markdown": normalized_markdown}
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
         repair_models = {str(getattr(getattr(client, "cfg", None), "id", ""))}
@@ -551,10 +412,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 break
             repaired = {
                 **repaired,
-                "markdown": _normalize_chat_contract(
-                    str(repaired["markdown"]),
-                    graph._plan_goal(state),
-                ),
+                "markdown": str(repaired["markdown"]),
             }
             current_repair_model = str(getattr(getattr(client, "cfg", None), "id", ""))
             repair_counts[current_repair_model] = repair_counts.get(current_repair_model, 0) + 1
