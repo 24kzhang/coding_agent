@@ -407,3 +407,33 @@ def test_stream_output_limit_retains_paid_usage_before_raising():
     with pytest.raises(LlmOutputLimitError):
         client._stream_text(response, [{"role": "user", "content": "测试"}])
     assert client.last_usage.total == 6100
+
+
+def test_native_output_limit_recovers_with_small_structured_action(tmp_path):
+    graph = make_graph(tmp_path)
+
+    class LimitedNativeClient(LlmClient):
+        def __init__(self):
+            self.cfg = SimpleNamespace(id="native", model="generic", capabilities=["tools"], max_output_tokens=16_384, efforts=["minimal"])
+            self.default_effort = "minimal"
+            self.last_usage = LlmUsage()
+            self.native_calls = 0
+
+        def chat_tools(self, *_args, **_kwargs):
+            self.native_calls += 1
+            self.last_usage = LlmUsage(prompt=100, completion=6000, reasoning=6000)
+            raise LlmOutputLimitError("原生工具输出触顶")
+
+        def chat_json(self, messages, **kwargs):
+            assert kwargs["plain_text"] is True
+            assert kwargs["max_tokens"] == 8000
+            assert "4000 字符" in messages[-1]["content"]
+            self.last_usage = LlmUsage(prompt=100, completion=50)
+            return {"actions": [{"tool": "write_file", "path": "done.py", "content": "ready = True\n"}], "done": True}
+
+    client = LimitedNativeClient()
+    graph._client = lambda *_args: client
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建文件", "model_id": "native"})
+    assert client.native_calls == 1
+    assert result["coding_ok"]
+    assert result["tokens"] == 6250

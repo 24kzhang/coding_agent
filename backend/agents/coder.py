@@ -456,6 +456,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
     max_steps = CODER_MAX_STEPS
     loop_guard = LoopGuard()
+    native_fallback = False
+    coder_output_limit = CODER_OUTPUT_TOKENS
     for step in range(1, max_steps + 1):
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
@@ -544,13 +546,14 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         # 后一种情况不能重复累计上一轮用量。
         usage_before = getattr(client, "last_usage", None)
         try:
-            output_limit = graph._check_model_budget(state, CODER_OUTPUT_TOKENS)
+            output_limit = graph._check_model_budget(state, coder_output_limit)
             # data 是模型返回的 ReAct JSON。
             if (
                 isinstance(client, LlmClient)
                 and "tools" in getattr(client.cfg, "capabilities", [])
                 and "longcat" not in model_name
                 and empty_steps < 2
+                and not native_fallback
             ):
                 native_specs = _native_coder_specs(mcp_tools, reads_forbidden)
                 data = client.chat_tools(
@@ -558,7 +561,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     native_specs,
                     max_tokens=output_limit,
                 )
-            elif "longcat" in model_name or empty_steps >= 2:
+            elif "longcat" in model_name or empty_steps >= 2 or native_fallback:
                 # LongCat 的普通文本模式会稳定返回原生工具标签；直接使用该协议，避免先用
                 # response_format 连续得到空对象。其他模型只有连续空响应后才进入兼容模式。
                 if isinstance(client, LlmClient):
@@ -579,6 +582,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 graph._add_tokens(state, failed_usage)
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = graph._trim(str(exc), 240)
+            if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
+                native_fallback = True
+                coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 10_000)
+                observations.append(
+                    "供应商输出预算触顶，已切到结构化文本兼容模式。下一轮只能返回一个"
+                    "正文不超过 4000 字符的小动作；长文件分块 write_file/append_file，"
+                    "不要再次输出整份长文件。当前配置仍使用用户指定的同一模型。"
+                )
+                graph._emit(state, "coder", "model", "原生工具输出触顶，改用结构化文本与小块写入恢复", data={"reason": "native_output_limit", "max_tokens": coder_output_limit})
             if (
                 ("原生工具调用参数不是合法 JSON" in error_text or isinstance(exc, LlmOutputLimitError))
                 and isinstance(client, LlmClient)
