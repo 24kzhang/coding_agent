@@ -28,6 +28,7 @@ from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
+from backend.tools.scope import delivery_root, require_delivery_path
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError
@@ -1308,12 +1309,18 @@ class AgentGraph:
             missing = [key for key in required.get(str(tool), ()) if key not in action]
             if missing:
                 return {"ok": False, "text": f"工具参数缺失：{tool} 需要 {', '.join(missing)}"}
+            output_root = delivery_root(fs, state or {})
+            if tool in {"write_file", "append_file", "replace_file", "replace_block"}:
+                require_delivery_path(fs, output_root, str(action["path"]))
             if tool == "write_file":
                 # rel 是实际写入文件的项目相对路径。
                 rel = fs.write(str(action["path"]), str(action.get("content", "")))
                 return {"ok": True, "text": f"写入文件：{rel}", "file": rel}
             if tool == "model_copy":
                 target = str(action.get("target") or ".local/model.json")
+                if target == ".local/model.json" and output_root != fs.root:
+                    target = (output_root.relative_to(fs.root) / target).as_posix()
+                require_delivery_path(fs, output_root, target)
                 path = self.model_store.copy_private(
                     str(action["model_id"]),
                     str((state or {}).get("workdir") or fs.root),

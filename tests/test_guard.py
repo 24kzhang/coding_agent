@@ -488,3 +488,23 @@ def test_module_verification_entrypoints_are_not_confused_with_servers():
     assert _is_verification_command("uv run --project service python -m package.build")
     assert _is_verification_command("uv run --project service python -m package.smoke")
     assert not _is_verification_command("uv run --project service python -m package.server")
+
+
+@pytest.mark.parametrize("project", ["service", "portal"])
+def test_explicit_delivery_prefix_restricts_writes_and_private_copy(tmp_path, project):
+    graph = make_graph(tmp_path)
+    graph.model_store.upsert(ModelConfig(id="generic", name="测试模型", base_url="https://example.test", api_key="假密钥", model="generic"))
+    fs = FsTool(str(tmp_path / "work"))
+    state = {"text": f"所有项目文件必须使用 `{project}/...` 相对路径", "workdir": str(fs.root)}
+    shell, git = ShellTool(str(fs.root)), GitTool(str(fs.root))
+    denied = graph._do_action({"tool": "write_file", "path": "README.md", "content": "不应落盘"}, fs, shell, git, state)
+    assert not denied["ok"]
+    assert not (fs.root / "README.md").exists()
+    accepted = graph._do_action({"tool": "write_file", "path": f"{project}/main.py", "content": "ready = True\n"}, fs, shell, git, state)
+    assert accepted["ok"]
+    copied = graph._do_action({"tool": "model_copy", "model_id": "generic"}, fs, shell, git, state)
+    assert copied["file"] == f"{project}/.local/model.json"
+    assert copied["files"][-1] == f"{project}/.gitignore"
+    assert not (fs.root / ".local").exists()
+    assert not (fs.root / ".gitignore").exists()
+    assert _document_path(graph, state, fs) == f"{project}/README.md"

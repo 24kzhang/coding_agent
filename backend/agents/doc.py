@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from backend.agents.prompts import DOC_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
+from backend.tools.scope import delivery_root, require_delivery_path
 from llm import LlmBalanceError, LlmError
 
 if TYPE_CHECKING:
@@ -28,11 +29,17 @@ def _document_path(graph: AgentGraph, state: AgentState, fs: FsTool) -> str:
         explicit = candidate if "/" in candidate or candidate != "README.md" else None
         break
     if explicit:
-        return fs.safe(explicit).relative_to(fs.root).as_posix()
+        rel = fs.safe(explicit).relative_to(fs.root).as_posix()
+        require_delivery_path(fs, delivery_root(fs, state), rel)
+        return rel
     changes = list(state.get("changes", []))
     readmes = [rel for rel in changes if Path(rel).name.lower() == "readme.md"]
     if len(readmes) == 1:
+        require_delivery_path(fs, delivery_root(fs, state), readmes[0])
         return readmes[0]
+    output_root = delivery_root(fs, state)
+    if output_root != fs.root:
+        return (output_root.relative_to(fs.root) / "README.md").as_posix()
     projects = [Path(rel).parent for rel in fs.list() if Path(rel).name in {"pyproject.toml", "package.json"}]
     affected = [path.as_posix() for path in projects if any(path == Path(".") or path in Path(rel).parents for rel in changes)]
     parent = Path(os.path.commonpath(affected)) if affected else Path(".")
