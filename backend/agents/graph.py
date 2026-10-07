@@ -30,6 +30,7 @@ from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
+from llm.client import LlmOutputLimitError
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 4
@@ -1533,15 +1534,29 @@ class AgentGraph:
             self._optional_mcp_system(state, messages, tools)
         )
         seen: set[str] = set()
+        recovered_limit = False
+        default_limit = 12_000 if agent == "planner" else 6_000
         for _step in range(4):
-            limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or 6_000))
+            limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or default_limit))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
             usage_before = getattr(client, "last_usage", None)
             try:
                 data = client.chat_json(conversation, **call_kwargs)
-            except LlmError:
+            except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
                     self._add_tokens(state, client.last_usage)
+                if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
+                    recovered_limit = True
+                    next_limit = min(limit * 2, client.cfg.max_output_tokens)
+                    supported = set(client.cfg.efforts)
+                    if "minimal" in supported:
+                        client.default_effort = "minimal"
+                    elif "low" in supported:
+                        client.default_effort = "low"
+                    kwargs = {**kwargs, "max_tokens": next_limit}
+                    conversation.append({"role": "user", "content": "上一次输出耗尽预算且 JSON 未完成。本次必须精简推理和正文，只返回节点要求的完整 JSON；不内嵌整份实现源码。"})
+                    self._emit(state, agent, "model", "结构化输出触顶，已降低推理并在模型及运行预算内重试一次", data={"reason": "output_limit", "max_tokens": next_limit, "effort": client.default_effort})
+                    continue
                 raise
             self._add_tokens(state, client.last_usage)
             actions = [

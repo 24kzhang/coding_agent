@@ -691,7 +691,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             marker in failed_tests
             for marker in ("缺失", "不存在", "尚未创建", "没有交付")
         )
-        if not actions and data.get("done") and not unresolved_missing_delivery:
+        if not actions and data.get("done") is True and not unresolved_missing_delivery:
             empty_steps = 0
             coding_ok = True
             coding_summary = graph._clean_summary(data.get("summary"), "Coding 阶段已完成。")
@@ -984,7 +984,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             coding_summary = "检测到连续重复或交替工具空转，保留当前文件并交由验证阶段提供具体修复反馈。"
             graph._emit(state, "coder", "error", coding_summary)
             break
-        if data.get("done"):
+        if data.get("done") is True:
             if action_failed:
                 observations.append("本轮存在失败动作，不能标记完成；请根据观察修复。")
                 continue

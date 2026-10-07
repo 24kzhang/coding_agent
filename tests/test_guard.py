@@ -20,8 +20,8 @@ from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
 from backend.tools import FsTool, ShellTool
 from backend.tools.shell import prepare_command
-from llm import LlmError, ModelStore
-from llm.client import LlmUsage
+from llm import LlmClient, LlmError, ModelStore
+from llm.client import LlmOutputLimitError, LlmUsage
 
 
 def make_graph(tmp_path):
@@ -262,3 +262,45 @@ def test_private_copy_refuses_source_targets_and_ignore_symlinks(tmp_path):
     with pytest.raises(ValueError, match="符号链接"):
         graph.model_store.copy_private("unused", str(work))
     assert outside.read_text() == "用户内容\n"
+
+
+def test_structured_output_limit_recovers_once_with_accounted_usage(tmp_path):
+    graph = make_graph(tmp_path)
+
+    class LimitedClient(LlmClient):
+        def __init__(self):
+            self.cfg = SimpleNamespace(max_output_tokens=16_384, efforts=["low", "minimal"])
+            self.default_effort = "low"
+            self.last_usage = LlmUsage()
+            self.calls = 0
+
+        def chat_json(self, _messages, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                assert kwargs["max_tokens"] == 12_000
+                self.last_usage = LlmUsage(prompt=100, completion=12_000, reasoning=11_900)
+                raise LlmOutputLimitError("输出触顶")
+            assert self.default_effort == "minimal"
+            assert kwargs["max_tokens"] == 16_384
+            self.last_usage = LlmUsage(prompt=100, completion=50)
+            return {"status": "plan", "markdown": "完整计划"}
+
+    state = {"session_id": "s1", "workdir": str(tmp_path / "work")}
+    client = LimitedClient()
+    result = graph._model_json(state, "planner", client, [])
+    assert result["status"] == "plan"
+    assert client.calls == 2
+    assert state["tokens"] == 12_250
+
+
+def test_string_done_cannot_claim_completion(tmp_path):
+    graph = make_graph(tmp_path)
+    replies = iter([
+        {"actions": [], "done": "false"},
+        {"actions": [{"tool": "write_file", "path": "done.py", "content": "ready = True\n"}], "done": True},
+    ])
+    client = SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    graph._client = lambda *_args: client
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建文件"})
+    assert result["coding_ok"]
+    assert (tmp_path / "work/done.py").exists()

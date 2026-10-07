@@ -22,6 +22,10 @@ class LlmBalanceError(LlmError):
     """账户余额或额度明确不足，调用方必须立即停止。"""
 
 
+class LlmOutputLimitError(LlmError):
+    """已付费输出达到上限，但没有产出完整结构化结果。"""
+
+
 @dataclass
 class LlmUsage:
     """统一记录 token 用量，并拆分缓存与推理开销。"""
@@ -735,8 +739,14 @@ class LlmClient:
         if candidate:
             text = candidate
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                raise LlmError("模型 JSON 顶层必须是对象")
+            return parsed
         except json.JSONDecodeError as exc:
+            limit = min(max_tokens or self.cfg.max_output_tokens, self.cfg.max_output_tokens)
+            if self.last_usage.completion >= int(limit * 0.95):
+                raise LlmOutputLimitError("模型输出达到预算上限，未返回完整 JSON") from exc
             # 抛出前带上截断后的模型输出，方便定位 prompt 或模型格式问题。
             raise LlmError(f"模型没有返回合法 JSON：{exc}\n{text[:1000]}") from exc
 
