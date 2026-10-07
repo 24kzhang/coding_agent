@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import PLANNER_PROMPT
 from backend.agents.types import AgentState
+from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError
 
 if TYPE_CHECKING:
@@ -226,6 +227,15 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     # context_text 除结构化任务上下文外，还包含前置 Repo 节点筛选出的真实文件片段。
     # Planner 必须先看 schema/清单等仓库事实，避免按常见项目印象臆造字段和目录。
     context_text = graph._ctx_text(state)
+    # 规划阶段不执行工具，但必须依据执行层同源合同选择路径、格式及参数。
+    context_text += "\n\n执行层工具合同（当前阶段只读，供规划后续操作）：\n" + json.dumps(
+        [{"name": item["name"], "description": item["description"], "parameters": item["parameters"]} for item in tool_specs()],
+        ensure_ascii=False,
+    )
+    context_text += "\n\n可复用模型编号（不包含凭据）：\n" + json.dumps(
+        [{"id": item.id, "model": item.model} for item in graph.model_store.public() if item.enabled],
+        ensure_ascii=False,
+    )
     if state.get("repo"):
         repo_text = json.dumps(state["repo"], ensure_ascii=False)
         context_text += "\n\n仓库事实摘要（字段、路径和 schema 以此为准）：\n" + graph._trim(repo_text, 24_000)

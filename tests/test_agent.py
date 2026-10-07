@@ -367,7 +367,9 @@ def test_planner_places_dynamic_repair_text_after_images(tmp_path, monkeypatch) 
         "input_image",
         "input_text",
     ]
-    assert repair_content[0]["text"] == "稳定任务上下文"
+    assert repair_content[0]["text"] == captured[0][0]["text"]
+    assert repair_content[0]["text"].startswith("稳定任务上下文")
+    assert "目标必须位于交付项目的 .local/" in repair_content[0]["text"]
     assert "待修订计划初稿" in repair_content[-1]["text"]
 
 

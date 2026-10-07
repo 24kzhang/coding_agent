@@ -58,7 +58,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ("run_command", "在工作区运行一个受限命令", {"cmd": string}, ["cmd"], "ask", "write"),
         ("git_status", "读取 Git 工作区状态", {}, [], "allow", "read"),
         ("git_diff", "读取 Git 差异", {}, [], "allow", "read"),
-        ("model_copy", "把指定模型的私密配置安全复制到工作区", {"model_id": string, "target": string}, ["model_id"], "allow", "write"),
+        ("model_copy", "把已配置模型安全复制为 JSON 配置；目标必须位于交付项目的 .local/ 私密目录，默认 .local/model.json。自动写入忽略规则并限制权限；字段包含 id、base_url、model、api_key、protocol、timeout、default_effort，不能选择其他目录或把格式当成 TOML", {"model_id": string, "target": string}, ["model_id"], "allow", "write"),
         ("finish", "所有实现与检查完成后提交中文摘要", {"summary": string}, ["summary"], "allow", "finish"),
     ]
     return [
