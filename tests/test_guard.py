@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from api.schema import ModelConfig
-from backend.agents.coder import coder
+from backend.agents.coder import _is_verification_command, coder
 from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
@@ -482,3 +482,9 @@ def test_reference_markdown_does_not_become_document_write_target(tmp_path):
     assert _document_path(graph, state, fs) == "service/README.md"
     state["text"] = "参考 docs/spec.md，更新 docs/guide.md"
     assert _document_path(graph, state, fs) == "docs/guide.md"
+
+
+def test_module_verification_entrypoints_are_not_confused_with_servers():
+    assert _is_verification_command("uv run --project service python -m package.build")
+    assert _is_verification_command("uv run --project service python -m package.smoke")
+    assert not _is_verification_command("uv run --project service python -m package.server")

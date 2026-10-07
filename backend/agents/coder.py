@@ -259,6 +259,10 @@ def _is_verification_command(command: str) -> bool:
         return True
     if "node" in names and "--check" in argv:
         return True
+    if "-m" in argv:
+        index = argv.index("-m")
+        if index + 1 < len(argv) and argv[index + 1].split(".")[-1] in {"build", "test", "check", "smoke", "lint", "typecheck"}:
+            return True
     return any(re.search(r"(?:^|[-_])(?:test|typecheck|build|smoke|lint|check)(?:[-_]|$)", Path(name).stem) for name in names)
 
 
