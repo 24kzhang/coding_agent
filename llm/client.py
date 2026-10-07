@@ -760,6 +760,9 @@ class LlmClient:
             lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
         # LongCat 偶尔会忽略 JSON 要求，改用其原生工具标签；这里统一转换为现有 ReAct actions。
+        dsml_result = self._parse_dsml_tool_calls(text)
+        if dsml_result:
+            return dsml_result
         longcat_result = self._parse_longcat_tool_calls(text)
         if longcat_result:
             return longcat_result
@@ -778,6 +781,43 @@ class LlmClient:
                 raise LlmOutputLimitError("模型输出达到预算上限，未返回完整 JSON") from exc
             # 抛出前带上截断后的模型输出，方便定位 prompt 或模型格式问题。
             raise LlmError(f"模型没有返回合法 JSON：{exc}\n{text[:1000]}") from exc
+
+    def _parse_dsml_tool_calls(self, text: str) -> dict[str, Any] | None:
+        """把供应商 DSML 工具标记转为同一动作协议，参数正文按语法原样保留。"""
+
+        marker = r"[|｜]+DSML[|｜]+"
+        if not re.match(rf"\s*<{marker}\s*(?:calls|tool_calls)>", text):
+            return None
+        outer = re.fullmatch(rf"\s*<{marker}\s*(calls|tool_calls)>\s*(.*?)\s*</{marker}\s*\1>\s*", text, re.DOTALL)
+        if outer is None:
+            raise LlmError("DSML 工具调用边界不完整，未执行任何动作")
+        calls = re.compile(rf'<{marker}\s*invoke\s+name="([^\"]+)">\s*(.*?)</{marker}\s*invoke>', re.DOTALL)
+        parameters = re.compile(rf'<{marker}\s*parameter\s+name="([^\"]+)"(?:\s+string="(true|false)")?>(.*?)</{marker}\s*parameter>', re.DOTALL)
+        actions: list[dict[str, Any]] = []
+        body = outer.group(2)
+        if calls.sub("", body).strip():
+            raise LlmError("DSML 工具调用含无法解析的内容，未执行任何动作")
+        for call in calls.finditer(body):
+            name, arguments_text = call.groups()
+            if parameters.sub("", arguments_text).strip():
+                raise LlmError("DSML 工具参数边界不完整，未执行任何动作")
+            arguments: dict[str, Any] = {}
+            for parameter in parameters.finditer(arguments_text):
+                key, is_string, raw = parameter.groups()
+                if key in arguments:
+                    raise LlmError("DSML 工具参数重复，未执行任何动作")
+                if is_string == "false":
+                    try:
+                        value = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        raise LlmError("DSML 非字符串参数不是合法 JSON") from exc
+                else:
+                    value = raw
+                arguments[key] = value
+            actions.append(self._native_action(name, arguments))
+        if not actions:
+            raise LlmError("DSML 没有包含有效工具动作")
+        return self._tool_result(actions, "")
 
     def _parse_longcat_tool_calls(self, text: str) -> dict[str, Any] | None:
         """把 LongCat 原生工具标签转换为项目统一的 ReAct JSON。"""

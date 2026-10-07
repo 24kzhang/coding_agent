@@ -530,3 +530,26 @@ def test_project_python_rejects_borrowed_host_test_runner(tmp_path, monkeypatch)
     isolated = shell.run("uv run --project service python -m pytest -q service/tests")
     assert not isolated["ok"]
     assert "No module named pytest" in isolated["err"]
+
+
+@pytest.mark.parametrize("marker,container,space", [("｜DSML｜", "calls", " "), ("｜｜DSML｜｜", "calls", " "), ("|DSML|", "tool_calls", "")])
+def test_dsml_variants_preserve_source_and_typed_arguments(marker, container, space):
+    client = LlmClient(ModelConfig(id="generic", name="测试", base_url="https://example.test", api_key="假密钥", model="generic"))
+    content = "  value = '&lt;'\n\n"
+    text = f'<{marker}{space}{container}>\n<{marker}{space}invoke name="write_file">\n<{marker}{space}parameter name="path" string="true">service/main.py</{marker}{space}parameter>\n<{marker}{space}parameter name="content" string="true">{content}</{marker}{space}parameter>\n</{marker}{space}invoke>\n<{marker}{space}invoke name="read_file">\n<{marker}{space}parameter name="path" string="true">service/main.py</{marker}{space}parameter>\n<{marker}{space}parameter name="start" string="false">12</{marker}{space}parameter>\n</{marker}{space}invoke>\n</{marker}{space}{container}>'
+    client.chat = lambda *_args, **_kwargs: text
+    result = client.chat_json([], plain_text=True)
+    assert result["actions"][0]["content"] == content
+    assert result["actions"][1]["start"] == 12
+    assert result["done"] is False
+
+
+def test_dsml_truncated_batch_duplicate_parameters_and_prose_do_not_execute():
+    client = LlmClient(ModelConfig(id="generic", name="测试", base_url="https://example.test", api_key="假密钥", model="generic"))
+    call = '<｜DSML｜ invoke name="read_file"><｜DSML｜ parameter name="path" string="true">main.py</｜DSML｜ parameter></｜DSML｜ invoke>'
+    with pytest.raises(LlmError, match="边界不完整"):
+        client._parse_dsml_tool_calls('<｜DSML｜ calls>' + call)
+    duplicate = call.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="path" string="true">other.py</｜DSML｜ parameter></｜DSML｜ invoke>')
+    with pytest.raises(LlmError, match="参数重复"):
+        client._parse_dsml_tool_calls('<｜DSML｜ calls>' + duplicate + '</｜DSML｜ calls>')
+    assert client._parse_dsml_tool_calls('示例：<｜DSML｜ calls>' + call + '</｜DSML｜ calls>') is None

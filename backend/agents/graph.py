@@ -1651,6 +1651,9 @@ class AgentGraph:
             except json.JSONDecodeError:
                 parser = getattr(client, "_parse_longcat_tool_calls", None)
                 parsed = parser(candidate) if callable(parser) else None
+                if parsed is None:
+                    parser = getattr(client, "_parse_dsml_tool_calls", None)
+                    parsed = parser(candidate) if callable(parser) else None
                 if isinstance(parsed, dict):
                     data = parsed
             actions = [
