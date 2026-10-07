@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from api.schema import ModelConfig
-from backend.agents.coder import _is_verification_command, coder
+from backend.agents.coder import _guidance_forbids_reads, _is_verification_command, coder
 from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
@@ -585,3 +585,9 @@ def test_inline_modal_styles_are_valid_and_input_pages_are_not_delivery_checks(t
     graph._ctx_text = lambda *_args: "只检查交付目录"
     result = verifier(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "所有项目文件必须使用 `portal/...` 相对路径"})
     assert result["tests_ok"]
+
+
+def test_latest_explicit_read_permission_overrides_earlier_stop():
+    assert _guidance_forbids_reads({"original_text": "不要再搜索或读取，直接实现"})
+    assert not _guidance_forbids_reads({"guidance": ["不要再读取", "允许读取失败涉及的文件"]})
+    assert _guidance_forbids_reads({"guidance": ["允许读取文件", "不要再搜索或读取"]})

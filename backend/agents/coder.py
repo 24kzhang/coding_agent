@@ -215,17 +215,19 @@ def _is_inspection_command(command: str) -> bool:
 def _guidance_forbids_reads(state: AgentState) -> bool:
     """用户明确要求停止读取或搜索后，由权限层阻止模型继续空转。"""
 
-    latest = "\n".join(str(item) for item in (state.get("guidance") or [])[-3:])
-    return any(
-        marker in latest
-        for marker in (
+    sources = [str(state.get("original_text") or ""), *(str(item) for item in (state.get("guidance") or []))]
+    for latest in reversed(sources):
+        if any(marker in latest for marker in (
             "不要再搜索或读取",
             "停止继续读取",
             "禁止继续读取",
             "不要再读取",
             "不要再搜索",
-        )
-    )
+        )):
+            return True
+        if any(marker in latest for marker in ("允许读取", "恢复读取", "可以继续读取", "允许搜索")):
+            return False
+    return False
 
 
 def _is_dependency_mutation_command(command: str) -> bool:
