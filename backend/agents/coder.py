@@ -976,6 +976,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             ):
                 switched_this_step = True
                 break
+            if not observation.get("ok"):
+                observations.append("本批工具出现失败，已停止剩余动作；下一轮必须先处理该失败再继续。")
+                break
         if switched_this_step:
             continue
         for mutated_path in mutated_paths:

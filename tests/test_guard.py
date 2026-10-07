@@ -33,6 +33,20 @@ def make_graph(tmp_path):
     return AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
 
+def test_failed_tool_aborts_remaining_actions_before_replanning(tmp_path):
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    replies = iter([
+        {"actions": [{"tool": "read_file", "path": "missing.py"}, {"tool": "write_file", "path": "unexpected.py", "content": "bad = True"}]},
+        {"actions": [{"tool": "write_file", "path": "done.py", "content": "ready = True"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建通用入口"})
+    assert result["coding_ok"] is True
+    assert not (work / "unexpected.py").exists()
+    assert (work / "done.py").exists()
+
+
 @pytest.mark.parametrize("project", ["portal", "service"])
 def test_delivery_directory_drives_script_cwd_without_losing_workspace_inputs(tmp_path, project):
     graph = make_graph(tmp_path)
