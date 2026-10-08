@@ -66,7 +66,8 @@ def test_missing_delivery_file_is_not_fabricated_as_a_read_snapshot(tmp_path):
     assert (work / "README.md").read_text() == "# 使用说明"
     fs = FsTool(str(work))
     result = graph._do_action({"tool": "read_file", "path": ".local/unknown.json"}, fs, ShellTool(str(work)), GitTool(str(work)))
-    assert result["ok"] is False
+    assert result["ok"] and result["content_available"] is False
+    assert result["exists"] is False
 
 
 def test_same_batch_can_append_and_precisely_edit_its_new_file(tmp_path):
@@ -85,6 +86,34 @@ def test_same_batch_can_append_and_precisely_edit_its_new_file(tmp_path):
     assert result["coding_ok"] is True
     assert (work / "portal/style.css").read_text() == ".card { color: green; }\n.panel { display: grid; }\n"
     assert not any(event.get("ok") is False for event in events)
+
+
+def test_private_metadata_never_becomes_content_or_writable_snapshot(tmp_path):
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    private = work / ".local/model.json"
+    private.parent.mkdir(parents=True)
+    secret = "测试私密值不可公开"
+    private.write_text(json.dumps({"api_key": secret, "model": "私密字段值"}))
+    fs = FsTool(str(work))
+    result = graph._do_action({"tool": "read_file", "path": ".local/model.json"}, fs, ShellTool(str(work)), GitTool(str(work)))
+    assert result["ok"] and result["exists"] and result["content_available"] is False
+    assert secret not in str(result) and "私密字段值" not in str(result)
+    assert fs.last_reads == {}
+    with pytest.raises(ValueError, match="敏感"):
+        fs.read(".local/model.json")
+    assert not graph._do_action({"tool": "write_file", "path": ".local/model.json", "content": "覆盖"}, fs, ShellTool(str(work)), GitTool(str(work)))["ok"]
+    calls = []
+    def reply(messages, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"actions": [{"tool": "read_file", "path": ".local/model.json"}]}
+        prompt = str(messages[-1]["content"])
+        assert secret not in prompt and "[.local/model.json 当前内容" not in prompt
+        assert "已读取且当前可直接修改的文件：无" in prompt
+        return {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}], "done": True}
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    assert coder(graph, {"session_id": "s1", "workdir": str(work), "text": "生成入口"})["coding_ok"]
 
 
 @pytest.mark.parametrize("repair", [True, False])

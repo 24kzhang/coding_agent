@@ -1381,6 +1381,14 @@ class AgentGraph:
                 start = int(action.get("start", 0))
                 max_chars = int(action.get("max_chars", 12000))
                 target = fs.safe(rel)
+                if fs.is_sensitive(target):
+                    # 私密正文始终不可读取；安全元信息是正常分支，不伪装成空文件或读取快照。
+                    fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort"] if target.name == "model.json" else []
+                    return {"ok": True, "exists": target.exists(), "content_available": False,
+                            "sensitive": True, "path": rel, "status": "metadata_only",
+                            "expected_model_fields": fields,
+                            "text": f"私密文件安全元信息：{rel}；存在={target.exists()}。正文和凭据不提供，不能作为已读取内容修改。"
+                            + ("受控 model_copy 格式的字段名（不是文件正文）：" + "、".join(fields) + "。真实配置只能通过 model_copy 生成，应用运行时读取。" if fields else "")}
                 if not target.exists() and not fs.is_sensitive(target):
                     return {"ok": True, "exists": False, "path": rel,
                             "text": f"文件尚不存在：{rel}；未读取到任何内容，不等同于空文件。若是新增交付物可用 write_file 创建；若是用户提供的输入，应先核对原路径，不得伪造数据。"}

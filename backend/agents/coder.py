@@ -940,7 +940,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
-            if observation.get("ok") and not observation.get("cached") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
+            if observation.get("ok") and observation.get("content_available") is not False and not observation.get("cached") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
                 diagnostic_progress = True
             if observation.get("ok") and tool == "search_files":
                 hits = [json.dumps(hit, ensure_ascii=False, sort_keys=True) for hit in observation.get("hits", [])]
@@ -950,12 +950,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     search_cache[signature] = observation
             if not observation.get("cached"):
                 seen_actions.add(signature)
-            if observation.get("ok") and tool == "read_file" and observation.get("exists") is not False:
+            if observation.get("ok") and observation.get("content_available") is not False and tool == "read_file" and observation.get("exists") is not False:
                 read_cache[signature] = {**observation, "read": dict(observation.get("read") or {})}
                 if len(read_cache) > 24:
                     read_cache.pop(next(iter(read_cache)))
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
-            if tool == "read_file" and observation.get("ok") and observation.get("exists") is not False and path:
+            if tool == "read_file" and observation.get("ok") and observation.get("content_available") is not False and observation.get("exists") is not False and path:
                 marker = "\n"
                 raw_text = str(observation["text"])
                 file_observations.pop(path, None)
@@ -1016,7 +1016,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         addressed_failure_paths,
                         passed_failure_commands,
                     )
-                if tool == "read_file" and observation.get("exists") is not False and path:
+                if tool == "read_file" and observation.get("content_available") is not False and observation.get("exists") is not False and path:
                     read_paths.add(path)
                 elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
                     successful_verification_commands.clear()
