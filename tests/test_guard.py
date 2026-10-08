@@ -208,6 +208,29 @@ def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypa
         assert calls == ["primary", "backup"]
 
 
+@pytest.mark.parametrize("selected", [False, True])
+def test_optional_mcp_unavailability_does_not_become_required_failure(tmp_path, selected):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+
+    class Unavailable:
+        calls = 0
+
+        def list_tools(self, *_args):
+            self.calls += 1
+            raise RuntimeError("服务暂不可用")
+
+    client = Unavailable()
+    graph.mcp_client = client
+    state = {"session_id": "s1", "workdir": str(tmp_path / "work"), "required_mcps": ["addon"] if selected else [],
+             "mcp_servers": [{"id": "addon", "name": "可选扩展", "always_on": True, "transport": "streamable_http", "url": "https://example.test/mcp"}]}
+    assert graph._ensure_mcp_tools(state) == []
+    assert graph._ensure_mcp_tools(state) == []
+    assert client.calls == 1
+    assert bool(state["mcp_errors"])
+    assert events[0].kind == ("error" if selected else "capability")
+
+
 def test_plan_checks_actual_field_section_after_image_description(tmp_path):
     """商品详情的完整字段合同可以位于图像解读之后，不依赖固定措辞。"""
 

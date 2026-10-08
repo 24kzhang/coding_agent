@@ -504,6 +504,7 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 mcp_servers=[item.model_dump() for item in mcp_configs],
                 container_shell=req.container_shell,
                 attachments=attachments,
+                required_mcps=req.mcps,
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "done", "本轮任务正常结束")
             active_run.publish({"type": "result", "data": result.model_dump()})

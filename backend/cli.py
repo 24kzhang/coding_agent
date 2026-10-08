@@ -108,6 +108,7 @@ def main() -> None:
             resuming=resuming,
             skills=skills,
             mcp_servers=[item.model_dump() for item in mcp_servers],
+            required_mcps=args.mcp,
         )
     except Exception as exc:
         memory.append(workdir, session_id, "manager", "run", "error", f"本轮任务失败：{exc}")

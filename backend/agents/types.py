@@ -40,6 +40,7 @@ class AgentState(TypedDict, total=False):
     skills: list[SkillContext]
     # mcp_servers 是用户本轮手动选择的 MCP 服务配置，不向前端或模型暴露密钥字段。
     mcp_servers: list[dict[str, Any]]
+    required_mcps: list[str]
     # mcp_tools 是连接所选 MCP 后通过 tools/list 发现的动态工具定义。
     mcp_tools: list[dict[str, Any]]
     # mcp_errors 保存 MCP 服务初始化失败摘要，答疑和 Coding 模型都可据此返回真实状态。

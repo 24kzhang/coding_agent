@@ -98,6 +98,7 @@ class AgentGraph:
         mcp_servers: list[dict[str, Any]] | None = None,
         container_shell: bool = False,
         attachments: list[dict[str, Any]] | None = None,
+        required_mcps: list[str] | None = None,
     ) -> TaskResult:
         """运行一次用户任务，并返回最终 TaskResult。"""
 
@@ -131,6 +132,7 @@ class AgentGraph:
             "skills": list(skills or []),
             # mcp_servers 已在 HTTP 层按配置白名单校验，工具发现仍会再次绑定服务 id。
             "mcp_servers": list(mcp_servers or []),
+            "required_mcps": list(required_mcps) if required_mcps is not None else [str(item.get("id")) for item in (mcp_servers or []) if not item.get("always_on")],
             # mcp_tools 在 Coding 首次执行时通过 tools/list 懒加载。
             "mcp_tools": [],
             # mcp_errors 保存初始化失败摘要，使模型不会反复尝试不存在的动态工具。
@@ -1483,7 +1485,11 @@ class AgentGraph:
                 server_id = str(raw_config.get("id") or "未命名") if isinstance(raw_config, dict) else "未命名"
                 error = f"MCP「{server_id}」连接失败：{self._trim(str(exc), 240)}"
                 errors.append(error)
-                self._emit(state, "mcp", "error", error)
+                optional = bool(config and config.always_on and server_id not in state.get("required_mcps", []))
+                if optional:
+                    self._emit(state, "mcp", "capability", f"可选扩展「{server_id}」暂不可用，本轮不提供其工具；其余流程可继续", data={"status": "unavailable", "optional": True})
+                else:
+                    self._emit(state, "mcp", "error", error)
             finally:
                 if config is not None and (not shared_only or config.shared):
                     discovered.add(config.id)
