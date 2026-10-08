@@ -1378,10 +1378,15 @@ class AgentGraph:
                 # start/max_chars 支持读取大文件的后续片段。
                 start = int(action.get("start", 0))
                 max_chars = int(action.get("max_chars", 12000))
+                target = fs.safe(rel)
+                if not target.exists() and not fs.is_sensitive(target):
+                    return {"ok": True, "exists": False, "path": rel,
+                            "text": f"文件尚不存在：{rel}；未读取到任何内容，不等同于空文件。若是新增交付物可用 write_file 创建；若是用户提供的输入，应先核对原路径，不得伪造数据。"}
                 content = fs.read(rel, max_chars, start)
                 metadata = fs.last_reads[rel]
                 return {
                     "ok": True,
+                    "exists": True,
                     "text": f"读取文件：{rel}（从字符 {start} 开始，共 {metadata['total_chars']} 字符，完整={metadata['complete']}）\n{content}",
                     "read": metadata,
                 }

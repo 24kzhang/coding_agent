@@ -37,7 +37,7 @@ def test_failed_tool_aborts_remaining_actions_before_replanning(tmp_path):
     graph = make_graph(tmp_path)
     work = tmp_path / "work"
     replies = iter([
-        {"actions": [{"tool": "read_file", "path": "missing.py"}, {"tool": "write_file", "path": "unexpected.py", "content": "bad = True"}]},
+        {"actions": [{"tool": "read_file", "path": "../../outside.py"}, {"tool": "write_file", "path": "unexpected.py", "content": "bad = True"}]},
         {"actions": [{"tool": "write_file", "path": "done.py", "content": "ready = True"}], "done": True},
     ])
     graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
@@ -45,6 +45,28 @@ def test_failed_tool_aborts_remaining_actions_before_replanning(tmp_path):
     assert result["coding_ok"] is True
     assert not (work / "unexpected.py").exists()
     assert (work / "done.py").exists()
+
+
+def test_missing_delivery_file_is_not_fabricated_as_a_read_snapshot(tmp_path):
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    calls = []
+
+    def reply(messages, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"actions": [{"tool": "read_file", "path": "README.md"}]}
+        prompt = str(messages[-1]["content"])
+        assert "文件尚不存在" in prompt
+        assert "[README.md 当前内容" not in prompt
+        return {"actions": [{"tool": "write_file", "path": "README.md", "content": "# 使用说明"}], "done": True}
+
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    assert coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建使用说明"})["coding_ok"]
+    assert (work / "README.md").read_text() == "# 使用说明"
+    fs = FsTool(str(work))
+    result = graph._do_action({"tool": "read_file", "path": ".local/unknown.json"}, fs, ShellTool(str(work)), GitTool(str(work)))
+    assert result["ok"] is False
 
 
 def test_distinct_integration_reads_do_not_end_unfinished_coding(tmp_path):
