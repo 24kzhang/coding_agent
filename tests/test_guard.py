@@ -19,7 +19,7 @@ from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
 from backend.agents.planner import _plan_quality_issues, _schema_fields, _semantic_plan_issues
-from backend.agents.precheck import import_issues, inline_issues, manifest_issues
+from backend.agents.precheck import import_issues, inline_issues, manifest_issues, server_issues
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
@@ -184,6 +184,25 @@ def test_inline_request_becomes_script_workflow_before_shell(tmp_path):
     assert inline_issues("uv run python -c 'print(1)'")
     assert inline_issues("python3.13 -c 'print(1)'")
     assert inline_issues("python3 probe.py") == []
+
+
+def test_server_command_is_deferred_until_bounded_smoke_script(tmp_path):
+    graph = make_graph(tmp_path)
+    replies = iter([
+        {"actions": [{"tool": "run_command", "cmd": "uv run --directory portal python -m uvicorn core.main:app --port 9012"}], "done": True},
+        {"actions": [{"tool": "write_file", "path": "probe.py", "content": "print('启动与关闭已由脚本管理')\n"},
+                     {"tool": "run_command", "cmd": "python probe.py"}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    commands = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: commands.append(command) or {"cmd": command, "ok": True, "code": 0, "out": "已关闭", "err": ""})
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "真实启动并验收", "task_type": "code_gen"})
+    assert result["coding_ok"] and commands == ["python probe.py"]
+    assert server_issues("uv run --with uvicorn python probe.py") == []
+    assert server_issues("uv run --directory portal uvicorn core.main:app")
+    assert server_issues("uvicorn --help") == []
 
 
 def test_proven_import_conflict_cannot_run_tests_or_finish_before_repair(tmp_path, monkeypatch):

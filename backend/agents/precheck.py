@@ -27,6 +27,32 @@ def inline_issues(command: str) -> list[str]:
     return []
 
 
+def server_issues(command: str) -> list[str]:
+    """有限命令工具不能等待已知常驻服务退出，启动烟测由脚本管理生命周期。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return []
+    if not argv or any(flag in argv for flag in {"--help", "--version", "--daemon", "-D"}):
+        return []
+    names = [Path(value).name.lower() for value in argv]
+    servers = {"uvicorn", "gunicorn", "hypercorn"}
+    running = names[0] in servers
+    for index, value in enumerate(argv[:-1]):
+        if value == "-m" and argv[index + 1] in servers | {"http.server"}:
+            running = running or any(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?(?:\.exe)?", name) for name in names[:index])
+    if names[0] == "uv" and "run" in argv:
+        tail = argv[argv.index("run") + 1:]
+        valued = {"--directory", "--project", "--python", "--with", "--group", "--package", "--env-file", "--config-file", "--cache-dir"}
+        while tail and tail[0].startswith("-"):
+            tail = tail[2:] if tail[0] in valued else tail[1:]
+        running = running or bool(tail and Path(tail[0]).name.lower() in servers)
+    if running:
+        return ["常驻服务命令尚未执行：run_command 必须有限结束。请在烟测脚本中用 subprocess.Popen 启动服务、轮询 HTTP 就绪、完成真实检查，并在 finally 中终止和等待子进程；再以单独命令运行这个脚本。不要直接等待 uvicorn/gunicorn/hypercorn 退出，也不要使用 &/nohup 绕过生命周期管理。"]
+    return []
+
+
 def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     """在 uv 触发项目构建前核对公开元数据文件与显式包目录。"""
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.agents.loop import LoopGuard
-from backend.agents.precheck import import_issues, inline_issues, manifest_issues
+from backend.agents.precheck import import_issues, inline_issues, manifest_issues, server_issues
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
@@ -944,6 +944,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         graph._emit(state, "coder", "review", code_issues[0])
                         break
                     if preflight_kind == "inline":
+                        preflight_issues, preflight_kind = [], ""
+                    service_issues = server_issues(str(action.get("cmd", "")))
+                    if service_issues:
+                        diagnostic_progress = diagnostic_progress or service_issues != preflight_issues
+                        preflight_issues, preflight_kind = service_issues, "server"
+                        observations.extend(service_issues)
+                        graph._emit(state, "coder", "review", service_issues[0])
+                        break
+                    if preflight_kind == "server":
                         preflight_issues, preflight_kind = [], ""
                 if tool == "run_command" and changes and isinstance(client, LlmClient) and state.get("task_type") in {"code_gen", "code_mod"}:
                     metadata_issues = manifest_issues(fs, state, str(action.get("cmd", "")))
