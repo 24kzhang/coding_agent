@@ -151,6 +151,17 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         if excluded:
             issues.append("完整详情合同明确排除了原始字段：" + "、".join(excluded)
                           + "；禁止加载资源不等于删除字段，其原始值仍可作为文本展示")
+        hidden = []
+        for field in fields:
+            for line in markdown.splitlines():
+                if (_mentions_field(line, field) and re.search(r"前端|页面|左侧|左栏", line)
+                        and re.search(r"(?:不|不得|禁止)(?:渲染|展示|显示)", line)
+                        and not re.search(r"文本|字符串|字段值|路径值", line)):
+                    hidden.append(field)
+                    break
+        if hidden:
+            issues.append("完整详情界面仍明确隐藏原始字段：" + "、".join(hidden)
+                          + "；仅在 API 响应保留不等于展示完整信息，应明确区分资源加载与字段值的文本展示")
 
     data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
     if data_site:

@@ -370,6 +370,9 @@ def test_complete_contract_rejects_field_exclusion_despite_complete_claim(tmp_pa
     issues = _plan_quality_issues(graph, state, base + "`thumb` 接口不返回，仅用于校验。全部 2 个字段。")
     assert any("数量" in issue for issue in issues)
     assert any("明确排除" in issue and "thumb" in issue for issue in issues)
+    issues = _plan_quality_issues(graph, state, base + "前端不渲染 `thumb`，只在响应保留。")
+    assert any("界面" in issue and "thumb" in issue for issue in issues)
+    assert _plan_quality_issues(graph, state, base + "前端不渲染 `thumb` 图片，但字段值作为文本展示。") == []
 
 
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
