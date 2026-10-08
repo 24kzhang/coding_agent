@@ -1591,6 +1591,15 @@ class AgentGraph:
                         conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
                         self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
                         continue
+                transient = any(marker in str(exc) for marker in ("模型响应超时", "响应超时", "连接失败", "ConnectTimeout", "ReadTimeout", "错误 429", "错误 500", "错误 502", "错误 503", "错误 504"))
+                if transient and isinstance(client, LlmClient) and not isinstance(exc, LlmBalanceError) and not state.get("model_id"):
+                    failed_models.add(client.cfg.id)
+                    next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
+                    if next_cfg is not None:
+                        client = LlmClient(next_cfg)
+                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+                        self._emit(state, agent, "model", f"结构化节点服务暂时不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "transient_failover"})
+                        continue
                 raise
             self._add_tokens(state, client.last_usage)
             actions = [

@@ -179,6 +179,35 @@ def test_structured_node_fails_over_after_exhausted_recovery_unless_explicit(tmp
         assert state["output_tokens"] == 18_050
 
 
+@pytest.mark.parametrize("balance", [False, True])
+def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypatch, balance):
+    graph = make_graph(tmp_path)
+    for name in ("primary", "backup"):
+        graph.model_store.upsert(ModelConfig(id=name, name="测试模型", model=name, base_url="https://example.test", api_key="TEST_ONLY_KEY"))
+    calls = []
+
+    class Client(LlmClient):
+        def chat_json(self, _messages, **_kwargs):
+            calls.append(self.cfg.id)
+            if self.cfg.id == "primary":
+                if balance:
+                    raise LlmBalanceError("模型账户余额不足")
+                raise LlmError("模型响应超时")
+            self.last_usage = LlmUsage(prompt=10, completion=50)
+            return {"ok": True}
+
+    monkeypatch.setattr("backend.agents.graph.LlmClient", Client)
+    state = {"session_id": "s1", "workdir": str(tmp_path / "work")}
+    client = Client(graph.model_store.get("primary"))
+    if balance:
+        with pytest.raises(LlmBalanceError):
+            graph._model_json(state, "verifier", client, [])
+        assert calls == ["primary"]
+    else:
+        assert graph._model_json(state, "verifier", client, [])["ok"] is True
+        assert calls == ["primary", "backup"]
+
+
 def test_plan_checks_actual_field_section_after_image_description(tmp_path):
     """商品详情的完整字段合同可以位于图像解读之后，不依赖固定措辞。"""
 
