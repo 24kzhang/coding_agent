@@ -673,6 +673,20 @@ def test_nested_private_copy_stays_in_project_and_reports_companion_file(tmp_pat
     assert (fs.root / "service/.gitignore").read_text() == ".local/\n"
 
 
+def test_private_copy_resolves_unique_name_and_rejects_ambiguous_alias(tmp_path):
+    store = ModelStore(tmp_path / "models.json")
+    store.upsert(ModelConfig(id="service-a", name="服务甲", base_url="https://example.test", api_key="假密钥", model="generic-model"))
+    work = tmp_path / "work"
+    work.mkdir()
+    for alias in ["service-a", "服务甲", "generic-model"]:
+        path = store.copy_private(alias, str(work))
+        assert json.loads(path.read_text())["id"] == "service-a"
+    store.upsert(ModelConfig(id="service-b", name="服务乙", base_url="https://other.test", api_key="假密钥", model="generic-model"))
+    with pytest.raises(ValueError, match="唯一"):
+        store.copy_private("generic-model", str(work))
+    assert json.loads(store.copy_private("service-a", str(work)).read_text())["id"] == "service-a"
+
+
 def test_document_node_preserves_verified_nested_readme_without_model_call(tmp_path):
     graph = make_graph(tmp_path)
     fs = FsTool(str(tmp_path / "work"))

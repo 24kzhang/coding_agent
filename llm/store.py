@@ -257,7 +257,14 @@ class ModelStore:
         ignore = project_root / ".gitignore"
         if ignore.is_symlink():
             raise ValueError("不能通过符号链接修改忽略配置")
-        cfg = self.get(model_id)
+        # 模型工具同时接受配置标识与唯一名称；同名的不同服务配置必须由调用者明确选择。
+        configured = self.all()
+        cfg = next((item for item in configured if item.id == model_id), None)
+        if cfg is None:
+            matches = [item for item in configured if item.enabled and model_id in {item.model, item.name}]
+            if len(matches) != 1:
+                raise ValueError("模型名称未唯一匹配配置，请使用配置 ID")
+            cfg = matches[0]
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(destination.parent, 0o700)
         payload = {
