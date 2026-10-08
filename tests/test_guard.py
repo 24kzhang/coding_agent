@@ -871,7 +871,7 @@ def test_cached_discovery_and_segment_reads_preserve_current_version(tmp_path, c
         if len(calls) == 4 and changed:
             (work / "main.py").write_text("fresh = True\n")
         return {"actions": [{"tool": "list_files"}, {"tool": "run_command", "cmd": "ls"},
-                            {"tool": "read_file", "path": "main.py", "start": 0, "max_chars": 5}],
+                            {"tool": "read_file", "path": "main.py", "start": 1, "max_chars": 5}],
                 "done": len(calls) == 4}
     graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
     result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建入口", "repo": {"files": []}})
@@ -881,7 +881,7 @@ def test_cached_discovery_and_segment_reads_preserve_current_version(tmp_path, c
     reads = [tool for tool in tools if tool.get("tool") == "read_file"]
     assert reads[-1].get("cached", False) is not changed
     assert reads[-1]["read"]["complete"] is False
-    assert reads[-1]["text"].endswith("fresh" if changed else "ready")
+    assert reads[-1]["text"].endswith("resh " if changed else "eady ")
 
 
 def test_read_cache_refreshes_visibility_after_context_eviction(tmp_path, monkeypatch):
