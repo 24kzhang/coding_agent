@@ -141,6 +141,21 @@ def test_delivery_path_quotes_and_symlinks_are_checked(tmp_path):
         delivery_root(fs, {"text": "项目输出到 portal"})
 
 
+def test_project_relative_file_paths_preserve_delivery_boundary_and_inputs(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("catalog.json", "只读输入")
+    state = {"text": "项目输出到 portal"}
+    shell, git = ShellTool(str(fs.root)), GitTool(str(fs.root))
+    result = graph._do_action({"tool": "write_file", "path": "main.py", "content": "ready = True\n"}, fs, shell, git, state)
+    assert result["ok"]
+    assert result["file"] == "portal/main.py"
+    assert not (fs.root / "main.py").exists()
+    assert graph._do_action({"tool": "read_file", "path": "main.py"}, fs, shell, git, state)["exists"]
+    assert "只读输入" in graph._do_action({"tool": "read_file", "path": "catalog.json"}, fs, shell, git, state)["text"]
+    assert not graph._do_action({"tool": "write_file", "path": "../outside.py", "content": "bad"}, fs, shell, git, state)["ok"]
+
+
 def test_plan_semantic_review_preserves_real_conflicts_and_tool_contracts(tmp_path, monkeypatch):
     """跨步骤合同矛盾进入修订反馈，不通过固定业务规则选择架构。"""
 

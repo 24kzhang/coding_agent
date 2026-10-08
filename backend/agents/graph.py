@@ -29,7 +29,7 @@ from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
-from backend.tools.scope import command_cwd, delivery_root, require_delivery_path
+from backend.tools.scope import command_cwd, delivery_root, require_delivery_path, tool_path
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError
@@ -1306,6 +1306,8 @@ class AgentGraph:
         # tool 是模型请求调用的工具名称。
         tool = action.get("tool")
         try:
+            if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
+                action = {**action, "path": tool_path(fs, state or {}, str(action["path"]), write=tool != "read_file")}
             if isinstance(tool, str) and tool.startswith("mcp__"):
                 return self._call_mcp_action(action, state or {})
             # required 保存每种工具不可缺少的参数。先做协议校验，避免把 KeyError('path')

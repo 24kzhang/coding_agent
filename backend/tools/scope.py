@@ -7,13 +7,14 @@ from typing import Any
 
 from backend.tools.fs import FsTool
 
+PREFIX_RULE = re.compile(
+    r"(?:所有|全部)(?:项目|输出|交付|新增|生成)?文件(?:必须|只能|统一|应当)?(?:使用|写入|放在)\s*[`“\"]?([\w./-]+)/\.\.\."
+)
 
 def delivery_root(fs: FsTool, state: dict[str, Any]) -> Path:
     """读取任务明确声明的统一交付前缀，输入文件仍可留在父工作区。"""
 
-    pattern = re.compile(
-        r"(?:所有|全部)(?:项目|输出|交付|新增|生成)?文件(?:必须|只能|统一|应当)?(?:使用|写入|放在)\s*[`“\"]?([\w./-]+)/\.\.\."
-    )
+    pattern = PREFIX_RULE
     texts = [str(state.get("text") or ""), *(str(item) for item in state.get("guidance", []))]
     selected: str | None = None
     for text in texts:
@@ -26,6 +27,24 @@ def delivery_root(fs: FsTool, state: dict[str, Any]) -> Path:
         if declared:
             selected = next(value for value in declared.groups() if value is not None).rstrip("/")
     return fs.safe(selected) if selected else fs.root
+
+
+def tool_path(fs: FsTool, state: dict[str, Any], rel: str, *, write: bool) -> str:
+    """普通交付目录支持项目相对路径，明确参数前缀约束保持严格。"""
+
+    output = delivery_root(fs, state)
+    if output == fs.root or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        return rel
+    texts = [str(state.get("text") or ""), *(str(value) for value in state.get("guidance", []))]
+    if any(PREFIX_RULE.search(text) for text in texts):
+        return rel
+    prefix = output.relative_to(fs.root).as_posix()
+    if rel == prefix or rel.startswith(prefix + "/"):
+        return rel
+    target = output / rel
+    if write or target.exists() or not fs.safe(rel).exists():
+        return target.relative_to(fs.root).as_posix()
+    return rel
 
 
 def command_cwd(fs: FsTool, state: dict[str, Any], command: str) -> Path:

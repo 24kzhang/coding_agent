@@ -12,7 +12,7 @@ from backend.agents.loop import LoopGuard
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.tools import FsTool, GitTool, tool_specs
-from backend.tools.scope import delivery_root
+from backend.tools.scope import delivery_root, tool_path
 from llm import LlmBalanceError, LlmClient, LlmError
 from llm.client import LlmOutputLimitError
 
@@ -553,7 +553,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 else ""
             )
             + "若目标文件出现在“已读取且当前可直接修改”列表，禁止再次 read_file；短改动直接 replace_file，长函数直接 replace_block。\n"
-            + f"文件工具基准工作区：{fs.root}；默认命令工作目录为交付根目录：{delivery_root(fs, state)}。\n"
+            + f"输入工作区：{fs.root}；新增文件和项目命令默认交付根目录：{delivery_root(fs, state)}。\n"
             + "项目命令直接使用相对交付目录的路径；明确使用工作区交付前缀或 --project 前缀的命令会在父工作区执行。禁止 cd 或复合 shell 语法。\n"
             + "每轮最多返回 3 个紧密相关动作；修复轮次优先修改失败清单中的文件并运行对应测试。\n\n"
             + (
@@ -802,6 +802,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             step_signatures.append(signature)
             tool = str(action.get("tool") or "")
+            if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
+                action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
             inspection_command = tool == "run_command" and _is_inspection_command(
                 str(action.get("cmd", ""))

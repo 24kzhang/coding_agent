@@ -7,7 +7,7 @@ def tool_specs() -> list[dict[str, Any]]:
     """返回 Coding 原生函数工具及其本地执行策略。"""
 
     string = {"type": "string"}
-    public_path = {"type": "string", "description": "相对工作区的普通文本路径；不可读写 .local/、.env、.ssh/、.aws/ 等私密内容。公开配置示例放普通项目目录，真实配置通过 model_copy。"}
+    public_path = {"type": "string", "description": "普通文本路径；有交付目录时新增文件可用项目相对路径，也可明确带交付前缀。输入文件按实际工作区路径读取。若用户明确要求参数前缀必须遵守。不可读写 .local/、.env、.ssh/、.aws/，真实配置通过 model_copy。"}
     # 原生函数参数同样计入模型输出。限制单次正文大小，避免模型把多个大文件塞进
     # 一次响应后在输出上限处截断，造成整批 JSON 无法解析和重复计费。
     short_text = {"type": "string", "maxLength": 10_000}
