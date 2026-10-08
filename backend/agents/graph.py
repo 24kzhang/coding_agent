@@ -1570,6 +1570,7 @@ class AgentGraph:
         )
         seen: set[str] = set()
         recovered_limit = False
+        recovered_json = False
         failed_models: set[str] = set()
         default_limit = 12_000 if agent == "planner" else 6_000
         for _step in range(4):
@@ -1581,6 +1582,12 @@ class AgentGraph:
             except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
                     self._add_tokens(state, client.last_usage)
+                invalid_json = "模型没有返回合法 JSON" in str(exc)
+                if invalid_json and isinstance(client, LlmClient) and not recovered_json:
+                    recovered_json = True
+                    conversation.append({"role": "user", "content": "上一输出不是合法 JSON。保持原始对象字段和内容合同，只返回完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不要输出代码围栏，不重复已执行的工具。"})
+                    self._emit(state, agent, "model", "结构化 JSON 转义不完整，已在同模型与预算内进行一次格式修订", data={"reason": "json_repair"})
+                    continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
                     next_limit = min(limit * 2, client.cfg.max_output_tokens)

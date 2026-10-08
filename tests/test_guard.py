@@ -230,6 +230,28 @@ def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypa
         assert calls == ["primary", "backup"]
 
 
+def test_structured_node_repairs_json_with_same_explicit_model(tmp_path, monkeypatch):
+    graph = make_graph(tmp_path)
+    cfg = ModelConfig(id="only", name="测试模型", model="only", base_url="https://example.test", api_key="TEST_ONLY_KEY")
+    graph.model_store.upsert(cfg)
+    calls = []
+
+    class Client(LlmClient):
+        def chat_json(self, messages, **_kwargs):
+            calls.append(self.cfg.id)
+            self.last_usage = LlmUsage(prompt=10, completion=50)
+            if len(calls) == 1:
+                raise LlmError("模型没有返回合法 JSON：字符串未转义")
+            assert "正确转义" in str(messages)
+            return {"ok": True}
+
+    monkeypatch.setattr("backend.agents.graph.LlmClient", Client)
+    state = {"session_id": "s1", "workdir": str(tmp_path / "work"), "model_id": "only"}
+    assert graph._model_json(state, "planner", Client(cfg), [])["ok"]
+    assert calls == ["only", "only"]
+    assert state["output_tokens"] == 100
+
+
 @pytest.mark.parametrize("selected", [False, True])
 def test_optional_mcp_unavailability_does_not_become_required_failure(tmp_path, selected):
     events = []
