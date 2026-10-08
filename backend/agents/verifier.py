@@ -145,7 +145,7 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
         budget -= min(len(text), limit)
     client = graph._client("verifier", state)
     result = graph._model_json(state, "verifier", client, [
-        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。只报告可由代码证明的合同矛盾或阻碍执行的问题，不要求无关增强。"},
+        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
         {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
          + "\n磁盘文件清单：\n" + "\n".join(files) + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
     ], temperature=0, plain_text=True)

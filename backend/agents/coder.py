@@ -395,6 +395,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     unchecked_rewrites: set[str] = set()
     # mutation_count 记录真实写入或修改次数，用于识别“已经产出代码却持续只读”的失控循环。
     mutation_count = 0
+    file_revision = 0
     preflight_revision = -1
     preflight_issues: list[str] = []
     # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
@@ -918,15 +919,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if (tool == "run_command" and _is_verification_command(str(action.get("cmd", "")))
                         and changes and isinstance(client, LlmClient)
                         and state.get("task_type") in {"code_gen", "code_mod"}):
-                    if preflight_revision != mutation_count:
+                    fresh_review = preflight_revision != file_revision
+                    if fresh_review:
                         preflight_issues = review_before_verification(graph, state, fs, current_files, str(action["cmd"]))
-                        preflight_revision = mutation_count
+                        preflight_revision = file_revision
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
-                    if preflight_issues:
+                    if preflight_issues and fresh_review:
                         # 尚未执行命令，保留审查建议为实施待办；不伪造命令结果或测试通过。
                         observations.append("执行前需先修正以下源码/断言合同：" + "；".join(preflight_issues))
                         diagnostic_progress = True
                         break
+                    # 模型已收到当前版本的建议，再次选择执行时以真实测试裁定；不得重复阻挡。
+                    preflight_issues = []
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
@@ -996,6 +1000,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if tool == "read_file" and observation.get("exists") is not False and path:
                     read_paths.add(path)
                 elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
+                    file_revision += 1
                     successful_verification_commands.clear()
                     passed_failure_commands.clear()
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。
