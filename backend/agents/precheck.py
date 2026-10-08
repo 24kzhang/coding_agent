@@ -3,10 +3,58 @@
 from __future__ import annotations
 
 import ast
+import shlex
+import tomllib
 from pathlib import Path
 
 from backend.tools import FsTool
-from backend.tools.scope import delivery_root
+from backend.tools.scope import command_cwd, delivery_root
+
+
+def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
+    """在 uv 触发项目构建前核对公开元数据文件与显式包目录。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return []
+    if not argv or Path(argv[0]).name != "uv" or not any(action in argv for action in {"run", "sync", "build"}):
+        return []
+    if any(flag in argv for flag in {"--no-project", "--no-sync", "--no-install-project"}):
+        return []
+    root = command_cwd(fs, state, command)
+    for index, argument in enumerate(argv[:-1]):
+        if argument in {"--project", "--directory", "-C"}:
+            root = (root / argv[index + 1]).resolve()
+            break
+    manifest = root / "pyproject.toml"
+    try:
+        path = fs.safe(manifest.relative_to(fs.root).as_posix())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return []
+    uv = data.get("tool", {}).get("uv", {})
+    packaged = "build" in argv or uv.get("package", "build-system" in data)
+    if not packaged:
+        return []
+    references = []
+    project = data.get("project", {})
+    readme = project.get("readme")
+    if isinstance(readme, str):
+        references.append(readme)
+    elif isinstance(readme, dict) and isinstance(readme.get("file"), str):
+        references.append(readme["file"])
+    license_value = project.get("license")
+    if isinstance(license_value, dict) and isinstance(license_value.get("file"), str):
+        references.append(license_value["file"])
+    wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+    references.extend(value for value in wheel.get("packages", []) if isinstance(value, str) and not any(char in value for char in "*?[]"))
+    issues = []
+    for reference in references:
+        target = root / reference
+        if not target.exists():
+            issues.append(f"{manifest.relative_to(fs.root)} 的构建元数据引用 {reference}，但文件或包目录尚不存在；请先创建，再运行 uv 构建/安装")
+    return issues
 
 
 def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:

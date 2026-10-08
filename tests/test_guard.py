@@ -19,7 +19,7 @@ from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
 from backend.agents.planner import _plan_quality_issues, _schema_fields, _semantic_plan_issues
-from backend.agents.precheck import import_issues
+from backend.agents.precheck import import_issues, manifest_issues
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
@@ -131,6 +131,39 @@ def test_local_import_contract_handles_exports_modules_and_dynamic_names(tmp_pat
     fs.write("portal/src/extra/data.py", "VALUE = 1\n")
     fs.write("portal/tests/test_src.py", "from extra.data import VALUE\n")
     assert import_issues(fs, state, fs.list()) == []
+
+
+def test_uv_build_metadata_files_exist_before_environment_creation(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    state = {"text": "项目输出到 portal"}
+    content = '[project]\nname="portal"\nversion="1"\nreadme="README.md"\n[build-system]\nrequires=["hatchling"]\nbuild-backend="hatchling.build"\n[tool.hatch.build.targets.wheel]\npackages=["pkg"]\n'
+    fs.write("portal/pyproject.toml", content)
+    issues = manifest_issues(fs, state, "uv run --directory portal python tools/inspect.py")
+    assert len(issues) == 2 and "README.md" in issues[0]
+    assert manifest_issues(fs, state, "npm --prefix portal install") == []
+    assert manifest_issues(fs, state, "uv sync --no-install-project") == []
+    fs.write("portal/README.md", "# 项目说明\n")
+    fs.write("portal/pkg/__init__.py", "")
+    assert manifest_issues(fs, state, "uv sync") == []
+    fs.write("portal/pyproject.toml", '[project]\nname="portal"\nversion="1"\nreadme="missing.md"\n')
+    assert manifest_issues(fs, state, "uv sync") == []
+
+
+def test_metadata_repair_allows_uv_sync_without_stale_pending_issue(tmp_path):
+    graph = make_graph(tmp_path)
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "pyproject.toml", "content": '[project]\nname="demo"\nversion="1"\nreadme="README.md"\n[build-system]\nrequires=["setuptools"]\nbuild-backend="setuptools.build_meta"\n'},
+                     {"tool": "run_command", "cmd": "uv sync"}], "done": True},
+        {"actions": [{"tool": "write_file", "path": "README.md", "content": "# 项目说明\n"},
+                     {"tool": "run_command", "cmd": "uv sync"}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    commands = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: commands.append(command) or {"cmd": command, "ok": True, "code": 0, "out": "环境就绪", "err": ""})
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "准备项目环境", "task_type": "code_gen"})
+    assert result["coding_ok"] and commands == ["uv sync"]
 
 
 def test_proven_import_conflict_cannot_run_tests_or_finish_before_repair(tmp_path, monkeypatch):
