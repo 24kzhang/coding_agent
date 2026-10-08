@@ -1559,6 +1559,7 @@ class AgentGraph:
         )
         seen: set[str] = set()
         recovered_limit = False
+        failed_models: set[str] = set()
         default_limit = 12_000 if agent == "planner" else 6_000
         for _step in range(4):
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or default_limit))
@@ -1581,6 +1582,15 @@ class AgentGraph:
                     conversation.append({"role": "user", "content": "上一次输出耗尽预算且 JSON 未完成。本次必须精简推理和正文，只返回节点要求的完整 JSON；不内嵌整份实现源码。"})
                     self._emit(state, agent, "model", "结构化输出触顶，已降低推理并在模型及运行预算内重试一次", data={"reason": "output_limit", "max_tokens": next_limit, "effort": client.default_effort})
                     continue
+                if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not state.get("model_id"):
+                    failed_models.add(client.cfg.id)
+                    next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
+                    if next_cfg is not None:
+                        client = LlmClient(next_cfg)
+                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+                        conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
+                        self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
+                        continue
                 raise
             self._add_tokens(state, client.last_usage)
             actions = [

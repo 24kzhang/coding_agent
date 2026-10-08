@@ -150,6 +150,35 @@ def test_plan_semantic_review_balance_failure_propagates(tmp_path, monkeypatch):
         _semantic_plan_issues(graph, {"text": "任务"}, "合同", "计划")
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_structured_node_fails_over_after_exhausted_recovery_unless_explicit(tmp_path, monkeypatch, explicit):
+    graph = make_graph(tmp_path)
+    for model in ("primary", "backup"):
+        graph.model_store.upsert(ModelConfig(id=model, name="测试模型", model=model, base_url="https://example.test", api_key="TEST_ONLY_KEY"))
+    calls = []
+
+    class Client(LlmClient):
+        def chat_json(self, _messages, **kwargs):
+            calls.append(self.cfg.id)
+            if self.cfg.id == "primary":
+                self.last_usage = LlmUsage(prompt=10, completion=kwargs["max_tokens"])
+                raise LlmOutputLimitError("输出预算耗尽")
+            self.last_usage = LlmUsage(prompt=10, completion=50)
+            return {"ok": True, "issues": []}
+
+    monkeypatch.setattr("backend.agents.graph.LlmClient", Client)
+    state = {"session_id": "s1", "workdir": str(tmp_path / "work"), "model_id": "primary" if explicit else None}
+    client = Client(graph.model_store.get("primary"))
+    if explicit:
+        with pytest.raises(LlmOutputLimitError):
+            graph._model_json(state, "verifier", client, [])
+        assert calls == ["primary", "primary"]
+    else:
+        assert graph._model_json(state, "verifier", client, [])["ok"] is True
+        assert calls == ["primary", "primary", "backup"]
+        assert state["output_tokens"] == 18_050
+
+
 def test_plan_checks_actual_field_section_after_image_description(tmp_path):
     """商品详情的完整字段合同可以位于图像解读之后，不依赖固定措辞。"""
 
