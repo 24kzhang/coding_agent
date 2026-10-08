@@ -134,6 +134,18 @@ def test_local_import_contract_handles_exports_modules_and_dynamic_names(tmp_pat
     assert import_issues(fs, state, fs.list()) == []
 
 
+def test_module_monkeypatch_uses_existing_interface_and_respects_raising_false(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    state = {"text": "项目输出到 portal"}
+    fs.write("portal/pkg/__init__.py", "")
+    fs.write("portal/pkg/client.py", "def send(): pass\n")
+    fs.write("portal/tests/test_api.py", 'from pkg import client as api\nimport pkg.client as other\ndef test_request(monkeypatch):\n    monkeypatch.setattr(api, "missing", lambda: None)\n    monkeypatch.setattr(other, "send", lambda: None)\n    monkeypatch.setattr(api, "optional", True, raising=False)\n')
+    issues = import_issues(fs, state, fs.list())
+    assert len(issues) == 1 and "missing" in issues[0]
+    fs.write("portal/pkg/client.py", "def send(): pass\ndef missing(): pass\n")
+    assert import_issues(fs, state, fs.list()) == []
+
+
 def test_uv_build_metadata_files_exist_before_environment_creation(tmp_path):
     fs = FsTool(str(tmp_path / "work"))
     state = {"text": "项目输出到 portal"}

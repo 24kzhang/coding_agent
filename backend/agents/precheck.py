@@ -154,6 +154,11 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
         return names
 
     issues: list[str] = []
+    def locate(candidates: list[Path]) -> Path | None:
+        return next((candidate.with_suffix(".py") if candidate.with_suffix(".py").is_file()
+                     else candidate / "__init__.py" for candidate in candidates
+                     if candidate.with_suffix(".py").is_file() or (candidate / "__init__.py").is_file()), None)
+
     for rel in files:
         if not rel.endswith(".py"):
             continue
@@ -163,7 +168,15 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
         tree = parse(path)
         if tree is None:
             continue
+        module_aliases = {}
         for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.name if alias.asname else alias.name.split(".")[0]
+                    module = locate([base.joinpath(*name.split(".")) for base in roots])
+                    if module:
+                        module_aliases[alias.asname or name] = module
+                continue
             if not isinstance(node, ast.ImportFrom) or not node.module:
                 continue
             if node.level:
@@ -173,9 +186,7 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
                 candidates = [base.joinpath(*node.module.split("."))]
             else:
                 candidates = [base.joinpath(*node.module.split(".")) for base in roots]
-            module = next((candidate.with_suffix(".py") if candidate.with_suffix(".py").is_file()
-                           else candidate / "__init__.py" for candidate in candidates
-                           if candidate.with_suffix(".py").is_file() or (candidate / "__init__.py").is_file()), None)
+            module = locate(candidates)
             if module is None:
                 continue
             source = parse(module)
@@ -187,6 +198,30 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
                     continue
                 if module.name == "__init__.py" and ((module.parent / (alias.name + ".py")).exists()
                                                       or (module.parent / alias.name).is_dir()):
+                    child = locate([module.parent / alias.name])
+                    if child:
+                        module_aliases[alias.asname or alias.name] = child
                     continue
                 issues.append(f"{rel}:{node.lineno} 从 {module.relative_to(fs.root)} 导入 `{alias.name}`，但该本地模块未定义或导出此名称")
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "monkeypatch"
+                    and node.func.attr == "setattr" and len(node.args) >= 3
+                    and isinstance(node.args[0], ast.Name) and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)):
+                continue
+            if any(keyword.arg == "raising" and isinstance(keyword.value, ast.Constant) and keyword.value.value is False for keyword in node.keywords):
+                continue
+            if len(node.args) >= 4 and isinstance(node.args[3], ast.Constant) and node.args[3].value is False:
+                continue
+            module = module_aliases.get(node.args[0].id)
+            if module is None:
+                continue
+            source = parse(module)
+            names = exports(source) if source else None
+            attribute = node.args[1].value
+            if names is not None and attribute not in names and not attribute.startswith("__"):
+                if module.name == "__init__.py" and locate([module.parent / attribute]):
+                    continue
+                issues.append(f"{rel}:{node.lineno} 的 pytest 替身要求替换 `{attribute}`，但本地模块 {module.relative_to(fs.root)} 未定义此属性；请对照实际模块接口打桩")
     return issues[:12]
