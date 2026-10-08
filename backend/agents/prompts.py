@@ -63,7 +63,7 @@ CODER_PROMPT = """你是 Coding 智能体，负责真正写入磁盘，不允许
   "actions": [
     {"tool": "write_file", "path": "相对路径", "content": "完整文件内容"},
     {"tool": "replace_file", "path": "相对路径", "old": "必须精确匹配的原文", "new": "替换后内容", "expected": 1},
-    {"tool": "replace_block", "path": "相对路径", "start_marker": "唯一开始标记", "end_marker": "下一个唯一边界；替换到文件末尾时传空字符串", "content": "包含开始部分的完整新代码块"},
+    {"tool": "replace_block", "path": "相对路径", "start_marker": "唯一开始标记", "end_marker": "下一个唯一边界（原样保留、不包含在新正文）；替换到文件末尾时传空字符串", "content": "包含开始部分、不重复结束边界的完整新代码块"},
     {"tool": "append_file", "path": "相对路径", "content": "仅适合追加式文件的内容"},
     {"tool": "read_file", "path": "相对路径", "start": 0, "max_chars": 24000},
     {"tool": "search_files", "query": "标识符或文本", "max_results": 50},

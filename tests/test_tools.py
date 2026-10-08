@@ -48,6 +48,16 @@ def test_fs_replaces_long_block_between_unique_markers(tmp_path) -> None:
     assert fs.read("app.js") == "// before\nfunction current() {\n    return 2;\n}\n// after\nconst ready = true;\n"
 
 
+def test_fs_replace_block_collapses_exact_adjacent_boundary_overlap(tmp_path) -> None:
+    fs = FsTool(str(tmp_path))
+    fs.write("main.py", "# 开始\nold = False\ndef next_item():\n    return 1\n")
+    fs.read("main.py")
+    fs.replace_block("main.py", "# 开始", "def next_item():", "# 开始\nready = True\ndef next_item():\n")
+    result = fs.read("main.py")
+    assert result == "# 开始\nready = True\ndef next_item():\n    return 1\n"
+    compile(result, "main.py", "exec")
+
+
 def test_fs_replace_block_supports_end_of_file_and_rejects_ambiguous_start(tmp_path) -> None:
     """文件尾替换使用空结束标记，重复开始标记必须拒绝。"""
 

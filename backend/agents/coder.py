@@ -280,7 +280,7 @@ def _is_verification_command(command: str) -> bool:
     if any(arg in {"-c", "-e"} for arg in argv):
         return False
     names = [Path(arg).name.lower() for arg in argv]
-    if any(name in {"pytest", "ruff", "mypy", "pyright", "compileall", "unittest"} for name in names):
+    if any(name in {"pytest", "ruff", "mypy", "pyright", "compileall", "py_compile", "unittest"} for name in names):
         return True
     if "node" in names and "--check" in argv:
         return True

@@ -240,6 +240,10 @@ class FsTool:
             if tail.count(end_marker) != 1:
                 raise ValueError(f"代码块替换失败：结束标记在开始标记后必须唯一，实际匹配 {tail.count(end_marker)} 处")
             end_index = start_index + len(start_marker) + tail.index(end_marker)
+            # 新块有时顺带写出下一块边界；边界本来会保留，仅合并相邻的精确重复。
+            trimmed = content.rstrip()
+            if trimmed.endswith(end_marker):
+                content = trimmed[:-len(end_marker)]
         else:
             # 空结束标记明确表示替换到 EOF，适合安全更新文件最后一个函数或章节。
             end_index = len(text)

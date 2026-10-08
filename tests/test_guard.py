@@ -900,6 +900,7 @@ def test_reference_markdown_does_not_become_document_write_target(tmp_path):
 
 
 def test_module_verification_entrypoints_are_not_confused_with_servers():
+    assert _is_verification_command("uv run --directory service python -m py_compile package/main.py")
     assert _is_verification_command("uv run --project service python -m package.build")
     assert _is_verification_command("uv run --project service python -m package.smoke")
     assert not _is_verification_command("uv run --project service python -m package.server")

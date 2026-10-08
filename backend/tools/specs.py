@@ -20,7 +20,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ("search_files", "在工作区文本文件中搜索内容", {"query": string, "max_results": integer}, ["query"], "allow", "read"),
         (
             "write_file",
-            "写入一个完整文本文件；正文不得超过 10000 字符，更长文件先写首块再用 append_file 分块追加",
+            "写入一个完整文本文件；正文不得超过 6000 字符，更长文件先写首块再用 append_file 分块追加",
             {"path": public_path, "content": short_text},
             ["path", "content"],
             "allow",
@@ -28,7 +28,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "append_file",
-            "向一个文本文件末尾追加不超过 10000 字符的一块内容",
+            "向一个文本文件末尾追加不超过 6000 字符的一块内容",
             {"path": public_path, "content": short_text},
             ["path", "content"],
             "allow",
@@ -44,7 +44,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "replace_block",
-            "按开始和结束锚点替换不超过 10000 字符的代码块",
+            "从唯一开始锚点（包含）替换到结束锚点之前（不包含），结束锚点及其后内容会保留。新正文含开始部分、不含下一块结束边界，不超过 6000 字符；结束锚点为空表示到文件末尾",
             {
                 "path": public_path,
                 "start_marker": match_text,
