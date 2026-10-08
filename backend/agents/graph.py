@@ -1392,6 +1392,21 @@ class AgentGraph:
                 if not target.exists() and not fs.is_sensitive(target):
                     return {"ok": True, "exists": False, "path": rel,
                             "text": f"文件尚不存在：{rel}；未读取到任何内容，不等同于空文件。若是新增交付物可用 write_file 创建；若是用户提供的输入，应先核对原路径，不得伪造数据。"}
+                if action.get("metadata_only"):
+                    measure = str(action.get("measure") or "bytes")
+                    if measure == "lines":
+                        with target.open("rb") as stream:
+                            value = sum(chunk.count(b"\n") for chunk in iter(lambda: stream.read(65_536), b""))
+                    elif measure == "chars":
+                        with target.open("r", encoding="utf-8", errors="replace", newline="") as stream:
+                            value = sum(len(chunk) for chunk in iter(lambda: stream.read(65_536), ""))
+                    elif measure == "bytes":
+                        value = target.stat().st_size
+                    else:
+                        raise ValueError("未知文件统计类型")
+                    label = {"lines": "行数（换行符计数）", "bytes": "字节数", "chars": "字符数"}[measure]
+                    return {"ok": True, "exists": True, "content_available": False, "path": rel,
+                            "measure": measure, "value": value, "text": f"文件安全元信息：{rel}；{label}={value}。本次未提供正文，不作为可修改快照。"}
                 content = fs.read(rel, max_chars, start)
                 metadata = fs.last_reads[rel]
                 return {

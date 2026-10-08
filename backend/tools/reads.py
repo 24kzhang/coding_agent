@@ -18,11 +18,14 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
         argv = shlex.split(command)
     except ValueError:
         return None
-    if not argv or Path(argv[0]).name not in {"cat", "head", "tail"}:
+    if not argv or Path(argv[0]).name not in {"cat", "head", "tail", "wc"}:
         return None
     program = Path(argv[0]).name
     unit, count = "lines", 10
-    if program == "cat":
+    if program == "wc":
+        if len(argv) != 3 or argv[1] not in {"-l", "-c", "-m"}:
+            return None
+    elif program == "cat":
         if len(argv) != 2:
             return None
     elif len(argv) == 4 and argv[1] in {"-n", "-c"} and argv[2].isdigit():
@@ -36,6 +39,8 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
         path = fs.safe(rel)
         rel = path.relative_to(fs.root).as_posix()
         action = {"tool": "read_file", "path": rel, "_source_command": command}
+        if program == "wc":
+            return {**action, "metadata_only": True, "measure": {"-l": "lines", "-c": "bytes", "-m": "chars"}[argv[1]]}
         if program == "cat" or not path.is_file() or fs.is_sensitive(path):
             return action
         if path.stat().st_size > 2_000_000 or path.suffix.lower() not in fs.text_suffixes | {".log", ".out", ".err"}:

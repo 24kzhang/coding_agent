@@ -15,7 +15,7 @@ def tool_specs() -> list[dict[str, Any]]:
     integer = {"type": "integer"}
     array = {"type": "array", "items": string}
     definitions = [
-        ("read_file", "读取工作区文本文件的一段内容", {"path": public_path, "start": integer, "max_chars": integer}, ["path"], "allow", "read"),
+        ("read_file", "读取工作区文本文件的一段内容；文件统计与私密路径的安全元信息不提供正文，也不建立可修改快照", {"path": public_path, "start": integer, "max_chars": integer}, ["path"], "allow", "read"),
         ("list_files", "列出工作区内受支持的文本文件", {}, [], "allow", "read"),
         ("search_files", "在工作区文本文件中搜索内容", {"query": string, "max_results": integer}, ["query"], "allow", "read"),
         (

@@ -1159,6 +1159,11 @@ def test_inspection_adapter_keeps_scope_ranges_and_private_metadata(tmp_path):
     action = inspection_read(fs, state, "cat portal/.local/model.json")
     result = graph._do_action(action, fs, shell, git, state)
     assert result["content_available"] is False and "TEST_ONLY_PRIVATE" not in str(result)
+    for command, expected in [("wc -l portal/main.py", 2), ("wc -m portal/main.py", len("# 数据\nready = True\n")), ("wc -c portal/main.py", len("# 数据\nready = True\n".encode()))]:
+        result = graph._do_action(inspection_read(fs, state, command), fs, shell, git, state)
+        assert result["value"] == expected and result["content_available"] is False
+    result = graph._do_action(inspection_read(fs, state, "wc -l portal/.local/model.json"), fs, shell, git, state)
+    assert result["content_available"] is False and "value" not in result
 
 
 def test_dsml_tail_request_uses_file_tool_without_shell_execution(tmp_path):
