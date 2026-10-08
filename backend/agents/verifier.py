@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from backend.agents.precheck import source_versions
 from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
@@ -144,10 +145,21 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
                         + ("\n[审查上下文在此截断，磁盘仍有后续内容。]" if len(text) > limit else ""))
         budget -= min(len(text), limit)
     client = graph._client("verifier", state)
+    evidence = []
+    current_versions = source_versions(fs, state, files)
+    for check in state.get("completed_checks", []):
+        old = check.get("versions", {})
+        evidence.append({"实际已通过命令": check["command"], "实际输出": check["output"],
+                         "通过后未变更文件": [rel for rel, version in old.items() if current_versions.get(rel) == version],
+                         "通过后已变更或删除文件": [rel for rel, version in old.items() if current_versions.get(rel) != version],
+                         "通过后新增文件": [rel for rel in current_versions if rel not in old]})
     result = graph._model_json(state, "verifier", client, [
         {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
         {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
-         + "\n磁盘文件清单：\n" + "\n".join(files) + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
+         + "\n磁盘文件清单：\n" + "\n".join(files)
+         + "\n\n实际执行证据（由程序记录版本，不是模型声称通过）：\n" + json.dumps(evidence, ensure_ascii=False)
+         + "\n已通过且未变更的测试不能被猜测为会失败；仍可报告未覆盖的需求缺口，但不要改坏已验证路径。"
+         + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
     ], temperature=0, plain_text=True)
     issues = result.get("issues")
     if not isinstance(issues, list):

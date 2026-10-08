@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.agents.loop import LoopGuard
-from backend.agents.precheck import import_issues, inline_issues, manifest_issues, server_issues
+from backend.agents.precheck import (
+    import_issues,
+    inline_issues,
+    manifest_issues,
+    server_issues,
+    source_versions,
+)
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
@@ -61,8 +67,8 @@ def _interface_brief(path: str, content: str) -> str:
             signatures.append(f"{match[1]}({match[2]})")
     return "\n".join(signatures[:20])[:2_400]
 # CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 6000 字符，
-# 6000 token 足以容纳该动作和协议标签，同时可阻止模型失控生成超长完整文件。
-CODER_OUTPUT_TOKENS = 6_000
+# 单轮为工具参数与协议留足空间，正文仍分块，总调用与 token 硬预算继续约束成本。
+CODER_OUTPUT_TOKENS = 12_000
 # 分块写入会增加合理执行步数。局部步数给实现和验证留出空间，运行级调用、
 # token 预算与无进展守卫继续约束成本，不能靠提前结束制造不完整交付。
 CODER_MAX_STEPS = 60
@@ -409,6 +415,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_revision = -1
     preflight_issues: list[str] = []
     preflight_kind = ""
+    completed_checks: list[dict] = []
     # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
     idle_after_mutation = 0
     # repo_files 来自前置仓库读取节点，已有索引时 Coder 无需再次 list_files。
@@ -639,7 +646,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             error_text = str(exc)[:240]
             if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
                 native_fallback = True
-                coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 10_000)
+                coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 16_000)
                 observations.append(
                     "供应商输出预算触顶，已切到结构化文本兼容模式。下一轮只能返回一个"
                     "正文不超过 4000 字符的小动作；长文件分块 write_file/append_file，"
@@ -982,7 +989,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         preflight_kind = ""
                     fresh_review = preflight_revision != file_revision
                     if fresh_review:
-                        preflight_issues = review_before_verification(graph, state, fs, current_files, str(action["cmd"]))
+                        preflight_issues = review_before_verification(graph, {**state, "completed_checks": completed_checks}, fs, current_files, str(action["cmd"]))
                         preflight_kind = "review" if preflight_issues else ""
                         preflight_revision = file_revision
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
@@ -1070,6 +1077,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     passed_failure_commands.add(command)
                     if _is_verification_command(command):
                         successful_verification_commands.add(command)
+                        completed_checks.append({"command": command,
+                                                 "output": graph._trim(str((observation.get("result") or {}).get("out") or observation["text"]), 1_600),
+                                                 "versions": source_versions(fs, state, current_files)})
+                        completed_checks = completed_checks[-8:]
                     failed_tests = _test_brief(
                         state.get("tests", []),
                         addressed_failure_paths,

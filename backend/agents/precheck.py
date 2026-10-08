@@ -12,6 +12,21 @@ from backend.tools import FsTool
 from backend.tools.scope import command_cwd, delivery_root
 
 
+def source_versions(fs: FsTool, state: dict, files: list[str]) -> dict[str, str]:
+    """记录公开源码版本，供后续审查区分真实通过证据与变更后的待验状态。"""
+
+    root = delivery_root(fs, state)
+    versions = {}
+    for rel in files:
+        try:
+            path = fs.safe(rel)
+            if (root == fs.root or root in path.parents) and not fs.is_sensitive(path) and path.suffix in {".py", ".js", ".ts", ".tsx", ".html", ".css", ".toml"}:
+                versions[rel] = fs.version(rel)
+        except (OSError, ValueError):
+            continue
+    return versions
+
+
 def inline_issues(command: str) -> list[str]:
     """在请求进入 shell 前要求解释器内联内容改为可审查脚本。"""
 

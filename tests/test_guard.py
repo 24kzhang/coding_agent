@@ -205,6 +205,33 @@ def test_server_command_is_deferred_until_bounded_smoke_script(tmp_path):
     assert server_issues("uvicorn --help") == []
 
 
+def test_preflight_keeps_passed_check_evidence_across_docs_and_source_changes(tmp_path, monkeypatch):
+    from backend.agents import coder as module
+    graph = make_graph(tmp_path)
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}, {"tool": "run_command", "cmd": "python -m pytest"}]},
+        {"actions": [{"tool": "write_file", "path": "README.md", "content": "# 项目说明"}, {"tool": "run_command", "cmd": "python -m pytest"}]},
+        {"actions": [{"tool": "replace_file", "path": "main.py", "old": "True", "new": "False"}, {"tool": "run_command", "cmd": "python -m pytest"}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    reviews = []
+    def review(_graph, state, fs, _files, _command):
+        checks = state["completed_checks"]
+        if len(reviews) == 0:
+            assert checks == []
+        else:
+            assert checks[0]["command"] == "python -m pytest" and checks[0]["output"] == "1 passed"
+            assert (checks[0]["versions"]["main.py"] == fs.version("main.py")) is (len(reviews) == 1)
+        reviews.append(1)
+        return []
+    monkeypatch.setattr(module, "review_before_verification", review)
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: {"cmd": command, "ok": True, "code": 0, "out": "1 passed", "err": ""})
+    assert coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "实现并验证", "task_type": "code_gen"})["coding_ok"]
+    assert len(reviews) == 3
+
+
 def test_proven_import_conflict_cannot_run_tests_or_finish_before_repair(tmp_path, monkeypatch):
     from backend.agents import coder as module
     graph = make_graph(tmp_path)
@@ -949,7 +976,7 @@ def test_native_output_limit_recovers_with_small_structured_action(tmp_path):
 
         def chat_json(self, messages, **kwargs):
             assert kwargs["plain_text"] is True
-            assert kwargs["max_tokens"] == 8000
+            assert kwargs["max_tokens"] == 14000
             assert "4000 字符" in messages[-1]["content"]
             self.last_usage = LlmUsage(prompt=100, completion=50)
             return {"actions": [{"tool": "write_file", "path": "done.py", "content": "ready = True\n"}], "done": True}

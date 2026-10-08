@@ -1107,7 +1107,7 @@ class ExhaustedReasoningClient:
     """模拟模型把完整输出预算都耗在推理却没有返回动作。"""
 
     cfg = SimpleNamespace(id="reasoning-heavy", model="reasoning-heavy")
-    last_usage = LlmUsage(completion=6_000, reasoning=6_000)
+    last_usage = LlmUsage(completion=12_000, reasoning=12_000)
 
     def chat_json(self, messages, temperature=0.1, *, plain_text=False, max_tokens=None):
         return {"thought": "", "actions": [], "done": False}
