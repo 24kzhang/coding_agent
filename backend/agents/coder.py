@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.agents.loop import LoopGuard
+from backend.agents.precheck import import_issues
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
@@ -41,6 +42,12 @@ def _interface_brief(path: str, content: str) -> str:
             tree = ast.parse(content)
         except SyntaxError:
             return ""
+        exported = []
+        for node in tree.body:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+            exported.extend(item.id for target in targets for item in ast.walk(target) if isinstance(item, ast.Name))
+        if exported:
+            signatures.append("模块变量：" + "、".join(exported[:30]))
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
                 signatures.append(f"{node.name}({ast.unparse(node.args)})")
@@ -749,7 +756,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             marker in failed_tests
             for marker in ("缺失", "不存在", "尚未创建", "没有交付")
         )
-        if not actions and data.get("done") is True and not unresolved_missing_delivery:
+        if not actions and data.get("done") is True and not unresolved_missing_delivery and not preflight_issues:
             empty_steps = 0
             coding_ok = True
             coding_summary = graph._clean_summary(data.get("summary"), "Coding 阶段已完成。")
@@ -925,6 +932,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if (tool == "run_command" and _is_verification_command(str(action.get("cmd", "")))
                         and changes and isinstance(client, LlmClient)
                         and state.get("task_type") in {"code_gen", "code_mod"}):
+                    structural_issues = import_issues(fs, state, current_files)
+                    if structural_issues:
+                        diagnostic_progress = diagnostic_progress or structural_issues != preflight_issues
+                        preflight_issues = structural_issues
+                        observations.append("执行前确定的本地导入合同问题：" + "；".join(structural_issues))
+                        graph._emit(state, "coder", "review", "本地导入合同待完善：" + "；".join(structural_issues))
+                        break
                     fresh_review = preflight_revision != file_revision
                     if fresh_review:
                         preflight_issues = review_before_verification(graph, state, fs, current_files, str(action["cmd"]))

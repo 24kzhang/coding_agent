@@ -19,6 +19,7 @@ from backend.agents.doc import _document_path, doc
 from backend.agents.graph import AgentGraph, RunBudgetError
 from backend.agents.loop import LoopGuard
 from backend.agents.planner import _plan_quality_issues, _schema_fields, _semantic_plan_issues
+from backend.agents.precheck import import_issues
 from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
@@ -114,6 +115,45 @@ def test_private_metadata_never_becomes_content_or_writable_snapshot(tmp_path):
         return {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}], "done": True}
     graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
     assert coder(graph, {"session_id": "s1", "workdir": str(work), "text": "生成入口"})["coding_ok"]
+
+
+def test_local_import_contract_handles_exports_modules_and_dynamic_names(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    state = {"text": "项目输出到 portal"}
+    fs.write("portal/pkg/__init__.py", "")
+    fs.write("portal/pkg/data.py", "CODE = True\nclass Item: pass\n")
+    fs.write("portal/pkg/dynamic.py", "def __getattr__(name): return 1\n")
+    fs.write("portal/pkg/client.py", "from .data import CODE, Item\nfrom pkg import data\nfrom math import pi\nfrom pkg.dynamic import MAGIC\nfrom pkg.data import MISSING\n")
+    issues = import_issues(fs, state, fs.list())
+    assert len(issues) == 1 and "MISSING" in issues[0]
+    fs.write("portal/pkg/data.py", "CODE = True\nMISSING = True\nclass Item: pass\n")
+    assert import_issues(fs, state, fs.list()) == []
+    fs.write("portal/src/extra/data.py", "VALUE = 1\n")
+    fs.write("portal/tests/test_src.py", "from extra.data import VALUE\n")
+    assert import_issues(fs, state, fs.list()) == []
+
+
+def test_proven_import_conflict_cannot_run_tests_or_finish_before_repair(tmp_path, monkeypatch):
+    from backend.agents import coder as module
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "defs.py", "content": "CODE = True\n"},
+                     {"tool": "write_file", "path": "test_main.py", "content": "from defs import MISSING\n"},
+                     {"tool": "run_command", "cmd": "python -m pytest"}], "done": True},
+        {"actions": [], "done": True},
+        {"actions": [{"tool": "replace_file", "path": "defs.py", "old": "CODE = True", "new": "CODE = True\nMISSING = True"},
+                     {"tool": "run_command", "cmd": "python -m pytest"}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    monkeypatch.setattr(module, "review_before_verification", lambda *_args: [])
+    commands = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: commands.append(command) or {"cmd": command, "ok": True, "code": 0, "out": "1 passed", "err": ""})
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建模块并测试", "task_type": "code_gen"})
+    assert result["coding_ok"] and commands == ["python -m pytest"]
+    assert "MISSING" in (work / "defs.py").read_text()
 
 
 @pytest.mark.parametrize("repair", [True, False])
