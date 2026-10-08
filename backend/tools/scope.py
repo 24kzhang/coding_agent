@@ -39,6 +39,10 @@ def tool_path(fs: FsTool, state: dict[str, Any], rel: str, *, write: bool) -> st
     if any(PREFIX_RULE.search(text) for text in texts):
         return rel
     prefix = output.relative_to(fs.root).as_posix()
+    workspace_prefix = fs.root.name + "/"
+    if rel.startswith(workspace_prefix + prefix + "/") or rel == workspace_prefix + prefix:
+        # 接受带工作区名称的交付路径，避免把工作区/交付前缀再次嵌套到交付目录。
+        rel = rel[len(workspace_prefix):]
     if rel == prefix or rel.startswith(prefix + "/"):
         return rel
     target = output / rel

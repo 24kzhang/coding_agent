@@ -386,6 +386,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     interface_summaries: dict[str, str] = {}
     seen_search_hits: set[str] = set()
     search_cache: dict[str, dict] = {}
+    read_cache: dict[str, dict] = {}
     # seen_actions 保存已经执行或明确拒绝的动作签名，防止模型无视观察反复消耗相同工具。
     seen_actions: set[str] = set()
     # progress_items 记录工具、路径或命令，模型每一步都能看到稳定的任务进度账本。
@@ -847,13 +848,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             elif signature in seen_actions and tool == "read_file" and path in read_paths and path in visible_cached_paths:
                 duplicate_read_failures += 1
-                observation = {
-                    "ok": False,
-                    "text": (
-                        f"拒绝重复读取已知文件：{path}。当前文件快照已经在提示中；"
-                        "下一步必须直接 replace_file、replace_block、write_file 或运行验证命令。"
-                    ),
-                }
+                saved_read = read_cache.get(signature)
+                if saved_read and (saved_read.get("read") or {}).get("version") == fs.version(path):
+                    observation = {**saved_read, "cached": True}
+                    fs.last_reads[path] = dict(observation["read"])
+                else:
+                    observation = graph._do_action(action, fs, shell, git, state)
             elif tool == "search_files" and signature in search_cache:
                 observation = {**search_cache[signature], "cached": True,
                                "text": "复用未变更源码的已有搜索结果：\n" + search_cache[signature]["text"]}
@@ -940,7 +940,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
-            if observation.get("ok") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
+            if observation.get("ok") and not observation.get("cached") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
                 diagnostic_progress = True
             if observation.get("ok") and tool == "search_files":
                 hits = [json.dumps(hit, ensure_ascii=False, sort_keys=True) for hit in observation.get("hits", [])]
@@ -948,7 +948,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 seen_search_hits.update(hits)
                 if not observation.get("cached"):
                     search_cache[signature] = observation
-            seen_actions.add(signature)
+            if not observation.get("cached"):
+                seen_actions.add(signature)
+            if observation.get("ok") and tool == "read_file" and observation.get("exists") is not False:
+                read_cache[signature] = {**observation, "read": dict(observation.get("read") or {})}
+                if len(read_cache) > 24:
+                    read_cache.pop(next(iter(read_cache)))
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and observation.get("exists") is not False and path:
                 marker = "\n"
@@ -990,6 +995,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     file_revision += 1
                     # 同一批中的后续查询也必须看到刚写入的源码，不能只在批次末失效。
                     search_cache.clear()
+                    read_cache.clear()
                     seen_actions = {item for item in seen_actions if '"tool": "search_files"' not in item}
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
@@ -1045,7 +1051,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "command": "[参数被凭据守卫拒绝]" if secret_write else str(action.get("cmd") or ""),
             })
             if (
-                not observation.get("ok")
+                (not observation.get("ok") or observation.get("cached"))
                 and (tool == "read_file" or inspection_command)
                 and duplicate_read_failures >= 2
                 and switch_coder_model("重复读取已知文件")

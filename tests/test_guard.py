@@ -203,6 +203,8 @@ def test_project_relative_file_paths_preserve_delivery_boundary_and_inputs(tmp_p
     assert result["file"] == "portal/main.py"
     assert not (fs.root / "main.py").exists()
     assert graph._do_action({"tool": "read_file", "path": "main.py"}, fs, shell, git, state)["exists"]
+    assert graph._do_action({"tool": "write_file", "path": "work/portal/main.py", "content": "ready = False\n"}, fs, shell, git, state)["file"] == "portal/main.py"
+    assert not (fs.root / "portal/work").exists()
     assert "只读输入" in graph._do_action({"tool": "read_file", "path": "catalog.json"}, fs, shell, git, state)["text"]
     assert not graph._do_action({"tool": "write_file", "path": "../outside.py", "content": "bad"}, fs, shell, git, state)["ok"]
 
@@ -852,6 +854,34 @@ def test_search_rechecks_changed_files_and_reuses_unchanged_results(tmp_path):
     assert searches[1]["hits"][0]["path"] == "main.py"
     assert searches[2]["hits"] == searches[1]["hits"] and searches[2]["cached"]
     assert all(event.get("ok") for event in searches)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_cached_discovery_and_segment_reads_preserve_current_version(tmp_path, changed):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    work = tmp_path / "work"
+    calls = []
+    def reply(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"actions": [{"tool": "list_files"}, {"tool": "run_command", "cmd": "ls"}]}
+        if len(calls) == 2:
+            return {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}]}
+        if len(calls) == 4 and changed:
+            (work / "main.py").write_text("fresh = True\n")
+        return {"actions": [{"tool": "list_files"}, {"tool": "run_command", "cmd": "ls"},
+                            {"tool": "read_file", "path": "main.py", "start": 0, "max_chars": 5}],
+                "done": len(calls) == 4}
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建入口", "repo": {"files": []}})
+    assert result["coding_ok"]
+    tools = [event.data for event in events if event.kind == "tool"]
+    assert all(tool.get("ok") for tool in tools)
+    reads = [tool for tool in tools if tool.get("tool") == "read_file"]
+    assert reads[-1].get("cached", False) is not changed
+    assert reads[-1]["read"]["complete"] is False
+    assert reads[-1]["text"].endswith("fresh" if changed else "ready")
 
 
 def test_read_cache_refreshes_visibility_after_context_eviction(tmp_path, monkeypatch):
