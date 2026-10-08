@@ -1386,7 +1386,7 @@ class AgentGraph:
             if tool == "search_files":
                 # results 是结构化内容命中列表，方便模型继续精确读取目标文件。
                 results = fs.search(str(action.get("query", "")), int(action.get("max_results", 50)))
-                return {"ok": True, "text": "搜索结果：\n" + json.dumps(results, ensure_ascii=False, indent=2)}
+                return {"ok": True, "text": "搜索结果：\n" + json.dumps(results, ensure_ascii=False, indent=2), "hits": results}
             if tool == "assert_text_absent":
                 # paths/texts 是模型明确给出的目标文件和禁用文本，避免用 shell 表达“无匹配即成功”。
                 paths = action.get("paths") if isinstance(action.get("paths"), list) else []

@@ -47,6 +47,45 @@ def test_failed_tool_aborts_remaining_actions_before_replanning(tmp_path):
     assert (work / "done.py").exists()
 
 
+def test_distinct_integration_reads_do_not_end_unfinished_coding(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    for name in ("one.py", "two.py", "three.py"):
+        fs.write(name, f"name = '{name}'\n")
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "entry.js", "content": "const ready = false;"}]},
+        *({"actions": [{"tool": "read_file", "path": name}]} for name in ("one.py", "two.py", "three.py")),
+        {"actions": [{"tool": "replace_file", "path": "entry.js", "old": "false", "new": "true"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    result = coder(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "完成入口集成", "repo": {"files": fs.list()}})
+    assert result["coding_ok"] is True
+    assert fs.read("entry.js") == "const ready = true;"
+
+
+def test_interface_contract_remains_when_full_snapshot_is_evicted(tmp_path, monkeypatch):
+    from backend.agents import coder as module
+
+    monkeypatch.setattr(module, "SNAPSHOT_BUDGET", 300)
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    calls = []
+
+    def reply(messages, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"actions": [{"tool": "write_file", "path": "api.js", "content": "export function submitItem({sku, quantity}) { return sku; }"}]}
+        if len(calls) == 2:
+            return {"actions": [{"tool": "write_file", "path": "other.js", "content": "const x = 1;\n" + "// 说明\n" * 100}]}
+        prompt = str(messages[-1]["content"])
+        assert "api.js: submitItem({sku, quantity})" in prompt
+        assert "[api.js 当前内容" not in prompt
+        return {"actions": [{"tool": "write_file", "path": "caller.js", "content": "export const ready = true;"}], "done": True}
+
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    assert coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建商品调用模块"})["coding_ok"]
+
+
 @pytest.mark.parametrize("project", ["portal", "service"])
 def test_delivery_directory_drives_script_cwd_without_losing_workspace_inputs(tmp_path, project):
     graph = make_graph(tmp_path)

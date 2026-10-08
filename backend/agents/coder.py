@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shlex
@@ -28,6 +29,28 @@ _CODE_FILE_PATTERN = re.compile(
 FILE_CONTEXT_LIMIT = 24_000
 # SNAPSHOT_BUDGET 控制所有当前文件快照的总量；超大文件仍由 read_file 的 start/max_chars 分段读取。
 SNAPSHOT_BUDGET = 48_000
+
+
+def _interface_brief(path: str, content: str) -> str:
+    """保留调用签名，避免正文快照被挤出后调用方猜测参数名。"""
+
+    signatures: list[str] = []
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return ""
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+                signatures.append(f"{node.name}({ast.unparse(node.args)})")
+            elif isinstance(node, ast.ClassDef):
+                fields = [f"{item.target.id}: {ast.unparse(item.annotation)}" for item in node.body if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)]
+                if fields:
+                    signatures.append(f"{node.name} 字段：" + ", ".join(fields))
+    elif path.endswith((".js", ".ts", ".tsx")):
+        for match in re.finditer(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]{0,500})\)", content):
+            signatures.append(f"{match[1]}({match[2]})")
+    return "\n".join(signatures[:20])[:2_400]
 # CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 12000 字符，
 # 6000 token 足以容纳该动作和协议标签，同时可阻止模型失控生成超长完整文件。
 CODER_OUTPUT_TOKENS = 6_000
@@ -359,6 +382,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     observations: list[str] = []
     # file_observations 保存最近一次读取或写入后自动刷新的当前文件快照。
     file_observations: dict[str, str] = {}
+    interface_summaries: dict[str, str] = {}
+    seen_search_hits: set[str] = set()
     # seen_actions 保存已经执行或明确拒绝的动作签名，防止模型无视观察反复消耗相同工具。
     seen_actions: set[str] = set()
     # progress_items 记录工具、路径或命令，模型每一步都能看到稳定的任务进度账本。
@@ -515,6 +540,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             + f"当前磁盘文件：{manifest}\n"
             + f"已完成进度：{progress}\n"
             + f"已读取且当前可直接修改的文件：{readable}\n"
+            + "已生成模块的接口签名（调用点参数必须与之逐项一致）：\n"
+            + _middle_trim("\n".join(f"{name}: {brief}" for name, brief in interface_summaries.items() if brief), 8_000)
+            + "\n"
             + "必须根据失败清单和已有观察产生新进展；禁止重复扫描、重复创建已有文件或重新开始任务。\n"
             + "最近工具观察是已经发生的权威事实；标记为成功的命令无需再次确认，不得声称没有看到结果。\n"
             + ("当前是失败修复轮次：验证失败清单的优先级高于原始任务中的整体重写等实现方式，只精确修复清单中的问题。\n" if retry else "")
@@ -755,6 +783,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         step_signatures: list[str] = []
         # batch_progress 表示本批至少有一个成功且不是纯 Git 状态查询的动作。
         batch_progress = False
+        diagnostic_progress = False
         # switched_this_step 表示本轮因工具策略失败切换了模型，应立即进入下一轮重新规划。
         switched_this_step = False
         # mutated_paths 收集本批已经改动的文件。一个批次内的多个精确替换共享批次起始快照；
@@ -884,6 +913,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
+            if observation.get("ok") and tool == "read_file" and path not in visible_complete_paths:
+                diagnostic_progress = True
+            if observation.get("ok") and tool == "search_files":
+                hits = [json.dumps(hit, ensure_ascii=False, sort_keys=True) for hit in observation.get("hits", [])]
+                diagnostic_progress = diagnostic_progress or any(hit not in seen_search_hits for hit in hits)
+                seen_search_hits.update(hits)
             seen_actions.add(signature)
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and path:
@@ -894,6 +929,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     graph.model_store.redact_text(raw_text.split(marker, 1)[-1]),
                     FILE_CONTEXT_LIMIT,
                 )
+                if (observation.get("read") or {}).get("complete"):
+                    interface_summaries[path] = _interface_brief(path, file_observations[path])
                 observations.append(f"已读取当前文件：{path}")
             else:
                 observations.append(_observation_brief(action, observation))
@@ -990,6 +1027,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 file_observations[mutated_path] = graph.model_store.redact_text(
                     fs.read(mutated_path, FILE_CONTEXT_LIMIT)
                 )
+                interface_summaries[mutated_path] = _interface_brief(mutated_path, file_observations[mutated_path])
                 read_paths.add(mutated_path)
                 observations.append(f"已自动刷新修改后的当前文件：{mutated_path}；下一轮禁止重复读取，可直接继续修改。")
             except (OSError, ValueError):
@@ -1017,7 +1055,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             seen_actions = {item for item in seen_actions if '"tool": "run_command"' not in item}
         # 同一批中只要已有真实写入或验证命令成功，就属于有效推进；
         # 另一个并行动作失败会反馈给下一轮修复，但不能把已落盘进展误算为空转。
-        if batch_progress:
+        if batch_progress or diagnostic_progress:
             idle_after_mutation = 0
             duplicate_read_failures = 0
         elif mutation_count:
@@ -1028,7 +1066,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             loop_guard.history.clear()
             observations.append("工具批次执行期间收到新指导，已保留完成的原子动作并取消剩余旧动作。")
             continue
-        if loop_guard.record("\n".join(step_signatures), progress=batch_progress):
+        if loop_guard.record("\n".join(step_signatures), progress=batch_progress or diagnostic_progress):
             coding_summary = "检测到连续重复或交替工具空转，保留当前文件并交由验证阶段提供具体修复反馈。"
             graph._emit(state, "coder", "error", coding_summary)
             break
