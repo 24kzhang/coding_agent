@@ -52,7 +52,7 @@ def _interface_brief(path: str, content: str) -> str:
         for match in re.finditer(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]{0,500})\)", content):
             signatures.append(f"{match[1]}({match[2]})")
     return "\n".join(signatures[:20])[:2_400]
-# CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 12000 字符，
+# CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 6000 字符，
 # 6000 token 足以容纳该动作和协议标签，同时可阻止模型失控生成超长完整文件。
 CODER_OUTPUT_TOKENS = 6_000
 # 分块写入会增加合理执行步数。局部步数给实现和验证留出空间，运行级调用、
@@ -638,11 +638,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if (
                 ("原生工具调用参数不是合法 JSON" in error_text or isinstance(exc, LlmOutputLimitError))
                 and isinstance(client, LlmClient)
-                and client.default_effort != "minimal"
+                and client.default_effort != "none"
             ):
                 supported = set(getattr(client.cfg, "efforts", []))
                 lowered = (
-                    "minimal"
+                    "none"
+                    if "none" in supported
+                    else "minimal"
                     if client.default_effort == "low" and "minimal" in supported
                     else "low"
                     if "low" in supported
@@ -658,7 +660,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         "coder",
                         "model",
                         (
-                            f"原生工具参数被推理输出截断，思考等级已从 {previous_effort} "
+                            f"原生工具参数未完整输出，思考等级已从 {previous_effort} "
                             f"降为 {lowered} 后重试"
                         ),
                         data={"reason": "invalid_tool_json", "effort": lowered},
@@ -686,7 +688,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if "原生工具调用参数不是合法 JSON" in error_text:
                     observations.append(
                         f"第 {step} 轮原生工具参数在输出上限处截断。下一轮只能返回一个写入动作，"
-                        "正文不得超过 10000 字符；长文件先 write_file 写首块，后续回合再用 "
+                        "正文不得超过 4000 字符；长文件先 write_file 写首块，后续回合再用 "
                         "append_file 分块追加。不要在同一响应中生成多个文件。"
                     )
                 else:
@@ -700,7 +702,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 graph._emit(
                     state,
                     "coder",
-                    "error",
+                    "error" if transient_failures >= CODER_MAX_TRANSIENT_FAILURES else "model",
                     f"模型服务暂时不可用，{retry_delay:g} 秒后重试"
                     f"（{transient_failures}/{CODER_MAX_TRANSIENT_FAILURES}）：{error_text}",
                 )
@@ -714,7 +716,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             graph._emit(
                 state,
                 "coder",
-                "error",
+                "error" if parse_failures >= 3 else "model",
                 f"模型输出格式无效，正在重试（{parse_failures}/3）：{error_text}",
             )
             if parse_failures >= 2 and switch_coder_model("连续输出格式无效"):
@@ -773,7 +775,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             graph._emit(
                 state,
                 "coder",
-                "error",
+                "error" if empty_steps >= 5 else "model",
                 f"模型未给出可执行动作，正在重试（{empty_steps}/5）"
                 + ("；当前使用普通文本兼容模式" if "longcat" in model_name or empty_steps >= 2 else ""),
             )

@@ -69,7 +69,7 @@ def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
                 raise LlmError("原生工具调用参数不是合法 JSON")
             assert "下一轮只能返回一个写入动作" in messages[-1]["content"]
             write_spec = next(item for item in tools if item["name"] == "write_file")
-            assert write_spec["parameters"]["properties"]["content"]["maxLength"] == 10_000
+            assert write_spec["parameters"]["properties"]["content"]["maxLength"] == 6_000
             self.last_usage = LlmUsage(
                 prompt=1_000,
                 completion=10,

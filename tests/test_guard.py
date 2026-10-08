@@ -789,7 +789,8 @@ def test_stream_output_limit_retains_paid_usage_before_raising():
 
 
 def test_native_output_limit_recovers_with_small_structured_action(tmp_path):
-    graph = make_graph(tmp_path)
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
 
     class LimitedNativeClient(LlmClient):
         def __init__(self):
@@ -816,6 +817,21 @@ def test_native_output_limit_recovers_with_small_structured_action(tmp_path):
     assert client.native_calls == 1
     assert result["coding_ok"]
     assert result["tokens"] == 6250
+    assert any(event.kind == "model" for event in events)
+    assert not any(event.kind == "error" for event in events)
+
+
+def test_exhausted_format_recovery_still_reports_terminal_error(tmp_path):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    def invalid(*_args, **_kwargs):
+        raise LlmError("模型没有返回合法 JSON")
+    client.chat_json = invalid
+    graph._client = lambda *_args: client
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建入口", "model_id": "test"})
+    assert result["coding_ok"] is False
+    assert len([event for event in events if event.kind == "error"]) == 1
 
 
 def test_read_cache_refreshes_visibility_after_context_eviction(tmp_path, monkeypatch):
