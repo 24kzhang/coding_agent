@@ -798,12 +798,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
                 guidance_replan = True
                 break
-            # signature 用稳定 JSON 表示本次动作，相同参数和内容的动作不会重复执行。
-            signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
-            step_signatures.append(signature)
             tool = str(action.get("tool") or "")
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
+            # 以规范化后的路径识别重复动作，避免项目路径与工作区路径形成两个身份。
+            signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
+            step_signatures.append(signature)
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
             inspection_command = tool == "run_command" and _is_inspection_command(
                 str(action.get("cmd", ""))
@@ -985,6 +985,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     passed_failure_commands.clear()
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。
                     mutated_paths.add(path)
+                    if tool == "write_file":
+                        # 本批刚成功写入的内容就是模型提交的当前版本，可继续精确修改或追加。
+                        # 整体重写仍由 unchecked_rewrites 和完整快照守卫独立限制。
+                        read_paths.add(path)
                     if path not in current_files:
                         current_files.append(path)
                 if not observation.get("cached") and (tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file", "run_command"} or tool.startswith("mcp__")):

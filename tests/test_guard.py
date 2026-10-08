@@ -69,6 +69,24 @@ def test_missing_delivery_file_is_not_fabricated_as_a_read_snapshot(tmp_path):
     assert result["ok"] is False
 
 
+def test_same_batch_can_append_and_precisely_edit_its_new_file(tmp_path):
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    events = []
+    graph._emit = lambda *_args, **kwargs: events.append(kwargs.get("data", {}))
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: {
+        "actions": [
+            {"tool": "write_file", "path": "style.css", "content": ".card { color: red; }\n"},
+            {"tool": "append_file", "path": "portal/style.css", "content": ".panel { display: grid; }\n"},
+            {"tool": "replace_file", "path": "style.css", "old": "color: red", "new": "color: green"},
+        ], "done": True,
+    })
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "项目输出到 portal"})
+    assert result["coding_ok"] is True
+    assert (work / "portal/style.css").read_text() == ".card { color: green; }\n.panel { display: grid; }\n"
+    assert not any(event.get("ok") is False for event in events)
+
+
 def test_distinct_integration_reads_do_not_end_unfinished_coding(tmp_path):
     graph = make_graph(tmp_path)
     fs = FsTool(str(tmp_path / "work"))
