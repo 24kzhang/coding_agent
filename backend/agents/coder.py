@@ -385,6 +385,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     file_observations: dict[str, str] = {}
     interface_summaries: dict[str, str] = {}
     seen_search_hits: set[str] = set()
+    search_cache: dict[str, dict] = {}
     # seen_actions 保存已经执行或明确拒绝的动作签名，防止模型无视观察反复消耗相同工具。
     seen_actions: set[str] = set()
     # progress_items 记录工具、路径或命令，模型每一步都能看到稳定的任务进度账本。
@@ -853,6 +854,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         "下一步必须直接 replace_file、replace_block、write_file 或运行验证命令。"
                     ),
                 }
+            elif tool == "search_files" and signature in search_cache:
+                observation = {**search_cache[signature], "cached": True,
+                               "text": "复用未变更源码的已有搜索结果：\n" + search_cache[signature]["text"]}
             elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file"}:
                 observation = {
                     "ok": False,
@@ -942,6 +946,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 hits = [json.dumps(hit, ensure_ascii=False, sort_keys=True) for hit in observation.get("hits", [])]
                 diagnostic_progress = diagnostic_progress or any(hit not in seen_search_hits for hit in hits)
                 seen_search_hits.update(hits)
+                if not observation.get("cached"):
+                    search_cache[signature] = observation
             seen_actions.add(signature)
             # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and observation.get("exists") is not False and path:
@@ -980,6 +986,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         pass
             action_failed = action_failed or not bool(observation.get("ok"))
             if observation.get("ok"):
+                if tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} or observation.get("files"):
+                    file_revision += 1
+                    # 同一批中的后续查询也必须看到刚写入的源码，不能只在批次末失效。
+                    search_cache.clear()
+                    seen_actions = {item for item in seen_actions if '"tool": "search_files"' not in item}
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
                 if not observation.get("cached") and (tool in {"append_file", "assert_text_absent", "model_copy", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__")):
@@ -1002,7 +1013,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if tool == "read_file" and observation.get("exists") is not False and path:
                     read_paths.add(path)
                 elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
-                    file_revision += 1
                     successful_verification_commands.clear()
                     passed_failure_commands.clear()
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。

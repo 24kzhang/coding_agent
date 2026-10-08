@@ -834,6 +834,26 @@ def test_exhausted_format_recovery_still_reports_terminal_error(tmp_path):
     assert len([event for event in events if event.kind == "error"]) == 1
 
 
+def test_search_rechecks_changed_files_and_reuses_unchanged_results(tmp_path):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    query = {"tool": "search_files", "query": "ready"}
+    replies = iter([
+        {"actions": [query]},
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}, query]},
+        {"actions": [query], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "创建入口并定位内容"})
+    assert result["coding_ok"]
+    searches = [event.data for event in events if event.kind == "tool" and event.data.get("tool") == "search_files"]
+    assert len(searches) == 3
+    assert searches[0]["hits"] == []
+    assert searches[1]["hits"][0]["path"] == "main.py"
+    assert searches[2]["hits"] == searches[1]["hits"] and searches[2]["cached"]
+    assert all(event.get("ok") for event in searches)
+
+
 def test_read_cache_refreshes_visibility_after_context_eviction(tmp_path, monkeypatch):
     """被上下文预算裁掉的文件必须可重新读取，最近读取的文件优先完整展示。"""
     from backend.agents import coder as coder_module
