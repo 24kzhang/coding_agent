@@ -246,7 +246,8 @@ def test_llm_token_estimate_handles_chinese() -> None:
     assert LlmClient.estimate_tokens("你好，世界") >= 3
 
 
-def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("requested,expected", [("max", "max"), ("minimal", "low"), ("medium", "high"), ("none", "none")])
+def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_path, requested, expected) -> None:
     """Responses 适配器应映射思考等级与图片，并只返回最终文本。"""
 
     image = tmp_path / "tiny.png"
@@ -284,6 +285,7 @@ def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_pa
         api_key="k",
         model="deepseek-flash",
         protocol="responses",
+        efforts=["none", "minimal", "low", "medium", "high", "max"],
     )
     monkeypatch.setattr("llm.client.httpx.Client", FakeClient)
     client = LlmClient(cfg)
@@ -297,13 +299,13 @@ def test_responses_api_sends_effort_image_and_extracts_usage(monkeypatch, tmp_pa
                 ],
             }
         ],
-        effort="max",
+        effort=requested,
     )
 
     assert text == "看到了"
     assert captured["url"].endswith("/v1/responses")
     assert captured["client"]["trust_env"] is False
-    assert captured["json"]["reasoning"] == {"effort": "max"}
+    assert captured["json"]["reasoning"] == {"effort": expected}
     assert captured["json"]["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
     assert client.last_usage.total == 15
 

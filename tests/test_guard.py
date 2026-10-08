@@ -584,12 +584,13 @@ def test_private_copy_refuses_source_targets_and_ignore_symlinks(tmp_path):
     assert outside.read_text() == "用户内容\n"
 
 
-def test_structured_output_limit_recovers_once_with_accounted_usage(tmp_path):
+@pytest.mark.parametrize("supports_none", [False, True])
+def test_structured_output_limit_recovers_once_with_accounted_usage(tmp_path, supports_none):
     graph = make_graph(tmp_path)
 
     class LimitedClient(LlmClient):
         def __init__(self):
-            self.cfg = SimpleNamespace(max_output_tokens=16_384, efforts=["low", "minimal"])
+            self.cfg = SimpleNamespace(max_output_tokens=16_384, efforts=["low", "minimal"] + (["none"] if supports_none else []))
             self.default_effort = "low"
             self.last_usage = LlmUsage()
             self.calls = 0
@@ -600,7 +601,7 @@ def test_structured_output_limit_recovers_once_with_accounted_usage(tmp_path):
                 assert kwargs["max_tokens"] == 12_000
                 self.last_usage = LlmUsage(prompt=100, completion=12_000, reasoning=11_900)
                 raise LlmOutputLimitError("输出触顶")
-            assert self.default_effort == "minimal"
+            assert self.default_effort == ("none" if supports_none else "minimal")
             assert kwargs["max_tokens"] == 16_384
             self.last_usage = LlmUsage(prompt=100, completion=50)
             return {"status": "plan", "markdown": "完整计划"}

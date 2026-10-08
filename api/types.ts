@@ -1,7 +1,7 @@
 // AgentName 必须与 api/schema.py 中的 AgentName 保持一致。
 export type AgentName = "manager" | "planner" | "coder" | "verifier" | "answer" | "doc" | "compact";
 export type ModelProtocol = "auto" | "responses" | "chat_completions";
-export type ReasoningEffort = "inherit" | "minimal" | "low" | "medium" | "high" | "max";
+export type ReasoningEffort = "inherit" | "none" | "minimal" | "low" | "medium" | "high" | "max";
 
 export interface ModelConfig {
   // 模型本地唯一 id。

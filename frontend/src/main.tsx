@@ -84,6 +84,7 @@ const agents: Array<{ id: AgentName; name: string }> = [
 ];
 const effortOptions: Array<{ value: ReasoningEffort; label: string }> = [
   { value: "inherit", label: "继承" },
+  { value: "none", label: "关闭" },
   { value: "minimal", label: "最低" },
   { value: "low", label: "低" },
   { value: "medium", label: "中" },

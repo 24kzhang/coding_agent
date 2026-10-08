@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 # 后端 FastAPI、前端 TypeScript、LangGraph 返回值都围绕这些结构传输。
 
 ModelProtocol = Literal["auto", "responses", "chat_completions"]
-ReasoningEffort = Literal["inherit", "minimal", "low", "medium", "high", "max"]
+ReasoningEffort = Literal["inherit", "none", "minimal", "low", "medium", "high", "max"]
 
 
 class ModelConfig(BaseModel):

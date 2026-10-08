@@ -370,6 +370,7 @@ class LlmClient:
         chosen_effort = self._effort(effort)
         if chosen_effort:
             payload["reasoning_effort"] = chosen_effort
+            payload["thinking"] = {"type": "disabled" if chosen_effort == "none" else "enabled"}
         # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
         # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
         if max_tokens is not None:
@@ -576,7 +577,11 @@ class LlmClient:
         chosen = value or self.default_effort
         if chosen == "inherit":
             chosen = self.cfg.default_effort
-        return chosen if chosen in self.cfg.efforts else self.cfg.default_effort
+        chosen = chosen if chosen in self.cfg.efforts else self.cfg.default_effort
+        # 统一界面的等级映射到供应商真正支持的等级，避免未知值被服务端忽略后启用高推理。
+        if "deepseek" in self.cfg.model.lower():
+            return {"minimal": "low", "medium": "high"}.get(chosen, chosen)
+        return chosen
 
     def _raise_http_error(self, status: int, body: str) -> None:
         """分类供应商错误并保证密钥不会通过错误正文进入日志。"""

@@ -1594,7 +1594,9 @@ class AgentGraph:
                     recovered_limit = True
                     next_limit = min(limit * 2, client.cfg.max_output_tokens)
                     supported = set(client.cfg.efforts)
-                    if "minimal" in supported:
+                    if "none" in supported:
+                        client.default_effort = "none"
+                    elif "minimal" in supported:
                         client.default_effort = "minimal"
                     elif "low" in supported:
                         client.default_effort = "low"
@@ -1684,7 +1686,7 @@ class AgentGraph:
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
                     supported = set(client.cfg.efforts)
-                    client.default_effort = "minimal" if "minimal" in supported else "low" if "low" in supported else client.default_effort
+                    client.default_effort = "none" if "none" in supported else "minimal" if "minimal" in supported else "low" if "low" in supported else client.default_effort
                     kwargs = {**kwargs, "max_tokens": min(limit * 2, client.cfg.max_output_tokens)}
                     conversation.append({"role": "user", "content": "上次推理耗尽输出预算。请精简推理，只返回完整的最终正文。"})
                     self._emit(state, agent, "model", "文本输出触顶，降低推理后在硬预算内恢复一次")
