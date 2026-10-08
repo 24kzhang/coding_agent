@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import ast
+import re
 import shlex
 import tomllib
 from pathlib import Path
 
 from backend.tools import FsTool
 from backend.tools.scope import command_cwd, delivery_root
+
+
+def inline_issues(command: str) -> list[str]:
+    """在请求进入 shell 前要求解释器内联内容改为可审查脚本。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return []
+    interpreters = {"node", "ruby", "perl", "sh", "bash", "zsh", "fish", "powershell", "pwsh"}
+    for index, argument in enumerate(argv[:-1]):
+        name = Path(argument).name.lower()
+        if (name in interpreters or re.fullmatch(r"python(?:\d+(?:\.\d+)?)?(?:\.exe)?", name)) and argv[index + 1] in {"-c", "-e"}:
+            return ["解释器内联命令尚未执行：先用 write_file 将代码保存为独立脚本，再用 run_command 运行脚本路径；不要重试 -c/-e，也不要改用复合 shell"]
+    return []
 
 
 def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
