@@ -121,6 +121,43 @@ def _typescript_project_checks(fs: FsTool, files: list[str]) -> list[dict[str, A
     return checks
 
 
+def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool, files: list[str], command: str) -> list[str]:
+    """在首次执行检查前比较源码与断言，不以静态审查代替实际测试。"""
+
+    root = delivery_root(fs, state)
+    targets = [rel for rel in files if (root == fs.root or root in fs.safe(rel).parents)
+               and (Path(rel).suffix in {".py", ".js", ".ts", ".tsx", ".html", ".css", ".toml"}
+                    or Path(rel).name in {"package.json", "tsconfig.json"})]
+    targets.sort(key=lambda rel: (0 if "test" in Path(rel).name or "tests" in Path(rel).parts else 1,
+                                  2 if Path(rel).suffix == ".css" else 0, rel))
+    snippets = []
+    budget = 80_000
+    for rel in targets:
+        if budget <= 0:
+            break
+        try:
+            text = fs.read(rel, min(budget, 32_000) + 1)
+        except (OSError, ValueError, UnicodeError):
+            continue
+        limit = min(budget, 32_000)
+        snippets.append(f"## {rel}\n" + graph.model_store.redact_text(text[:limit])
+                        + ("\n[审查上下文在此截断，磁盘仍有后续内容。]" if len(text) > limit else ""))
+        budget -= min(len(text), limit)
+    client = graph._client("verifier", state)
+    result = graph._model_json(state, "verifier", client, [
+        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。只报告可由代码证明的合同矛盾或阻碍执行的问题，不要求无关增强。"},
+        {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
+         + "\n磁盘文件清单：\n" + "\n".join(files) + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
+    ], temperature=0, plain_text=True)
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        raise LlmError("执行前审查未返回合法问题列表")
+    issues = [str(item).strip() for item in issues if str(item).strip()][:12]
+    if result.get("ok") is not True and not issues:
+        raise LlmError("执行前审查未给出可执行结论")
+    return issues
+
+
 def verifier(graph: AgentGraph, state: AgentState) -> AgentState:
     """验证智能体：根据项目文件选择测试命令并执行。"""
 

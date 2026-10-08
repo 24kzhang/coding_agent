@@ -87,6 +87,38 @@ def test_same_batch_can_append_and_precisely_edit_its_new_file(tmp_path):
     assert not any(event.get("ok") is False for event in events)
 
 
+def test_preflight_defers_command_until_contract_is_repaired(tmp_path, monkeypatch):
+    from backend.agents import coder as module
+
+    graph = make_graph(tmp_path)
+    work = tmp_path / "work"
+    replies = iter([
+        {"actions": [
+            {"tool": "write_file", "path": "main.py", "content": "ready = False\n"},
+            {"tool": "run_command", "cmd": "python -m pytest"},
+        ], "done": True},
+        {"actions": [
+            {"tool": "replace_file", "path": "main.py", "old": "False", "new": "True"},
+            {"tool": "run_command", "cmd": "python -m pytest"},
+        ], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    reviews = []
+    def review(*_args):
+        reviews.append(1)
+        return ["main.py 的 ready 必须为真"] if len(reviews) == 1 else []
+    monkeypatch.setattr(module, "review_before_verification", review)
+    commands = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: commands.append(command) or {"cmd": command, "ok": True, "code": 0, "out": "1 passed", "err": ""})
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "创建入口并测试", "task_type": "code_gen"})
+    assert result["coding_ok"]
+    assert len(reviews) == 2
+    assert commands == ["python -m pytest"]
+    assert (work / "main.py").read_text() == "ready = True\n"
+
+
 def test_distinct_integration_reads_do_not_end_unfinished_coding(tmp_path):
     graph = make_graph(tmp_path)
     fs = FsTool(str(tmp_path / "work"))
