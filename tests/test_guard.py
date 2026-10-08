@@ -24,6 +24,7 @@ from backend.agents.verifier import _reject_empty_tests, verifier
 from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunRegistry
 from backend.tools import FsTool, GitTool, ShellTool
+from backend.tools.reads import inspection_read
 from backend.tools.scope import command_cwd, delivery_root
 from backend.tools.shell import prepare_command
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
@@ -1079,7 +1080,7 @@ def test_project_python_rejects_borrowed_host_test_runner(tmp_path, monkeypatch)
     assert "No module named pytest" in isolated["err"]
 
 
-@pytest.mark.parametrize("marker,container,space", [("｜DSML｜", "calls", " "), ("｜｜DSML｜｜", "calls", " "), ("|DSML|", "tool_calls", "")])
+@pytest.mark.parametrize("marker,container,space", [("｜DSML｜", "calls", " "), ("｜｜DSML｜｜", "calls", " "), ("|DSML|", "tool_calls", ""), ("｜DSML｜", "function_calls", "")])
 def test_dsml_variants_preserve_source_and_typed_arguments(marker, container, space):
     client = LlmClient(ModelConfig(id="generic", name="测试", base_url="https://example.test", api_key="假密钥", model="generic"))
     content = "  value = '&lt;'\n\n"
@@ -1100,6 +1101,45 @@ def test_dsml_truncated_batch_duplicate_parameters_and_prose_do_not_execute():
     with pytest.raises(LlmError, match="参数重复"):
         client._parse_dsml_tool_calls('<｜DSML｜ calls>' + duplicate + '</｜DSML｜ calls>')
     assert client._parse_dsml_tool_calls('示例：<｜DSML｜ calls>' + call + '</｜DSML｜ calls>') is None
+
+
+def test_inspection_adapter_keeps_scope_ranges_and_private_metadata(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    state = {"text": "项目输出到 portal"}
+    fs.write("portal/main.py", "# 数据\nready = True\n")
+    shell, git = ShellTool(str(fs.root)), GitTool(str(fs.root))
+    for command, expected in [("head -n 1 portal/main.py", "# 数据\n"), ("tail -n1 portal/main.py", "ready = True\n"), ("tail -c 5 portal/main.py", "True\n")]:
+        action = inspection_read(fs, state, command)
+        assert action and action["tool"] == "read_file"
+        assert graph._do_action(action, fs, shell, git, state)["text"].endswith(expected)
+    assert inspection_read(fs, state, "cat main.py; echo unsafe") is None
+    assert inspection_read(fs, state, "cat ../outside.py") is None
+    private = fs.root / "portal/.local/model.json"
+    private.parent.mkdir()
+    private.write_text('{"api_key":"TEST_ONLY_PRIVATE"}')
+    action = inspection_read(fs, state, "cat portal/.local/model.json")
+    result = graph._do_action(action, fs, shell, git, state)
+    assert result["content_available"] is False and "TEST_ONLY_PRIVATE" not in str(result)
+
+
+def test_dsml_tail_request_uses_file_tool_without_shell_execution(tmp_path):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    work = tmp_path / "work"
+    FsTool(str(work)).write("main.py", "ready = True\n")
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    replies = iter([
+        '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="run_command"><｜｜DSML｜｜ parameter name="cmd" string="true">tail -c 5 main.py</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>',
+        '{"actions":[{"tool":"write_file","path":"done.py","content":"ready = True"}],"done":true}',
+    ])
+    client.chat = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda *_args, **_kwargs: pytest.fail("只读命令不应进入 shell"))
+    result = coder(graph, {"session_id": "s1", "workdir": str(work), "text": "查看末尾并生成入口", "model_id": "test"})
+    assert result["coding_ok"]
+    read = next(event.data for event in events if event.kind == "tool" and event.data.get("tool") == "read_file")
+    assert read["adapted_from"] == "tail -c 5 main.py" and read["text"].endswith("True\n")
 
 
 def test_nested_custom_modal_cannot_pass_with_missing_styles(tmp_path):

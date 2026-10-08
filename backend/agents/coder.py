@@ -14,6 +14,7 @@ from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
 from backend.tools import FsTool, GitTool, tool_specs
+from backend.tools.reads import inspection_read
 from backend.tools.scope import delivery_root, tool_path
 from llm import LlmBalanceError, LlmClient, LlmError
 from llm.client import LlmOutputLimitError
@@ -635,7 +636,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if failed_usage is not usage_before:
                 graph._add_tokens(state, failed_usage)
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
-            error_text = graph._trim(str(exc), 240)
+            error_text = str(exc)[:240]
             if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
                 native_fallback = True
                 coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 10_000)
@@ -815,6 +816,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 guidance_replan = True
                 break
             tool = str(action.get("tool") or "")
+            if tool == "run_command" and not reads_forbidden:
+                adapted = inspection_read(fs, state, str(action.get("cmd", "")))
+                if adapted:
+                    action, tool = adapted, "read_file"
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
             # 以规范化后的路径识别重复动作，避免项目路径与工作区路径形成两个身份。
@@ -973,6 +978,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
+            if action.get("_source_command"):
+                observation = {**observation, "adapted_from": graph.model_store.redact_text(action["_source_command"])}
             if observation.get("ok") and observation.get("content_available") is not False and not observation.get("cached") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
                 diagnostic_progress = True
             if observation.get("ok") and tool == "search_files":

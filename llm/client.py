@@ -834,9 +834,9 @@ class LlmClient:
         """把供应商 DSML 工具标记转为同一动作协议，参数正文按语法原样保留。"""
 
         marker = r"[|｜]+DSML[|｜]+"
-        if not re.match(rf"\s*<{marker}\s*(?:calls|tool_calls)>", text):
+        if not re.match(rf"\s*<{marker}\s*(?:calls|tool_calls|function_calls)>", text):
             return None
-        outer = re.fullmatch(rf"\s*<{marker}\s*(calls|tool_calls)>\s*(.*?)\s*</{marker}\s*\1>\s*", text, re.DOTALL)
+        outer = re.fullmatch(rf"\s*<{marker}\s*(calls|tool_calls|function_calls)>\s*(.*?)\s*</{marker}\s*\1>\s*", text, re.DOTALL)
         if outer is None:
             raise LlmError("DSML 工具调用边界不完整，未执行任何动作")
         calls = re.compile(rf'<{marker}\s*invoke\s+name="([^\"]+)">\s*(.*?)</{marker}\s*invoke>', re.DOTALL)
