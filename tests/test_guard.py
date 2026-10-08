@@ -361,6 +361,17 @@ def test_plan_checks_endpoint_definition_after_earlier_reference(tmp_path):
     assert _plan_quality_issues(graph, state, markdown) == []
 
 
+def test_complete_contract_rejects_field_exclusion_despite_complete_claim(tmp_path):
+    graph = make_graph(tmp_path)
+    schema = {"type": "object", "properties": {"sku": {}, "thumb": {}, "price": {}}}
+    state = {"text": "商品详情展示全部详细信息，禁止加载缩略图资源", "repo": {"snippets": {"schema.json": json.dumps(schema)}}}
+    base = "左栏逐字段展示全部原始字段：`sku`、`thumb`、`price`。GET /api/products/{sku} 返回完整对象。\n"
+    assert _plan_quality_issues(graph, state, base + "`thumb` 仅作文本展示，不加载该资源。") == []
+    issues = _plan_quality_issues(graph, state, base + "`thumb` 接口不返回，仅用于校验。全部 2 个字段。")
+    assert any("数量" in issue for issue in issues)
+    assert any("明确排除" in issue and "thumb" in issue for issue in issues)
+
+
 def test_repair_can_read_distinct_files_before_first_new_mutation(tmp_path):
     """上轮产物不能消耗新修复轮的实现前诊断机会。"""
     graph = make_graph(tmp_path)

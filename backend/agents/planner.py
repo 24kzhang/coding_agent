@@ -136,6 +136,21 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     missing_fields = [field for field in fields if not _mentions_field(markdown, field)]
     if missing_fields:
         issues.append("数据字段说明遗漏真实 schema 字段：" + "、".join(missing_fields))
+    require_complete = bool(re.search(r"(?:所有|全部|完整).{0,12}(?:详细信息|详情信息|原始字段|字段)", goal))
+    if require_complete and fields:
+        for match in re.finditer(r"(?:所有|全部|完整)\s*(\d+)\s*个?\s*(?:原始)?字段", markdown):
+            if int(match.group(1)) < len(fields):
+                issues.append(f"完整字段数量与 schema 不符：计划声明 {match.group(1)} 个，实际有 {len(fields)} 个")
+                break
+        excluded = []
+        for field in fields:
+            for line in markdown.splitlines():
+                if _mentions_field(line, field) and re.search(r"接口\s*不返回|(?:字段|键).{0,12}(?:删除|移除|排除)|(?:不返回|删除|移除|排除).{0,20}[`\"]" + re.escape(field), line):
+                    excluded.append(field)
+                    break
+        if excluded:
+            issues.append("完整详情合同明确排除了原始字段：" + "、".join(excluded)
+                          + "；禁止加载资源不等于删除字段，其原始值仍可作为文本展示")
 
     data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
     if data_site:
@@ -156,10 +171,10 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     complete_detail_claim = any(phrase in markdown for phrase in ("所有字段", "全部字段", "全部原始字段", "逐字段")) or bool(
         re.search(r"(?:所有|全部|完整)\s*\d*\s*个?\s*(?:原始)?字段", markdown)
     )
-    if "所有详细信息" in goal and not complete_detail_claim:
+    if require_complete and not complete_detail_claim:
         issues.append("详情未明确展示数据记录的所有原始字段")
     detail_mentions = list(re.finditer(r"左侧|左栏", markdown))
-    if "所有详细信息" in goal and fields and detail_mentions:
+    if require_complete and fields and detail_mentions:
         # 图像解读可能先提到左栏；应选择实际字段合同最完整的一处，不能只截首个词。
         detail_sections = [markdown[item.start() : item.start() + 2_500] for item in detail_mentions]
         detail_section = max(detail_sections, key=lambda section: sum(_mentions_field(section, field) for field in fields))
