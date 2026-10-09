@@ -48,6 +48,46 @@ def name_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
     return issues[:12]
 
 
+def middleware_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
+    """框架异常边界的确定性检查：HTTP 中间件应返回响应而非抛路由异常。"""
+
+    root = delivery_root(fs, state)
+    issues = []
+    for rel in files:
+        try:
+            path = fs.safe(rel)
+            if path.suffix != ".py" or fs.is_sensitive(path) or not (root == fs.root or root in path.parents):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, SyntaxError):
+            continue
+        names = set()
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module in {"fastapi", "starlette.exceptions"}:
+                names.update(alias.asname or alias.name for alias in node.names if alias.name == "HTTPException")
+        if not names:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not any(
+                isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "middleware"
+                and decorator.args and isinstance(decorator.args[0], ast.Constant) and decorator.args[0].value == "http"
+                for decorator in fn.decorator_list
+            ):
+                continue
+            shadowed = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+            shadowed.update(arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg))
+            candidates = names - shadowed
+            def inspect(node, current=fn, aliases=candidates, filename=rel):
+                if node is not current and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Try, ast.TryStar)):
+                    return
+                if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name) and node.exc.func.id in aliases:
+                    issues.append(f"{filename}:{node.lineno} 在 HTTP 中间件内抛出路由异常，默认框架异常处理边界不能将其转换为预期状态码；请返回带状态码的响应，或用真实测试证明已有自定义异常处理覆盖此路径")
+                for child in ast.iter_child_nodes(node):
+                    inspect(child)
+            inspect(fn)
+    return issues[:12]
+
+
 def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     """执行前复用真实命令工具校验，策略错误只作未执行的修订诊断。"""
 

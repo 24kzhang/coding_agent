@@ -14,6 +14,7 @@ from backend.agents.precheck import (
     import_issues,
     inline_issues,
     manifest_issues,
+    middleware_issues,
     name_issues,
     server_issues,
     source_versions,
@@ -1025,7 +1026,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         preflight_kind = ""
                     fresh_review = preflight_revision != file_revision
                     if fresh_review:
-                        preflight_issues = review_before_verification(graph, {**state, "completed_checks": completed_checks}, fs, current_files, str(action["cmd"]))
+                        preflight_issues = middleware_issues(fs, state, current_files) + review_before_verification(graph, {**state, "completed_checks": completed_checks}, fs, current_files, str(action["cmd"]))
                         preflight_kind = "review" if preflight_issues else ""
                         preflight_revision = file_revision
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
