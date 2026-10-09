@@ -45,3 +45,13 @@ def test_json_function_cannot_execute_an_unexpected_tool():
     client.chat_tools = lambda *_args, **_kwargs: {"actions": [{"tool": "write_file", "path": "main.py", "content": "错误"}]}
     with pytest.raises(LlmError, match="未执行任何动作"):
         client.chat_json([], structured_tools=True)
+
+
+def test_tool_arguments_accept_decoded_objects_and_never_repair_truncated_actions():
+    result = {"path": "main.py", "content": "中文源码"}
+    assert LlmClient._tool_arguments(result) == result
+    assert LlmClient._tool_arguments(json.dumps(result)) == result
+    for value in [None, [], '[]', '{"path":"main.py"', '{"secret":"TEST_ONLY_PRIVATE"坏}']:
+        with pytest.raises(LlmError) as captured:
+            LlmClient._tool_arguments(value)
+        assert "TEST_ONLY_PRIVATE" not in str(captured.value)

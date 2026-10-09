@@ -1636,7 +1636,7 @@ class AgentGraph:
             except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
                     self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
-                invalid_json = "模型没有返回合法 JSON" in str(exc)
+                invalid_json = any(marker in str(exc) for marker in ("模型没有返回合法 JSON", "原生工具调用参数不是合法 JSON", "原生工具参数必须是 JSON 对象", "原生工具参数 JSON 顶层必须是对象", "结构化函数没有返回唯一的 result 对象"))
                 if invalid_json and isinstance(client, LlmClient) and not recovered_json:
                     recovered_json = True
                     conversation.append({"role": "user", "content": "上一输出不是合法 JSON。保持原始对象字段和内容合同，只返回完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不要输出代码围栏，不重复已执行的工具。"})

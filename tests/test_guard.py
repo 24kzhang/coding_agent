@@ -478,7 +478,8 @@ def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypa
         assert calls == ["primary", "backup"]
 
 
-def test_structured_node_repairs_json_with_same_explicit_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["模型没有返回合法 JSON：字符串未转义", "原生工具调用参数不是合法 JSON：Expecting delimiter，位置 12"])
+def test_structured_node_repairs_json_with_same_explicit_model(tmp_path, monkeypatch, failure):
     graph = make_graph(tmp_path)
     cfg = ModelConfig(id="only", name="测试模型", model="only", base_url="https://example.test", api_key="TEST_ONLY_KEY")
     graph.model_store.upsert(cfg)
@@ -489,7 +490,7 @@ def test_structured_node_repairs_json_with_same_explicit_model(tmp_path, monkeyp
             calls.append(self.cfg.id)
             self.last_usage = LlmUsage(prompt=10, completion=50)
             if len(calls) == 1:
-                raise LlmError("模型没有返回合法 JSON：字符串未转义")
+                raise LlmError(failure)
             assert "正确转义" in str(messages)
             return {"ok": True}
 

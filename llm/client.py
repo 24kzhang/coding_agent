@@ -214,6 +214,22 @@ class LlmClient:
 
         return max(1, min(int(requested) if requested is not None else self.cfg.max_output_tokens, self.cfg.max_output_tokens))
 
+    @staticmethod
+    def _tool_arguments(value: Any) -> dict[str, Any]:
+        """兼容字符串或已解码对象，保留严格校验且不回显任何参数正文。"""
+
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            raise LlmError("原生工具参数必须是 JSON 对象或对象字符串")
+        try:
+            result = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise LlmError(f"原生工具调用参数不是合法 JSON：{exc.msg}，位置 {exc.pos}") from exc
+        if not isinstance(result, dict):
+            raise LlmError("原生工具参数 JSON 顶层必须是对象")
+        return result
+
     def _responses_tools(
         self,
         messages: list[dict[str, Any]],
@@ -266,10 +282,7 @@ class LlmClient:
                         if not isinstance(item, dict):
                             continue
                         if item.get("type") == "function_call":
-                            try:
-                                arguments = json.loads(str(item.get("arguments") or "{}"))
-                            except json.JSONDecodeError as exc:
-                                raise LlmError("原生工具调用参数不是合法 JSON") from exc
+                            arguments = self._tool_arguments(item.get("arguments", "{}"))
                             actions.append(self._native_action(str(item.get("name") or ""), arguments))
                         elif item.get("type") == "message":
                             summary_parts.extend(
@@ -321,10 +334,7 @@ class LlmClient:
                 actions: list[dict[str, Any]] = []
                 for call in message.get("tool_calls") or []:
                     function = call.get("function") or {}
-                    try:
-                        arguments = json.loads(str(function.get("arguments") or "{}"))
-                    except json.JSONDecodeError as exc:
-                        raise LlmError("原生工具调用参数不是合法 JSON") from exc
+                    arguments = self._tool_arguments(function.get("arguments", "{}"))
                     actions.append(self._native_action(str(function.get("name") or ""), arguments))
                 return self._tool_result(actions, self._content_text(message.get("content") or ""))
         raise LlmError(last_error or "没有可用的模型接口地址")
