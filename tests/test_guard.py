@@ -1177,7 +1177,8 @@ def test_dsml_truncated_batch_duplicate_parameters_and_prose_do_not_execute():
     duplicate = call.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="path" string="true">other.py</｜DSML｜ parameter></｜DSML｜ invoke>')
     with pytest.raises(LlmError, match="参数重复"):
         client._parse_dsml_tool_calls('<｜DSML｜ calls>' + duplicate + '</｜DSML｜ calls>')
-    assert client._parse_dsml_tool_calls('示例：<｜DSML｜ calls>' + call + '</｜DSML｜ calls>') is None
+    with pytest.raises(LlmError, match="非协议文本"):
+        client._parse_dsml_tool_calls('示例：<｜DSML｜ calls>' + call + '</｜DSML｜ calls>')
 
 
 def test_inspection_adapter_keeps_scope_ranges_and_private_metadata(tmp_path):

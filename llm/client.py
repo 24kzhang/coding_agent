@@ -764,6 +764,15 @@ class LlmClient:
         if text.startswith("```"):
             lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
+        # 完整 JSON 中的源码、示例标签都只是数据，不能再次按文本工具协议执行。
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if not isinstance(parsed, dict):
+                raise LlmError("模型 JSON 顶层必须是对象")
+            return parsed
         # LongCat 偶尔会忽略 JSON 要求，改用其原生工具标签；这里统一转换为现有 ReAct actions。
         qwen_result = self._parse_qwen_tool_calls(text)
         if qwen_result:
@@ -835,6 +844,8 @@ class LlmClient:
 
         marker = r"[|｜]+DSML[|｜]+"
         if not re.match(rf"\s*<{marker}\s*(?:calls|tool_calls|function_calls)>", text):
+            if re.search(rf"<{marker}\s*(?:calls|tool_calls|function_calls)>", text):
+                raise LlmError("DSML 工具调用前存在非协议文本，请返回完整 JSON 或纯 DSML；未执行任何动作")
             return None
         outer = re.fullmatch(rf"\s*<{marker}\s*(calls|tool_calls|function_calls)>\s*(.*?)\s*</{marker}\s*\1>\s*", text, re.DOTALL)
         if outer is None:
