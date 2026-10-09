@@ -19,3 +19,8 @@ frontend/dist/
 /memory/config/models.json
 /memory/legacy/
 /MCP/auth.json
+
+# 本地教程、测试现场和会话记录不作为产品交付推送。
+/docs/
+/run_test/
+/memory/data/projects/*/sessions/
