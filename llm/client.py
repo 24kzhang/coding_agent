@@ -175,22 +175,25 @@ class LlmClient:
         *,
         max_tokens: int | None = None,
         effort: str | None = None,
+        force_tool: str | None = None,
     ) -> dict[str, Any]:
         """使用供应商原生函数工具，并转换为 Agent 内部动作格式。"""
         self.last_usage = LlmUsage()
+        if force_tool and force_tool not in {item["name"] for item in tools}:
+            raise LlmError("强制结构化函数未包含在当前工具合同中")
         protocol = self.cfg.protocol
         if protocol == "auto":
             model = self.cfg.model.lower()
             protocol = "responses" if "deepseek" in model or "qwen3.8" in model else "chat_completions"
         if protocol == "responses":
             try:
-                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort)
+                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool)
             except LlmError as exc:
                 if self.cfg.protocol != "auto" or not any(
                     marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
                 ):
                     raise
-        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort)
+        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool)
 
     @staticmethod
     def _public_tools(tools: list[dict[str, Any]], *, responses: bool) -> list[dict[str, Any]]:
@@ -218,12 +221,13 @@ class LlmClient:
         *,
         max_tokens: int | None,
         effort: str | None,
+        force_tool: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "input": self._normalize_messages(messages, responses=True),
             "tools": self._public_tools(tools, responses=True),
-            "tool_choice": "auto",
+            "tool_choice": {"type": "function", "name": force_tool} if force_tool else "auto",
         }
         payload["max_output_tokens"] = self._output_limit(max_tokens)
         chosen_effort = self._effort(effort)
@@ -283,12 +287,13 @@ class LlmClient:
         *,
         max_tokens: int | None,
         effort: str | None,
+        force_tool: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": self._normalize_messages(messages, responses=False),
             "tools": self._public_tools(tools, responses=False),
-            "tool_choice": "auto",
+            "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "auto",
         }
         payload["max_tokens"] = self._output_limit(max_tokens)
         payload.update(self._chat_reasoning(effort))
@@ -742,8 +747,21 @@ class LlmClient:
         *,
         plain_text: bool = False,
         max_tokens: int | None = None,
+        structured_tools: bool = False,
     ) -> dict[str, Any]:
         """返回结构化对象，并兼容 JSON 代码块与 LongCat 原生工具标签。"""
+
+        if structured_tools and "tools" in self.cfg.capabilities:
+            # 分析节点只返回数据，不执行该函数；用原生参数协议避免源码引号污染 JSON 正文。
+            spec = {"name": "return_json", "description": "返回调用方要求的完整 JSON 对象，不执行文件或命令操作。",
+                    "parameters": {"type": "object", "properties": {"result": {"type": "object", "additionalProperties": True}},
+                                   "required": ["result"], "additionalProperties": False}}
+            instruction = {"role": "system", "content": "本次只调用 return_json，把原始要求的完整对象放进 result 参数；不要输出 JSON 正文或解释，不改变原始字段合同。"}
+            result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json")
+            actions = result.get("actions") or []
+            if len(actions) != 1 or actions[0].get("tool") != "return_json" or not isinstance(actions[0].get("result"), dict):
+                raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作")
+            return actions[0]["result"]
 
         # chat_kwargs 只在调用方真的设置预算时携带 max_tokens，保持对旧测试桩和兼容客户端的调用合同。
         chat_kwargs: dict[str, Any] = {"temperature": temperature}

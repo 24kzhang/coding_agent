@@ -1608,6 +1608,8 @@ class AgentGraph:
         for _step in range(4):
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or default_limit))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
+            if isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []):
+                call_kwargs["structured_tools"] = True
             usage_before = getattr(client, "last_usage", None)
             try:
                 data = client.chat_json(conversation, **call_kwargs)
