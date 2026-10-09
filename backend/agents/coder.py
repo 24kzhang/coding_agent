@@ -416,6 +416,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_issues: list[str] = []
     preflight_kind = ""
     completed_checks: list[dict] = []
+    action_protocol_failures = 0
     # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
     idle_after_mutation = 0
     # repo_files 来自前置仓库读取节点，已有索引时 Coder 无需再次 list_files。
@@ -756,6 +757,20 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             graph._emit(state, "coder", "thought", thought)
         # actions 是模型请求执行的工具动作列表。
         actions = graph._normalize_actions(data.get("actions"), mcp_tools)
+        invalid_actions = [str(action["_error"]) for action in actions if action.get("_error")]
+        if invalid_actions:
+            # 参数校验失败不是工具执行失败；整批尚未执行，done 不能越过协议修订。
+            action_protocol_failures += 1
+            observations.append("本批工具尚未执行，必须修正参数：" + "；".join(invalid_actions[:3]))
+            terminal = action_protocol_failures >= 3
+            graph._emit(state, "coder", "error" if terminal else "model",
+                        f"工具参数协议需修订（{action_protocol_failures}/3），整批未执行：" + "；".join(invalid_actions[:3]),
+                        data={"reason": "invalid_action_protocol", "issues": invalid_actions[:3]})
+            if terminal:
+                coding_summary = "工具参数协议连续三次未修正，已停止且未执行无效动作。"
+                break
+            continue
+        action_protocol_failures = 0
         if len(actions) > 3:
             # 只执行前 3 个动作，剩余动作留到下一轮，避免一个错误批次破坏多个文件。
             observations.append(f"模型本轮返回 {len(actions)} 个动作，只执行前 3 个；其余动作请下一轮继续。")
