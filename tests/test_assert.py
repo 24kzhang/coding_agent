@@ -6,6 +6,7 @@ from backend.agents.coder import coder
 from backend.agents.graph import AgentGraph
 from backend.agents.precheck import assertion_issues
 from backend.memory import MemoryStore
+from backend.tools import FsTool, GitTool, ShellTool
 from llm.client import LlmUsage
 from llm.store import ModelStore
 
@@ -31,3 +32,18 @@ def test_ad_hoc_check_is_not_executed_and_has_bounded_revisions(tmp_path):
     graph._do_action = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("临时标识断言不应执行"))
     result = coder(graph, {"workdir": str(tmp_path / "work"), "session_id": "s1", "text": "创建项目"})
     assert not result["coding_ok"] and len(calls) == 3
+
+
+def test_ignore_rule_requires_presence_and_explicit_removal_remains_supported(tmp_path):
+    action = {"paths": [".gitignore"], "texts": [".venv"]}
+    assert assertion_issues({"text": "将 .venv 写入忽略文件"}, action)
+    assert not assertion_issues({"text": "移除 .venv 忽略规则"}, action)
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write(".gitignore", ".venv/\n.local/\n")
+    shell, git = ShellTool(str(fs.root)), GitTool(str(fs.root))
+    assert graph._do_action({"tool": "assert_text_present", **action}, fs, shell, git)["ok"]
+    assert not graph._do_action({"tool": "assert_text_present", "paths": [".gitignore"], "texts": ["missing/"]}, fs, shell, git)["ok"]
+    fs.write("portal/.gitignore", ".venv/\n")
+    scoped = {"tool": "assert_text_present", "paths": [".gitignore"], "texts": [".venv"]}
+    assert graph._do_action(scoped, fs, shell, git, {"text": "项目输出到 portal"})["ok"]

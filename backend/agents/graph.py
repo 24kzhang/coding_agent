@@ -1120,6 +1120,7 @@ class AgentGraph:
         allowed = {
             "append_file",
             "assert_text_absent",
+            "assert_text_present",
             "git_diff",
             "git_status",
             "list_files",
@@ -1435,11 +1436,16 @@ class AgentGraph:
                 # results 是结构化内容命中列表，方便模型继续精确读取目标文件。
                 results = fs.search(str(action.get("query", "")), int(action.get("max_results", 50)))
                 return {"ok": True, "text": "搜索结果：\n" + json.dumps(results, ensure_ascii=False, indent=2), "hits": results}
-            if tool == "assert_text_absent":
+            if tool in {"assert_text_absent", "assert_text_present"}:
                 # paths/texts 是模型明确给出的目标文件和禁用文本，避免用 shell 表达“无匹配即成功”。
                 paths = action.get("paths") if isinstance(action.get("paths"), list) else []
                 texts = action.get("texts") if isinstance(action.get("texts"), list) else []
+                paths = [fs.safe(tool_path(fs, state or {}, str(path), write=False)).relative_to(fs.root).as_posix() for path in paths]
                 hits = fs.find_text([str(path) for path in paths], [str(text) for text in texts])
+                if tool == "assert_text_present":
+                    found = {(hit["path"], hit["text"]) for hit in hits}
+                    missing = [{"path": path, "text": text} for path in paths for text in texts if (path, text) not in found]
+                    return {"ok": not missing, "text": "必需文字存在断言通过" if not missing else "必需文字缺失：" + json.dumps(missing, ensure_ascii=False), "missing": missing}
                 if hits:
                     return {
                         "ok": False,
