@@ -277,6 +277,7 @@ class ModelStore:
             "protocol": cfg.protocol,
             "timeout": cfg.timeout,
             "default_effort": cfg.default_effort,
+            "max_output_tokens": cfg.max_output_tokens,
         }
         fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
         temp = Path(name)

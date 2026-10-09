@@ -67,6 +67,8 @@ def test_model_store_public_view_and_private_copy(tmp_path) -> None:
             api_key="sk-private-value",
             model="deepseek-flash",
             protocol="responses",
+            default_effort="none",
+            max_output_tokens=1024,
         )
     )
     project = tmp_path / "project"
@@ -80,6 +82,9 @@ def test_model_store_public_view_and_private_copy(tmp_path) -> None:
     assert destination.parent.stat().st_mode & 0o777 == 0o700
     assert ".local/" in (project / ".gitignore").read_text(encoding="utf-8")
     assert json.loads(destination.read_text(encoding="utf-8"))["api_key"] == "sk-private-value"
+    private = json.loads(destination.read_text(encoding="utf-8"))
+    assert private["default_effort"] == "none"
+    assert private["max_output_tokens"] == 1024
 
 
 def test_model_store_redacts_configured_and_generated_credentials(tmp_path) -> None:

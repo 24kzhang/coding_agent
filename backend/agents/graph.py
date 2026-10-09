@@ -1387,7 +1387,7 @@ class AgentGraph:
                 target = fs.safe(rel)
                 if fs.is_sensitive(target):
                     # 私密正文始终不可读取；安全元信息是正常分支，不伪装成空文件或读取快照。
-                    fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort"] if target.name == "model.json" else []
+                    fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort", "max_output_tokens"] if target.name == "model.json" else []
                     return {"ok": True, "exists": target.exists(), "content_available": False,
                             "sensitive": True, "path": rel, "status": "metadata_only",
                             "expected_model_fields": fields,
