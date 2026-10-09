@@ -43,11 +43,16 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
             return {**action, "metadata_only": True, "measure": {"-l": "lines", "-c": "bytes", "-m": "chars"}[argv[1]]}
         if program == "cat" or not path.is_file() or fs.is_sensitive(path):
             return action
+        if count == 0:
+            return {**action, "_empty_range": True}
         if path.stat().st_size > 2_000_000 or path.suffix.lower() not in fs.text_suffixes | {".log", ".out", ".err"}:
             return None
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # 与 FsTool.read 的原始换行保持一致，否则 CRLF 会使末尾字符偏移错位。
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as stream:
+            text = stream.read()
         if unit == "lines":
-            lines = text.splitlines(keepends=True)
+            parts = text.split("\n")
+            lines = [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
             size = len("".join(lines[:count] if program == "head" else lines[-count:] if count else []))
         else:
             size = count

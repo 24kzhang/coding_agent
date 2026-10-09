@@ -1396,6 +1396,9 @@ class AgentGraph:
                 if not target.exists() and not fs.is_sensitive(target):
                     return {"ok": True, "exists": False, "path": rel,
                             "text": f"文件尚不存在：{rel}；未读取到任何内容，不等同于空文件。若是新增交付物可用 write_file 创建；若是用户提供的输入，应先核对原路径，不得伪造数据。"}
+                if action.get("_empty_range") and target.is_file():
+                    return {"ok": True, "exists": True, "content_available": False, "path": rel,
+                            "text": f"所选范围为空：{rel}；本次未提供正文，不作为可修改快照。"}
                 if action.get("metadata_only"):
                     measure = str(action.get("measure") or "bytes")
                     if measure == "lines":
