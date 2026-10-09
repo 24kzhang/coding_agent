@@ -442,8 +442,8 @@ class AgentGraph:
 
     """从会话记忆中查找最近仍未完成的 pending_plan。"""
     def _latest_pending_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
-        # 倒序查找最近 200 条记录，优先看到最新 Plan 状态。
-        for rec in reversed(self.memory.read_session(workdir, session_id, limit=200)):
+        # Plan 是控制状态，不能随执行事件增长或上下文压缩而消失。
+        for rec in reversed(self.memory.state_records(workdir, session_id, "planner")):
             # 如果已经有 plan_done 或 plan_cancelled，说明旧 pending_plan 不再有效。
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") in {"plan_done", "plan_cancelled"}:
                 return None
@@ -457,7 +457,7 @@ class AgentGraph:
 
     """从会话记忆中查找最近生成的计划。"""
     def _latest_saved_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
-        for rec in reversed(self.memory.read_session(workdir, session_id, limit=200)):
+        for rec in reversed(self.memory.state_records(workdir, session_id, "planner")):
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") in {"plan_executed", "plan_cancelled"}:
                 return None
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") == "plan_done":

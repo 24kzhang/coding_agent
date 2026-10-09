@@ -303,6 +303,17 @@ class MemoryStore:
         records = self.read_session(workdir, session_id)
         return self._records_interrupted(records)
 
+    def state_records(self, workdir: str, session_id: str, agent: str) -> list[dict[str, Any]]:
+        """控制状态读取完整 Agent 原始日志，独立于模型上下文的裁剪与压缩。"""
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", agent):
+            raise ValueError("非法智能体名称")
+        safe_id = self._safe_session_id(session_id)
+        path = self.project_path(workdir) / "sessions" / safe_id / "agents" / agent / "log.jsonl"
+        with self.lock:
+            records = [rec for rec in self._read_session_file(path) if rec.get("ag") == agent and rec.get("tl") == "state"]
+        return sorted(records, key=lambda rec: int(rec.get("id", 0)))
+
     def conversation_context(
         self,
         workdir: str,
