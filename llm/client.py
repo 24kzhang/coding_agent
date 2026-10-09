@@ -774,7 +774,7 @@ class LlmClient:
         longcat_result = self._parse_longcat_tool_calls(text)
         if longcat_result:
             return longcat_result
-        # candidate 从解释文字中提取第一个括号平衡的 JSON 对象，不会被字符串内的花括号干扰。
+        # 仅提取唯一合法对象；代码中的花括号和多个相互矛盾的对象不能冒充结果。
         candidate = self._extract_json_object(text)
         if candidate:
             text = candidate
@@ -931,7 +931,7 @@ class LlmClient:
         raise LlmError("模型响应中没有可用的文本 content")
 
     def _extract_json_object(self, text: str) -> str:
-        """提取文本中第一个完整 JSON 对象，正确处理字符串和转义字符。"""
+        """提取唯一合法的完整对象，不从截断对象内部抢救出可执行动作。"""
 
         # start 是当前候选对象起始位置；depth 是花括号嵌套深度。
         start = -1
@@ -939,6 +939,7 @@ class LlmClient:
         # in_string 和 escaped 用于忽略 JSON 字符串内部的花括号及转义引号。
         in_string = False
         escaped = False
+        candidates: list[str] = []
         for index, char in enumerate(text):
             if start < 0:
                 if char == "{":
@@ -960,8 +961,16 @@ class LlmClient:
             elif char == "}":
                 depth -= 1
                 if depth == 0:
-                    return text[start : index + 1]
-        return ""
+                    candidate = text[start : index + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        candidates.append(candidate)
+                    start = -1
+        # 未闭合的外层对象不能被忽略，否则可能执行残缺批次中的早期动作。
+        return candidates[0] if start < 0 and len(candidates) == 1 else ""
 
     def test(self) -> dict[str, Any]:
         """用于前端设置页的连通性测试。"""

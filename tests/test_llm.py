@@ -509,7 +509,7 @@ def test_llm_extracts_balanced_json_with_braces_inside_string() -> None:
     cfg = ModelConfig(id="x", name="测试", base_url="https://api.example.com", api_key="k", model="m")
     client = LlmClient(cfg)
 
-    text = '说明文字 {"thought":"保留 { 花括号 }", "done":true} 后续文字 {"ignored":true}'
+    text = '说明文字 {"thought":"保留 { 花括号 }", "done":true} 后续文字 {ignored}'
 
     assert client._extract_json_object(text) == '{"thought":"保留 { 花括号 }", "done":true}'
 
