@@ -64,7 +64,7 @@ def answer(graph: AgentGraph, state: AgentState) -> AgentState:
                 )
             else:
                 data = client.chat_json(messages, plain_text="longcat" in model_name)
-            graph._add_tokens(state, client.last_usage)
+            graph._add_tokens(state, client.last_usage, agent="answer", model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
         except LlmBalanceError:
             raise
         except LlmError as exc:
@@ -133,7 +133,7 @@ def _plain_answer(graph: AgentGraph, state: AgentState, client: object) -> str:
     try:
         # text 是模型生成的最终回答。
         text = client.chat(messages, temperature=0.2).strip()
-        graph._add_tokens(state, client.last_usage)
+        graph._add_tokens(state, client.last_usage, agent="answer", model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
     except LlmBalanceError:
         raise
     except LlmError as exc:
@@ -183,7 +183,7 @@ def _synthesize_mcp_answer(
     try:
         # 普通 chat 用于最终自然语言回答，不再解析任何工具协议。
         text = client.chat(messages, temperature=0.2, max_tokens=3000)
-        graph._add_tokens(state, client.last_usage)
+        graph._add_tokens(state, client.last_usage, agent="answer", model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
         return _answer_summary(text, "MCP 查询已完成，但模型没有返回总结。")
     except LlmBalanceError:
         raise

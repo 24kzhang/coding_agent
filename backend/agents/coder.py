@@ -635,13 +635,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     data = client.chat_json(messages, max_tokens=output_limit)
                 else:
                     data = client.chat_json(messages)
-            graph._add_tokens(state, client.last_usage)
+            graph._add_tokens(state, client.last_usage, agent="coder", model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
         except LlmBalanceError:
             raise
         except LlmError as exc:
             failed_usage = getattr(client, "last_usage", None)
             if failed_usage is not usage_before:
-                graph._add_tokens(state, failed_usage)
+                graph._add_tokens(state, failed_usage, agent="coder", model_id=str(getattr(getattr(client, "cfg", None), "id", "")), failed=True)
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = str(exc)[:240]
             if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
