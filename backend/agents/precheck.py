@@ -98,6 +98,18 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     return []
 
 
+def assertion_issues(state: dict, action: dict) -> list[str]:
+    """源码局部标识不能代替行为断言，用户明确要求的文字禁用约束仍可验证。"""
+
+    if not any(Path(path).suffix in {".py", ".js", ".ts", ".tsx", ".jsx"} for path in action.get("paths", [])):
+        return []
+    requested = str(state.get("text") or "") + "\n" + "\n".join(state.get("guidance") or [])
+    guessed = [text for text in action.get("texts", []) if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*", text) and text not in requested]
+    if guessed:
+        return ["文字缺失断言尚未执行：" + "、".join(guessed) + " 是实现局部标识，不是用户明确要求禁止的文字。不要把合法函数名、属性名或注释当作失败；请对照接口签名并用真实行为测试验证修改。"]
+    return []
+
+
 def source_versions(fs: FsTool, state: dict, files: list[str]) -> dict[str, str]:
     """记录公开源码版本，供后续审查区分真实通过证据与变更后的待验状态。"""
 

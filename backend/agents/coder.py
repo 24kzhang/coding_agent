@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.loop import LoopGuard
 from backend.agents.precheck import (
+    assertion_issues,
     command_issues,
     import_issues,
     inline_issues,
@@ -421,6 +422,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     completed_checks: list[dict] = []
     action_protocol_failures = 0
     edit_protocol_failures = 0
+    assertion_protocol_failures = 0
     # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
     idle_after_mutation = 0
     # repo_files 来自前置仓库读取节点，已有索引时 Coder 无需再次 list_files。
@@ -842,6 +844,18 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 guidance_replan = True
                 break
             tool = str(action.get("tool") or "")
+            if tool == "assert_text_absent":
+                advice = assertion_issues(state, action)
+                if advice:
+                    assertion_protocol_failures += 1
+                    observations.extend(advice)
+                    graph._emit(state, "coder", "error" if assertion_protocol_failures >= 3 else "review", advice[0])
+                    action_failed = True
+                    diagnostic_progress = True
+                    if assertion_protocol_failures >= 3:
+                        coding_summary = "文字断言连续三次未改为需求或行为验证，已停止。"
+                    break
+                assertion_protocol_failures = 0
             if tool == "run_command" and not reads_forbidden:
                 adapted = inspection_read(fs, state, str(action.get("cmd", "")))
                 if adapted:
@@ -1239,7 +1253,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # changes 包含此前轮次的产物，不代表本轮已经完成诊断并开始实现。
             # 修复轮允许读取不同目标文件；重复/交替读取仍由 LoopGuard 和硬预算约束。
             idle_after_mutation += 1
-        if edit_protocol_failures >= 3:
+        if edit_protocol_failures >= 3 or assertion_protocol_failures >= 3:
             break
         if guidance_replan:
             loop_guard.history.clear()
