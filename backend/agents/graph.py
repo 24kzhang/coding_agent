@@ -29,7 +29,7 @@ from backend.clock import utc_stamp
 from backend.memory import MemoryStore
 from backend.repo_map import RepoMap
 from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
-from backend.tools.scope import command_cwd, delivery_root, require_delivery_path, tool_path
+from backend.tools.scope import command_scope, delivery_root, require_delivery_path, tool_path
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError
@@ -213,12 +213,16 @@ class AgentGraph:
                      command: str, timeout: int = 180, create_cwd: bool = False) -> dict[str, Any]:
         """Coding 与 Verifier 共用交付目录解析，避免命令在错误父目录执行。"""
 
-        cwd = command_cwd(fs, state, command)
+        cwd, actual = command_scope(fs, state, command)
         if create_cwd:
             cwd.mkdir(parents=True, exist_ok=True)
         if cwd == fs.root:
-            return shell.run(command, timeout=timeout)
-        return shell.run(command, timeout=timeout, cwd=cwd)
+            result = shell.run(actual, timeout=timeout)
+        else:
+            result = shell.run(actual, timeout=timeout, cwd=cwd)
+        if actual != command:
+            result["requested_cmd"] = command
+        return result
 
     def _run_node(
         self,

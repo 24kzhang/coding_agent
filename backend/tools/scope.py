@@ -51,22 +51,35 @@ def tool_path(fs: FsTool, state: dict[str, Any], rel: str, *, write: bool) -> st
     return rel
 
 
-def command_cwd(fs: FsTool, state: dict[str, Any], command: str) -> Path:
-    """未加工作区前缀的项目命令在交付根目录运行；明确前缀的命令保留父目录。"""
+def command_scope(fs: FsTool, state: dict[str, Any], command: str) -> tuple[Path, str]:
+    """统一命令与文件工具的工作区名称别名，保留参数引用和交付目录语义。"""
 
     output = delivery_root(fs, state)
     if output == fs.root:
-        return output
+        return output, command
     prefix = output.relative_to(fs.root).as_posix()
     try:
         argv = shlex.split(command)
     except ValueError:
-        return fs.root
-    for argument in argv[1:]:
+        return fs.root, command
+    workspace_prefix = fs.root.name + "/"
+    normalized = list(argv)
+    for index, argument in enumerate(argv[1:], start=1):
+        option, separator, value = argument.partition("=") if argument.startswith("-") else ("", "", argument)
+        if value == workspace_prefix + prefix or value.startswith(workspace_prefix + prefix + "/"):
+            normalized[index] = option + separator + value[len(workspace_prefix):]
+    actual = shlex.join(normalized) if normalized != argv else command
+    for argument in normalized[1:]:
         value = argument.split("=", 1)[-1] if argument.startswith("-") else argument
         if value == prefix or value.startswith(prefix + "/"):
-            return fs.root
-    return output
+            return fs.root, actual
+    return output, actual
+
+
+def command_cwd(fs: FsTool, state: dict[str, Any], command: str) -> Path:
+    """未加交付前缀的项目命令在交付根目录运行。"""
+
+    return command_scope(fs, state, command)[0]
 
 
 def require_delivery_path(fs: FsTool, root: Path, rel: str) -> None:

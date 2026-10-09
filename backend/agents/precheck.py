@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 
 from backend.tools import FsTool
-from backend.tools.scope import command_cwd, delivery_root
+from backend.tools.scope import command_scope, delivery_root
 
 
 def source_versions(fs: FsTool, state: dict, files: list[str]) -> dict[str, str]:
@@ -71,31 +71,57 @@ def server_issues(command: str) -> list[str]:
 def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     """在 uv 触发项目构建前核对公开元数据文件与显式包目录。"""
 
+    root, actual = command_scope(fs, state, command)
     try:
-        argv = shlex.split(command)
+        argv = shlex.split(actual)
     except ValueError:
         return []
     if not argv or Path(argv[0]).name != "uv" or not any(action in argv for action in {"run", "sync", "build"}):
         return []
     if any(flag in argv for flag in {"--no-project", "--no-sync", "--no-install-project"}):
         return []
-    root = command_cwd(fs, state, command)
-    for index, argument in enumerate(argv[:-1]):
-        if argument in {"--project", "--directory", "-C"}:
-            root = (root / argv[index + 1]).resolve()
+    directory, project_path = None, None
+    index = 1
+    valued = {"--python", "--with", "--with-editable", "--with-requirements", "--group", "--package", "--env-file", "--config-file", "--cache-dir"}
+    while index < len(argv):
+        argument = argv[index]
+        option, separator, value = argument.partition("=")
+        if option in {"--project", "--directory", "-C"} | valued:
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    return []
+                value = argv[index]
+            if option == "--project":
+                project_path = value
+            elif option in {"--directory", "-C"}:
+                directory = value
+        elif (argument not in {"run", "sync", "build"} and not argument.startswith("-")) or argument == "--":
+            # 程序自己的参数不属于 uv 项目定位参数。
             break
+        index += 1
+    if directory is not None:
+        root = (root / directory).resolve()
+    if project_path is not None:
+        root = (root / project_path).resolve()
     manifest = root / "pyproject.toml"
     try:
         path = fs.safe(manifest.relative_to(fs.root).as_posix())
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError):
         return []
-    uv = data.get("tool", {}).get("uv", {})
+    def table(*keys):
+        value = data
+        for key in keys:
+            value = value.get(key, {}) if isinstance(value, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    uv = table("tool", "uv")
     packaged = "build" in argv or uv.get("package", "build-system" in data)
     if not packaged:
         return []
     references = []
-    project = data.get("project", {})
+    project = table("project")
     readme = project.get("readme")
     if isinstance(readme, str):
         references.append(readme)
@@ -104,8 +130,10 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     license_value = project.get("license")
     if isinstance(license_value, dict) and isinstance(license_value.get("file"), str):
         references.append(license_value["file"])
-    wheel = data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
-    references.extend(value for value in wheel.get("packages", []) if isinstance(value, str) and not any(char in value for char in "*?[]"))
+    wheel = table("tool", "hatch", "build", "targets", "wheel")
+    packages = wheel.get("packages", [])
+    if isinstance(packages, list):
+        references.extend(value for value in packages if isinstance(value, str) and not any(char in value for char in "*?[]"))
     issues = []
     for reference in references:
         target = root / reference
