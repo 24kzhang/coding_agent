@@ -420,6 +420,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_kind = ""
     completed_checks: list[dict] = []
     action_protocol_failures = 0
+    edit_protocol_failures = 0
     # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
     idle_after_mutation = 0
     # repo_files 来自前置仓库读取节点，已有索引时 Coder 无需再次 list_files。
@@ -857,6 +858,31 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     preflight_issues, preflight_kind = [], ""
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
+            edit_path = str(action.get("path") or "")
+            if tool in {"replace_file", "replace_block"} and edit_path in read_paths and not fs.is_sensitive(fs.safe(edit_path)):
+                try:
+                    if tool == "replace_file":
+                        fs.preview_replace(edit_path, str(action["old"]), str(action["new"]), int(action.get("expected", 1)))
+                    else:
+                        fs.preview_block(edit_path, str(action["start_marker"]), str(action["end_marker"]), str(action["content"]))
+                except (OSError, ValueError) as exc:
+                    edit_protocol_failures += 1
+                    try:
+                        refreshed = graph.model_store.redact_text(fs.read(edit_path, FILE_CONTEXT_LIMIT))
+                        file_observations.pop(edit_path, None)
+                        file_observations[edit_path] = refreshed
+                        interface_summaries[edit_path] = _interface_brief(edit_path, refreshed)
+                    except (OSError, ValueError):
+                        pass
+                    message = f"编辑尚未执行：{exc}。已刷新真实源码；使用现有锚点，替换至文件末尾请传空 end_marker，不要猜测不存在的边界。"
+                    observations.append(message)
+                    graph._emit(state, "coder", "error" if edit_protocol_failures >= 3 else "review", message,
+                                data={"reason": "edit_precondition", "path": edit_path})
+                    action_failed = True
+                    if edit_protocol_failures >= 3:
+                        coding_summary = "编辑定位连续三次未修正，未写入无效替换。"
+                    break
+                edit_protocol_failures = 0
             # 以规范化后的路径识别重复动作，避免项目路径与工作区路径形成两个身份。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             step_signatures.append(signature)
@@ -1213,6 +1239,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             # changes 包含此前轮次的产物，不代表本轮已经完成诊断并开始实现。
             # 修复轮允许读取不同目标文件；重复/交替读取仍由 LoopGuard 和硬预算约束。
             idle_after_mutation += 1
+        if edit_protocol_failures >= 3:
+            break
         if guidance_replan:
             loop_guard.history.clear()
             observations.append("工具批次执行期间收到新指导，已保留完成的原子动作并取消剩余旧动作。")

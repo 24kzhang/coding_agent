@@ -207,6 +207,11 @@ class FsTool:
     def replace(self, rel: str, old: str, new: str, expected: int = 1) -> str:
         """精确替换已有文本；匹配数量不符时拒绝写入。"""
 
+        return self.write(rel, self.preview_replace(rel, old, new, expected))
+
+    def preview_replace(self, rel: str, old: str, new: str, expected: int = 1) -> str:
+        """校验精确替换并计算结果，完全不写入文件。"""
+
         # path 和 text 分别是受控文件路径及当前完整内容。
         path = self.safe(rel)
         self._ensure_not_sensitive(path)
@@ -220,10 +225,15 @@ class FsTool:
             raise ValueError(f"精确替换失败：期望匹配 {expected} 处，实际匹配 {actual} 处")
         # updated 只替换明确数量，保留文件其他内容和用户已有修改。
         updated = text.replace(old, new, expected)
-        return self.write(rel, updated)
+        return updated
 
     def replace_block(self, rel: str, start_marker: str, end_marker: str, content: str) -> str:
         """从唯一开始标记替换到结束标记之前；结束标记为空时替换到文件末尾。"""
+
+        return self.write(rel, self.preview_block(rel, start_marker, end_marker, content))
+
+    def preview_block(self, rel: str, start_marker: str, end_marker: str, content: str) -> str:
+        """定位锚点并计算替换结果，完全不写入文件。"""
 
         # path/text 是受工作目录约束的目标文件及当前完整内容，所有定位都在真实磁盘版本上完成。
         path = self.safe(rel)
@@ -248,7 +258,7 @@ class FsTool:
             # 空结束标记明确表示替换到 EOF，适合安全更新文件最后一个函数或章节。
             end_index = len(text)
         updated = text[:start_index] + content + text[end_index:]
-        return self.write(rel, updated)
+        return updated
 
     def search(self, query: str, max_results: int = 50) -> list[dict[str, object]]:
         """在项目文本文件中搜索字符串并返回路径、行号和行内容。"""
