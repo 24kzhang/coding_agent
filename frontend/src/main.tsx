@@ -176,8 +176,20 @@ function App() {
     eventRef.current?.scrollTo({ top: eventRef.current.scrollHeight, behavior: "smooth" });
   }, [events.length]);
 
-  // tokenTotal 是右侧运行状态展示的累计 token 估算。
+  // tokenTotal 是整个会话的累计用量；供应商实值与估算不能混为一谈。
   const tokenTotal = useMemo(() => events.reduce((sum, event) => sum + event.tokens, 0), [events]);
+  const usage = useMemo(() => {
+    const total = { input: 0, cached: 0, output: 0, reasoning: 0, estimated: false };
+    for (const event of events.filter((item) => item.kind === "usage")) {
+      const data = event.data ?? {};
+      total.input += typeof data.prompt_tokens === "number" ? data.prompt_tokens : 0;
+      total.cached += typeof data.cached_input_tokens === "number" ? data.cached_input_tokens : 0;
+      total.output += typeof data.output_tokens === "number" ? data.output_tokens : 0;
+      total.reasoning += typeof data.reasoning_tokens === "number" ? data.reasoning_tokens : 0;
+      total.estimated ||= data.estimated === true;
+    }
+    return total;
+  }, [events]);
   // capabilityCount 同时统计用户手动选择和后端常驻能力。
   const capabilityCount = useMemo(
     () =>
@@ -189,13 +201,14 @@ function App() {
     [mcps, selectedMcps, selectedSkills]
   );
   // activeAgent 是最后一个产生事件的智能体，没有事件时默认 manager。
-  const activeAgent = events.at(-1)?.agent ?? "manager";
+  const activeAgent = eventOwner(events.at(-1)) ?? "manager";
   const agentStats = useMemo(
     () =>
       Object.fromEntries(
         agents.map((agent) => {
-          const own = events.filter((event) => event.agent === agent.id);
+          const own = events.filter((event) => eventOwner(event) === agent.id);
           const last = own.at(-1);
+          const actualModel = own.filter((event) => typeof event.data?.model_id === "string" && event.data.model_id).at(-1)?.data?.model_id;
           const state = agent.id === activeAgent && running
             ? "运行中"
             : last
@@ -208,11 +221,12 @@ function App() {
             {
               state,
               task: last?.msg ?? "尚未接收任务",
-              tokens: own.reduce((sum, event) => sum + event.tokens, 0)
+              tokens: own.reduce((sum, event) => sum + event.tokens, 0),
+              modelId: typeof actualModel === "string" ? actualModel : ""
             }
           ];
         })
-      ) as Record<AgentName, { state: string; task: string; tokens: number }>,
+      ) as Record<AgentName, { state: string; task: string; tokens: number; modelId: string }>,
     [activeAgent, events, running]
   );
 
@@ -910,13 +924,19 @@ function App() {
             <div className="metrics">
               <Metric label="当前智能体" value={agentName(activeAgent)} />
               <Metric label="事件数" value={String(events.length)} />
-              <Metric label="Token 估算" value={String(tokenTotal || result?.tokens || 0)} />
+              <Metric label={usage.estimated ? "Token 用量（含估算）" : "Token 用量"} value={String(tokenTotal || result?.tokens || 0)} />
               <button className="metric clickable" type="button" disabled={!sessionId} onClick={() => void renameCurrentSession()} title={sessionId ? `会话 ID：${sessionId}` : "未创建会话"}>
                 <span>会话</span>
                 <strong>{sessionId ? sessionTitle || sessionId : "未创建"}</strong>
               </button>
               <Metric label="项目" value={workdir ? shortPath(workdir) : "未选择"} />
               <Metric label="耗时" value={result ? formatDuration(result.duration_ms) : "--"} />
+            </div>
+            <div className="usage-breakdown" aria-label="模型用量明细">
+              <span>输入 {usage.input.toLocaleString()}</span>
+              <span>缓存 {usage.cached.toLocaleString()}</span>
+              <span>输出 {usage.output.toLocaleString()}</span>
+              <span>推理 {usage.reasoning.toLocaleString()}</span>
             </div>
             <div className="agent-board">
               {agents.map((agent) => (
@@ -928,7 +948,7 @@ function App() {
                   </div>
                   <p>{agentStats[agent.id].task}</p>
                   <footer>
-                    <span>{models.find((model) => model.id === profiles[agent.id]?.model_id)?.name ?? "自动选择"}</span>
+                    <span>{models.find((model) => model.id === (agentStats[agent.id].modelId || profiles[agent.id]?.model_id))?.name ?? "自动选择"}{agentStats[agent.id].modelId ? "" : "（默认）"}</span>
                     <span><Brain size={12} /> {effortLabel(profiles[agent.id]?.effort ?? "inherit")}</span>
                     <span>{agentStats[agent.id].tokens} tok</span>
                   </footer>
@@ -1470,6 +1490,11 @@ function toggleSelected(current: string[], id: string): string[] {
 function delay(milliseconds: number): Promise<void> {
   // 授权状态轮询间隔使用 Promise 定时器，避免阻塞界面交互。
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function eventOwner(event: AgentEvent | undefined): string | undefined {
+  const source = event?.data?.source_agent;
+  return event?.agent === "llm" && typeof source === "string" && source ? source : event?.agent;
 }
 
 function agentName(id: string) {

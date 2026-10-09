@@ -677,6 +677,16 @@ select:disabled {
   text-overflow: ellipsis;
 }
 
+.usage-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 8px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .agent-board {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
