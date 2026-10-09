@@ -3,14 +3,49 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shlex
+import subprocess
 import tomllib
 from pathlib import Path
 
 from backend.tools import FsTool
 from backend.tools.scope import command_scope, delivery_root
 from backend.tools.shell import prepare_command
+
+
+def name_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
+    """用独立静态检查器识别确定的未定义名称，不导入或执行项目代码。"""
+
+    from ruff.__main__ import find_ruff_bin
+
+    root = delivery_root(fs, state)
+    selected = []
+    for rel in files:
+        try:
+            path = fs.safe(rel)
+            if path.is_file() and path.suffix == ".py" and (root == fs.root or root in path.parents) and not fs.is_sensitive(path):
+                selected.append(str(path))
+        except (OSError, ValueError):
+            continue
+    if not selected:
+        return []
+    result = subprocess.run([str(find_ruff_bin()), "check", "--isolated", "--no-cache", "--select", "F821,F822,F823", "--output-format", "json", *selected],
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode not in {0, 1}:
+        return []
+    try:
+        diagnostics = json.loads(result.stdout)
+    except ValueError:
+        return []
+    issues = []
+    for item in diagnostics:
+        name = re.search(r"`([^`]+)`", item.get("message", ""))
+        rel = Path(item["filename"]).relative_to(fs.root).as_posix()
+        problem = "使用尚未赋值的局部名称" if item["code"] == "F823" else "引用未定义名称"
+        issues.append(f"{rel}:{item['location']['row']} {problem} `{name.group(1) if name else '未知'}`；请补齐定义或导入，再执行测试")
+    return issues[:12]
 
 
 def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:

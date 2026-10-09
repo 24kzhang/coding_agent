@@ -14,6 +14,7 @@ from backend.agents.precheck import (
     import_issues,
     inline_issues,
     manifest_issues,
+    name_issues,
     server_issues,
     source_versions,
 )
@@ -1002,6 +1003,15 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if (tool == "run_command" and _is_verification_command(str(action.get("cmd", "")))
                         and changes and isinstance(client, LlmClient)
                         and state.get("task_type") in {"code_gen", "code_mod"}):
+                    undefined = name_issues(fs, state, current_files)
+                    if undefined:
+                        preflight_issues, preflight_kind = undefined, "names"
+                        observations.append("测试前静态名称检查：" + "；".join(undefined))
+                        graph._emit(state, "coder", "review", "测试前静态名称检查：" + "；".join(undefined))
+                        diagnostic_progress = True
+                        break
+                    if preflight_kind == "names":
+                        preflight_issues, preflight_kind = [], ""
                     structural_issues = import_issues(fs, state, current_files)
                     if structural_issues:
                         diagnostic_progress = diagnostic_progress or structural_issues != preflight_issues
