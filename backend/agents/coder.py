@@ -945,7 +945,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             elif tool == "search_files" and signature in search_cache:
                 observation = {**search_cache[signature], "cached": True,
                                "text": "复用未变更源码的已有搜索结果：\n" + search_cache[signature]["text"]}
-            elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file"}:
+            elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file", "model_copy"}:
                 observation = {
                     "ok": False,
                     "text": f"拒绝重复动作：{action.get('tool')} 已执行或拒绝过。下一步必须改用其他动作推进任务。",
@@ -1165,7 +1165,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     )
                 if tool == "read_file" and observation.get("content_available") is not False and observation.get("exists") is not False and path:
                     read_paths.add(path)
-                elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path:
+                elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path and not observation.get("cached"):
                     successful_verification_commands.clear()
                     passed_failure_commands.clear()
                     # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。

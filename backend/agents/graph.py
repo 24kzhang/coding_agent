@@ -1340,7 +1340,12 @@ class AgentGraph:
                 target = str(action.get("target") or ".local/model.json")
                 if target == ".local/model.json" and output_root != fs.root:
                     target = (output_root.relative_to(fs.root) / target).as_posix()
+                target = fs.safe(target).relative_to(fs.root).as_posix()
                 require_delivery_path(fs, output_root, target)
+                parts = Path(target).parts
+                ignore_path = Path(*parts[:parts.index(".local")]) / ".gitignore" if ".local" in parts else Path(".gitignore")
+                watched = [target, ignore_path.as_posix()]
+                before = {rel: fs.version(rel) if fs.safe(rel).is_file() else None for rel in watched}
                 path = self.model_store.copy_private(
                     str(action["model_id"]),
                     str((state or {}).get("workdir") or fs.root),
@@ -1349,6 +1354,10 @@ class AgentGraph:
                 rel = path.relative_to(Path(str((state or {}).get("workdir") or fs.root)).resolve()).as_posix()
                 parts = Path(rel).parts
                 ignore = Path(*parts[:parts.index(".local")]) / ".gitignore"
+                unchanged = all(before.get(item) == fs.version(item) for item in [rel, ignore.as_posix()])
+                if unchanged:
+                    return {"ok": True, "cached": True, "path": rel,
+                            "text": f"受控模型配置未变化，复用 {rel}；密钥不提供。本次不作为新的实现进展。"}
                 return {
                     "ok": True,
                     "text": f"模型私密配置已复制到 {rel}；密钥未进入工具结果。",
