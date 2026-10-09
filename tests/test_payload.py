@@ -65,3 +65,35 @@ def test_explicit_model_inherits_its_own_default_instead_of_primary(tmp_path):
                                  default_effort=effort, efforts=["none", "high"]))
     graph = AgentGraph(store, MemoryStore(tmp_path / "mem"))
     assert graph._client("coder", {"model_id": "selected"}).default_effort == "none"
+
+
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+@pytest.mark.parametrize("tools", [False, True])
+@pytest.mark.parametrize("requested,expected", [(None, 256), (10000, 256), (64, 64), (0, 1)])
+def test_every_request_enforces_configured_output_ceiling(monkeypatch, protocol, tools, requested, expected):
+    payloads = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def post(self, _url, **kwargs):
+            payloads.append(kwargs["json"])
+            return httpx.Response(200, json={"output_text": "完成", "output": [], "choices": [{"message": {"content": "完成", "tool_calls": []}}]})
+
+    monkeypatch.setattr("llm.client.httpx.Client", Client)
+    cfg = ModelConfig(id="test", name="测试", base_url="https://example.test/v1", api_key="假密钥", model="generic",
+                      protocol=protocol, max_output_tokens=256)
+    model = LlmClient(cfg)
+    if tools:
+        model.chat_tools([], [], max_tokens=requested)
+    else:
+        model.chat([], max_tokens=requested)
+    field = "max_output_tokens" if protocol == "responses" else "max_tokens"
+    assert len(payloads) == 1 and payloads[0][field] == expected

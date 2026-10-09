@@ -206,6 +206,11 @@ class LlmClient:
             result.append({"type": "function", **function} if responses else {"type": "function", "function": function})
         return result
 
+    def _output_limit(self, requested: int | None) -> int:
+        """所有协议都携带模型级上限，调用方不能绕过已配置的成本边界。"""
+
+        return max(1, min(int(requested) if requested is not None else self.cfg.max_output_tokens, self.cfg.max_output_tokens))
+
     def _responses_tools(
         self,
         messages: list[dict[str, Any]],
@@ -220,8 +225,7 @@ class LlmClient:
             "tools": self._public_tools(tools, responses=True),
             "tool_choice": "auto",
         }
-        if max_tokens is not None:
-            payload["max_output_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        payload["max_output_tokens"] = self._output_limit(max_tokens)
         chosen_effort = self._effort(effort)
         if chosen_effort:
             payload["reasoning"] = {"effort": chosen_effort}
@@ -286,8 +290,7 @@ class LlmClient:
             "tools": self._public_tools(tools, responses=False),
             "tool_choice": "auto",
         }
-        if max_tokens is not None:
-            payload["max_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        payload["max_tokens"] = self._output_limit(max_tokens)
         payload.update(self._chat_reasoning(effort))
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
         last_error = ""
@@ -367,8 +370,7 @@ class LlmClient:
         payload.update(self._chat_reasoning(effort))
         # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
         # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
-        if max_tokens is not None:
-            payload["max_tokens"] = max(1, int(max_tokens))
+        payload["max_tokens"] = self._output_limit(max_tokens)
         # response_format 请求兼容接口强制返回 JSON；普通对话不携带该字段。
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -464,8 +466,7 @@ class LlmClient:
             "input": self._normalize_messages(messages, responses=True),
             "temperature": temperature,
         }
-        if max_tokens is not None:
-            payload["max_output_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
+        payload["max_output_tokens"] = self._output_limit(max_tokens)
         chosen_effort = self._effort(effort)
         if chosen_effort:
             payload["reasoning"] = {"effort": chosen_effort}
