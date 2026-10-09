@@ -1639,7 +1639,7 @@ class AgentGraph:
                     next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
-                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
                         conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
                         self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
                         continue
@@ -1649,7 +1649,7 @@ class AgentGraph:
                     next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
-                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
                         self._emit(state, agent, "model", f"结构化节点服务暂时不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "transient_failover"})
                         continue
                 raise
@@ -1952,7 +1952,7 @@ class AgentGraph:
                 cfg = candidates[0]
                 self._emit(state, agent, "route", f"图片任务已路由到视觉模型：{cfg.name}")
         client = LlmClient(cfg)
-        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"))
+        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=cfg)
         return client
 
     def _multimodal_content(

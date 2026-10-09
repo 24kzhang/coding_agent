@@ -384,7 +384,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             return False
         failed_model_ids.add(next_cfg.id)
         client = LlmClient(next_cfg)
-        client.default_effort = graph.model_store.effort_for_agent("coder", state.get("effort"))
+        client.default_effort = graph.model_store.effort_for_agent("coder", state.get("effort"), model=next_cfg)
         model_name = str(next_cfg.model).lower()
         parse_failures = 0
         empty_steps = 0

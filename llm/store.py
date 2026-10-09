@@ -179,16 +179,18 @@ class ModelStore:
         profile = getattr(profiles, agent, AgentProfile())
         return self.get(profile.model_id or None)
 
-    def effort_for_agent(self, agent: str, override: str | None = None) -> str:
-        """返回 Agent 实际使用的思考等级。"""
+    def effort_for_agent(self, agent: str, override: str | None = None, *, model: ModelConfig | None = None) -> str:
+        """继承实际选中模型的默认等级，换模和视觉路由不再查回原模型。"""
 
         if override and override != "inherit":
-            return override
-        profile = getattr(self.profiles(), agent, AgentProfile())
-        if profile.effort != "inherit":
-            return profile.effort
-        model = self.for_agent(agent)
-        return model.default_effort
+            chosen = override
+        else:
+            chosen = getattr(self.profiles(), agent, AgentProfile()).effort
+        if model is None:
+            if chosen != "inherit":
+                return chosen
+            model = self.for_agent(agent)
+        return chosen if chosen in model.efforts else model.default_effort
 
     def public(self) -> list[ModelPublic]:
         """返回不会泄露密钥的浏览器模型列表。"""

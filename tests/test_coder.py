@@ -314,7 +314,7 @@ class ProgressClient:
 
 
 def test_coder_uses_cached_index_and_moves_to_write(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = ProgressClient()
     graph._client = lambda agent, state: client
 
@@ -370,7 +370,7 @@ def test_coder_refuses_to_overwrite_existing_file(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("old\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = OverwriteClient()
     graph._client = lambda agent, state: client
 
@@ -415,7 +415,7 @@ class RepeatedReadClient:
 def test_coder_stops_after_repeated_reads_without_progress(tmp_path) -> None:
     """已有写入后连续空转时应尽快失败，避免进入十轮无效读取。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = RepeatedReadClient()
     graph._client = lambda agent, state: client
 
@@ -461,7 +461,7 @@ def test_coder_allows_rewrite_of_owned_file_after_fresh_read(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("print('broken')\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: OwnedRewriteClient()
 
     result = coder(
@@ -510,7 +510,7 @@ def test_coder_allows_full_rewrite_after_current_file_read(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("print('broken')\nprint('duplicate')\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: ReadThenRewriteClient()
 
     result = coder(
@@ -561,7 +561,7 @@ def test_coder_allows_multiple_precise_replacements_from_one_snapshot(tmp_path) 
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("OLD_A\nOLD_B\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: MultiReplaceClient()
 
     result = coder(
@@ -617,7 +617,7 @@ def test_coder_can_replace_long_block_without_copying_old_content(tmp_path) -> N
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.js").write_text("const head = true;\n// send\nfunction send() {\n    return 'old';\n}\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: ReplaceBlockClient()
 
     result = coder(
@@ -674,7 +674,7 @@ class RewriteCheckClient:
 def test_coder_requires_validation_before_rewriting_same_file_again(tmp_path) -> None:
     """重复整体生成必须被验证门禁拦截，避免模型持续覆盖已完成文件。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = RewriteCheckClient()
     graph._client = lambda agent, state: client
 
@@ -727,7 +727,7 @@ def test_coder_exposes_empty_successful_command_result_to_next_step(tmp_path) ->
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = EmptyCommandOutputClient()
     graph._client = lambda agent, state: client
 
@@ -797,7 +797,7 @@ def test_coder_keeps_middle_of_normal_sized_source_in_snapshot(tmp_path) -> None
     project.mkdir()
     source = "a" * 6_000 + "\nconst target = 'OLD_MIDDLE';\n" + "b" * 5_000
     (project / "app.js").write_text(source, encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = MiddleTargetClient()
     graph._client = lambda agent, state: client
 
@@ -857,7 +857,7 @@ def test_coder_refreshes_snapshot_after_mutation_without_repeated_read(tmp_path)
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = ConsecutiveMutationClient()
     graph._client = lambda agent, state: client
 
@@ -904,7 +904,7 @@ class EmptyJsonFallbackClient:
 def test_coder_falls_back_after_two_empty_json_responses(tmp_path) -> None:
     """连续空 JSON 必须切换协议，而不是静默消耗完整 ReAct 步数。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = EmptyJsonFallbackClient()
     graph._client = lambda agent, state: client
 
@@ -952,7 +952,7 @@ class LongCatNativeClient:
 def test_coder_uses_plain_text_protocol_for_longcat_immediately(tmp_path) -> None:
     """LongCat 不应先空耗两次强制 JSON 请求才切换到稳定协议。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = LongCatNativeClient()
     graph._client = lambda agent, state: client
 
@@ -979,7 +979,7 @@ def test_coder_uses_plain_text_protocol_for_longcat_immediately(tmp_path) -> Non
 def test_normalize_actions_expands_initial_source_read(tmp_path) -> None:
     """首段源码读取至少为 24K，防止常见单文件因截断陷入重复读取。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
 
     actions = graph._normalize_actions(
         [{"tool": "read_file", "path": "static/app.js", "start": 0, "max_chars": 12000}]
@@ -1014,7 +1014,7 @@ class LongCatTimeoutClient:
 def test_coder_recovers_from_longcat_timeout_with_smaller_action(tmp_path) -> None:
     """LongCat 超时后不能错误要求 JSON，也不能原样重放大批写入。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = LongCatTimeoutClient()
     graph._client = lambda agent, state: client
 
@@ -1074,9 +1074,9 @@ def test_coder_switches_model_after_repeated_invalid_json(tmp_path, monkeypatch)
     """连续格式错误时应切备用模型，而不是直接结束 Coding。"""
 
     events = []
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
     graph._client = lambda agent, state: InvalidJsonClient()
-    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    fallback_cfg = ModelConfig(id="fallback", name="备用模型", base_url="https://example.test", api_key="假密钥", model="fallback-json-model", default_effort="none", capabilities=[])
     monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
     monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
     FallbackCoderClient.instances = []
@@ -1099,6 +1099,7 @@ def test_coder_switches_model_after_repeated_invalid_json(tmp_path, monkeypatch)
 
     assert result["coding_ok"] is True
     assert FallbackCoderClient.instances
+    assert FallbackCoderClient.instances[-1].default_effort == "none"
     assert (tmp_path / "project" / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert any(event.kind == "model" and "fallback" in event.msg for event in events)
 
@@ -1119,9 +1120,9 @@ def test_coder_switches_model_after_output_budget_exhausted_without_action(
     """输出触顶但没有动作时应立即换模，不能空耗五个回合。"""
 
     events = []
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
     graph._client = lambda agent, state: ExhaustedReasoningClient()
-    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    fallback_cfg = ModelConfig(id="fallback", name="备用模型", base_url="https://example.test", api_key="假密钥", model="fallback-json-model", default_effort="none", capabilities=[])
     monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
     monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
     FallbackCoderClient.instances = []
@@ -1144,6 +1145,7 @@ def test_coder_switches_model_after_output_budget_exhausted_without_action(
 
     assert result["coding_ok"] is True
     assert FallbackCoderClient.instances
+    assert FallbackCoderClient.instances[-1].default_effort == "none"
     assert any(
         event.kind == "model" and "输出预算耗尽但没有工具动作" in event.msg
         for event in events
@@ -1171,9 +1173,9 @@ def test_coder_switches_model_after_repeated_known_file_reads(tmp_path, monkeypa
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
     graph._client = lambda agent, state: RepeatedKnownReadClient()
-    fallback_cfg = SimpleNamespace(id="fallback", model="fallback-json-model")
+    fallback_cfg = ModelConfig(id="fallback", name="备用模型", base_url="https://example.test", api_key="假密钥", model="fallback-json-model", default_effort="none", capabilities=[])
     monkeypatch.setattr(graph.model_store, "fallbacks", lambda *_args: [fallback_cfg])
     monkeypatch.setattr("backend.agents.coder.LlmClient", FallbackCoderClient)
     FallbackCoderClient.instances = []
@@ -1196,6 +1198,7 @@ def test_coder_switches_model_after_repeated_known_file_reads(tmp_path, monkeypa
 
     assert result["coding_ok"] is True
     assert FallbackCoderClient.instances
+    assert FallbackCoderClient.instances[-1].default_effort == "none"
     assert any(event.kind == "model" and "重复读取已知文件" in event.msg for event in events)
 
 
@@ -1235,7 +1238,7 @@ def test_coder_prunes_unmentioned_snapshots_after_timeout(tmp_path) -> None:
     (project / "static").mkdir(parents=True)
     (project / "static" / "app.js").write_text("const ready = true;\n", encoding="utf-8")
     (project / "main.py").write_text("READY = True\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = TimeoutSnapshotClient()
     graph._client = lambda agent, state: client
 
@@ -1296,7 +1299,7 @@ def test_coder_allows_same_verification_command_after_file_changes(tmp_path) -> 
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("VALUE =\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = RerunAfterFixClient()
     graph._client = lambda agent, state: client
 
@@ -1343,7 +1346,7 @@ def test_coder_can_fill_read_empty_placeholder_file(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "README.md").write_text("", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: EmptyPlaceholderClient()
 
     result = coder(
@@ -1457,7 +1460,7 @@ def test_coder_repair_prompt_is_compact_and_grounded_in_current_files(tmp_path) 
     project = tmp_path / "project"
     project.mkdir()
     (project / "server.py").write_text("BROKEN = True\n", encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = RepairContextClient()
     graph._client = lambda agent, state: client
 
@@ -1527,7 +1530,7 @@ def test_coder_stops_repeating_addressed_verifier_issue(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.tsx").write_text('import App from "./app";\n', encoding="utf-8")
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = AddressedFailureClient()
     graph._client = lambda agent, state: client
 
@@ -1591,7 +1594,7 @@ class PrematureRepairDoneClient:
 def test_coder_rejects_done_while_verifier_reports_missing_deliverables(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = PrematureRepairDoneClient()
     graph._client = lambda agent, state: client
 
@@ -1649,7 +1652,7 @@ class TooManyActionsClient:
 
 
 def test_coder_executes_at_most_three_actions_per_step(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     graph._client = lambda agent, state: TooManyActionsClient()
 
     result = coder(
@@ -1694,7 +1697,7 @@ class ShellScanClient:
 
 
 def test_coder_serves_shell_discovery_from_cached_index(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = ShellScanClient()
     graph._client = lambda agent, state: client
 
@@ -1742,7 +1745,7 @@ class MixedBatchClient:
 
 
 def test_coder_does_not_count_mixed_success_batch_as_idle(tmp_path) -> None:
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = MixedBatchClient()
     graph._client = lambda agent, state: client
 
@@ -1784,7 +1787,7 @@ class TransientGatewayClient:
 def test_coder_waits_for_transient_gateway_recovery(tmp_path, monkeypatch) -> None:
     """连续三次 502 不应终止 Coding；恢复后应继续原任务。"""
 
-    graph = AgentGraph(ModelStore(), MemoryStore(tmp_path / "mem"))
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     client = TransientGatewayClient()
     delays: list[float] = []
     graph._client = lambda agent, state: client
