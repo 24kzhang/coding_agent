@@ -44,3 +44,32 @@ def test_composite_command_is_revised_before_shell_and_cannot_finish_early(tmp_p
     assert result["coding_ok"] and calls == ["node --version"]
     assert any(event.kind == "review" and "尚未执行" in event.msg for event in events)
     assert not any(event.kind == "error" or event.data.get("ok") is False for event in events)
+
+
+def test_duplicate_version_query_reuses_real_result_without_subprocess_or_failure(tmp_path):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    replies = iter([
+        {"actions": [{"tool": "run_command", "cmd": "uv --version"}]},
+        {"actions": [{"tool": "run_command", "cmd": "uv --version"}, {"tool": "write_file", "path": "main.py", "content": "ready = True"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    calls = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: calls.append(command) or {"ok": True, "out": "工具版本", "cmd": command})
+    result = coder(graph, {"workdir": str(tmp_path / "work"), "session_id": "s1", "text": "创建项目"})
+    assert result["coding_ok"] and calls == ["uv --version"]
+    assert any(event.data.get("cached") for event in events)
+    assert not any(event.data.get("ok") is False for event in events)
+
+
+def test_environment_change_invalidates_version_cache_even_in_same_batch(tmp_path):
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    replies = iter([
+        {"actions": [{"tool": "run_command", "cmd": "python --version"}]},
+        {"actions": [{"tool": "run_command", "cmd": "uv sync"}, {"tool": "run_command", "cmd": "python --version"}, {"tool": "write_file", "path": "main.py", "content": "ready = True"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    calls = []
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: calls.append(command) or {"ok": True, "out": "版本", "cmd": command})
+    result = coder(graph, {"workdir": str(tmp_path / "work"), "session_id": "s1", "text": "创建项目"})
+    assert result["coding_ok"] and calls == ["python --version", "uv sync", "python --version"]

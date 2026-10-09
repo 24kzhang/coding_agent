@@ -102,6 +102,16 @@ def _is_transient_llm_error(error_text: str) -> bool:
     return any(marker.lower() in lowered for marker in markers)
 
 
+def _version_query(command: str) -> bool:
+    """只缓存已知工具的独立版本开关，不把任意项目脚本视为无副作用查询。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return len(argv) == 2 and Path(argv[0]).name in {"uv", "python", "python3", "node", "npm", "npx", "git", "ruff", "pytest"} and argv[1] in {"--version", "-V"}
+
+
 def _middle_trim(text: str, limit: int) -> str:
     """保留长文本首尾，避免错误根因或文件末尾代码被截掉。"""
 
@@ -405,6 +415,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     seen_search_hits: set[str] = set()
     search_cache: dict[str, dict] = {}
     read_cache: dict[str, dict] = {}
+    version_cache: dict[str, dict] = {}
     # seen_actions 保存已经执行或明确拒绝的动作签名，防止模型无视观察反复消耗相同工具。
     seen_actions: set[str] = set()
     # progress_items 记录工具、路径或命令，模型每一步都能看到稳定的任务进度账本。
@@ -963,7 +974,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             elif tool == "search_files" and signature in search_cache:
                 observation = {**search_cache[signature], "cached": True,
                                "text": "复用未变更源码的已有搜索结果：\n" + search_cache[signature]["text"]}
-            elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file", "model_copy"}:
+            elif tool == "run_command" and _version_query(str(action.get("cmd", ""))) and signature in version_cache:
+                observation = {**version_cache[signature], "cached": True}
+            elif signature in seen_actions and tool not in {"git_diff", "git_status", "read_file", "model_copy"} and not (tool == "run_command" and _version_query(str(action.get("cmd", "")))):
                 observation = {
                     "ok": False,
                     "text": f"拒绝重复动作：{action.get('tool')} 已执行或拒绝过。下一步必须改用其他动作推进任务。",
@@ -1099,6 +1112,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
+            if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _is_dependency_mutation_command(str(action.get("cmd", ""))):
+                version_cache.clear()
+            if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _version_query(str(action.get("cmd", ""))):
+                version_cache[signature] = dict(observation)
             if action.get("_source_command"):
                 observation = {**observation, "adapted_from": graph.model_store.redact_text(action["_source_command"])}
             if observation.get("ok") and observation.get("content_available") is not False and not observation.get("cached") and observation.get("exists") is not False and tool == "read_file" and path not in visible_complete_paths:
@@ -1258,6 +1275,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             )
         if mutated_paths or dependency_mutated:
             if dependency_mutated:
+                version_cache.clear()
                 successful_verification_commands.clear()
                 passed_failure_commands.clear()
             # 文件或依赖状态变化后，之前运行过的同一测试已经不再是重复动作，必须允许复验。
