@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from backend.agents.loop import LoopGuard
 from backend.agents.precheck import (
+    command_issues,
     import_issues,
     inline_issues,
     manifest_issues,
@@ -842,6 +843,16 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 adapted = inspection_read(fs, state, str(action.get("cmd", "")))
                 if adapted:
                     action, tool = adapted, "read_file"
+            if tool == "run_command":
+                policy_issues = command_issues(fs, state, str(action.get("cmd", "")))
+                if policy_issues:
+                    diagnostic_progress = diagnostic_progress or policy_issues != preflight_issues
+                    preflight_issues, preflight_kind = policy_issues, "command"
+                    observations.extend(policy_issues)
+                    graph._emit(state, "coder", "review", policy_issues[0])
+                    break
+                if preflight_kind == "command":
+                    preflight_issues, preflight_kind = [], ""
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
             # 以规范化后的路径识别重复动作，避免项目路径与工作区路径形成两个身份。

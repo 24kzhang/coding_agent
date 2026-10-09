@@ -18,6 +18,16 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
         argv = shlex.split(command)
     except ValueError:
         return None
+    # 私密 JSON 格式化也属于内容探查；包装器不能绕过文件工具的隐私边界。
+    for index in range(len(argv) - 2):
+        if argv[index:index + 2] == ["-m", "json.tool"] and len(argv[index + 2:]) == 1:
+            try:
+                rel = tool_path(fs, state, argv[index + 2], write=False)
+                path = fs.safe(rel)
+                if fs.is_sensitive(path):
+                    return {"tool": "read_file", "path": path.relative_to(fs.root).as_posix(), "_source_command": command}
+            except (OSError, ValueError):
+                return None
     if not argv or Path(argv[0]).name not in {"cat", "head", "tail", "wc"}:
         return None
     program = Path(argv[0]).name

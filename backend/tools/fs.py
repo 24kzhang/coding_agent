@@ -300,13 +300,19 @@ class FsTool:
     def is_sensitive(self, path: Path) -> bool:
         """判断文件是否可能包含模型密钥、访问凭据或私钥。"""
 
+        return self.sensitive_path(self.root, path)
+
+    @classmethod
+    def sensitive_path(cls, root: Path, path: Path) -> bool:
+        """命令与文件工具共用同一套私密路径判定，不读取任何正文。"""
+
         # name 是小写文件名；.env.example 明确是模板，不按真实凭据处理。
         name = path.name.lower()
-        if any(part in {".local", ".aws", ".ssh"} for part in path.relative_to(self.root).parts[:-1]):
+        if any(part.lower() in {".local", ".aws", ".ssh"} for part in path.relative_to(root).parts[:-1]):
             return True
         if name == ".env.example" or name.endswith(".example"):
             return False
-        return name in self.sensitive_names or name.startswith(".env.") or path.suffix.lower() in self.sensitive_suffixes
+        return name in cls.sensitive_names or name.startswith(".env.") or path.suffix.lower() in cls.sensitive_suffixes
 
     def _ensure_not_sensitive(self, path: Path) -> None:
         """阻止模型工具读取或写入常见凭据文件。"""

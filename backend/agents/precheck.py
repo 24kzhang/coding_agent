@@ -10,6 +10,17 @@ from pathlib import Path
 
 from backend.tools import FsTool
 from backend.tools.scope import command_scope, delivery_root
+from backend.tools.shell import prepare_command
+
+
+def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
+    """执行前复用真实命令工具校验，策略错误只作未执行的修订诊断。"""
+
+    cwd, actual = command_scope(fs, state, command)
+    prepared = prepare_command(fs.root, actual, resolve_executable=False, cwd=cwd)
+    if isinstance(prepared, dict):
+        return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]
+    return []
 
 
 def source_versions(fs: FsTool, state: dict, files: list[str]) -> dict[str, str]:

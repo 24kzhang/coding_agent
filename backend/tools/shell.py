@@ -12,6 +12,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from backend.tools.fs import FsTool
+
 
 def prepare_command(
     root: Path,
@@ -85,6 +87,10 @@ def prepare_command(
         return {"ok": False, "code": 126, "out": "", "err": "不允许执行解释器内联代码，请写入项目脚本后运行", "cmd": clean, "argv": argv}
 
     container_root = Path(workspace).resolve() if workspace else None
+    inspectors = {"cat", "head", "tail", "wc", "grep", "rg", "sed", "awk"}
+    inspecting = program_name in inspectors or (program_name in {"uv", "env", "timeout", "npx", "npm"} and any(Path(arg).name.lower() in inspectors for arg in argv[1:])) or any(
+        argv[index] == "-m" and argv[index + 1] == "json.tool" for index in range(len(argv) - 1)
+    )
     for index, arg in enumerate(argv[1:], start=1):
         option = ""
         candidate = arg
@@ -97,6 +103,9 @@ def prepare_command(
         if ".." in Path(candidate).parts:
             return {"ok": False, "code": 126, "out": "", "err": f"命令参数越出项目目录：{arg}", "cmd": clean, "argv": argv}
         arg_path = Path(candidate).expanduser()
+        inspected_path = ((cwd or root) / arg_path).resolve()
+        if inspecting and (root == inspected_path or root in inspected_path.parents) and FsTool.sensitive_path(root, inspected_path):
+            return {"ok": False, "code": 126, "out": "", "err": "私密配置不能通过命令探查正文；使用 read_file 获取安全元信息或 model_copy 生成配置", "cmd": clean, "argv": argv}
         if not arg_path.is_absolute():
             resolved_relative = ((cwd or root) / arg_path).resolve()
             if root != resolved_relative and root not in resolved_relative.parents:
