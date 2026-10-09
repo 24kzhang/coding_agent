@@ -873,6 +873,24 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state, str(action["path"]), write=tool != "read_file")}
             edit_path = str(action.get("path") or "")
+            if tool in {"write_file", "append_file", "replace_file", "replace_block"} and edit_path and fs.safe(edit_path).is_file() and not fs.is_sensitive(fs.safe(edit_path)) and (
+                edit_path not in read_paths or (tool == "write_file" and edit_path not in visible_complete_paths)
+            ):
+                # 自动创建、同批新建与局部快照都不能冒充模型已经看到的完整旧内容。
+                edit_protocol_failures += 1
+                refreshed = graph.model_store.redact_text(fs.read(edit_path, FILE_CONTEXT_LIMIT))
+                file_observations.pop(edit_path, None)
+                file_observations[edit_path] = refreshed
+                interface_summaries[edit_path] = _interface_brief(edit_path, refreshed)
+                read_paths.add(edit_path)
+                message = f"编辑尚未执行：拒绝覆盖现有文件 {edit_path}，本次模型上下文没有足够的当前内容。已刷新真实快照，下一轮基于它精确修改；不要盲目覆盖自动生成或已有文件。"
+                observations.append(message)
+                graph._emit(state, "coder", "error" if edit_protocol_failures >= 3 else "review", message,
+                            data={"reason": "edit_visibility", "path": edit_path})
+                action_failed = True
+                if edit_protocol_failures >= 3:
+                    coding_summary = "编辑连续三次未遵守当前快照边界，已停止且未覆盖文件。"
+                break
             if tool in {"replace_file", "replace_block"} and edit_path in read_paths and not fs.is_sensitive(fs.safe(edit_path)):
                 try:
                     if tool == "replace_file":

@@ -48,3 +48,18 @@ def test_coder_does_not_reject_idempotent_copy_as_failed_tool(tmp_path):
     assert result["coding_ok"]
     assert any(event.kind == "tool" and event.data.get("cached") for event in events)
     assert not any(event.data.get("ok") is False for event in events)
+
+
+def test_generated_ignore_file_is_not_blindly_overwritten_in_same_batch(tmp_path):
+    events = []
+    graph = setup(tmp_path, emit=events.append)
+    replies = iter([
+        {"actions": [{"tool": "model_copy", "model_id": "test"}, {"tool": "write_file", "path": ".gitignore", "content": ".venv/\n"}], "done": True},
+        {"actions": [{"tool": "replace_file", "path": ".gitignore", "old": ".local/\n", "new": ".local/\n.venv/\n"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    result = coder(graph, {"workdir": str(tmp_path / "work"), "session_id": "s1", "text": "复用模型并忽略运行环境"})
+    assert result["coding_ok"]
+    assert (tmp_path / "work/.gitignore").read_text() == ".local/\n.venv/\n"
+    assert any(event.data.get("reason") == "edit_visibility" for event in events)
+    assert not any(event.data.get("ok") is False for event in events)
