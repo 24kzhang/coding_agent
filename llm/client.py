@@ -288,10 +288,7 @@ class LlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max(1, min(int(max_tokens), self.cfg.max_output_tokens))
-        chosen_effort = self._effort(effort)
-        if chosen_effort:
-            payload["reasoning_effort"] = chosen_effort
-            payload["thinking"] = {"type": "disabled" if chosen_effort == "none" else "enabled"}
+        payload.update(self._chat_reasoning(effort))
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
         last_error = ""
         with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
@@ -367,10 +364,7 @@ class LlmClient:
             "messages": self._normalize_messages(messages, responses=False),
             "temperature": temperature,
         }
-        chosen_effort = self._effort(effort)
-        if chosen_effort:
-            payload["reasoning_effort"] = chosen_effort
-            payload["thinking"] = {"type": "disabled" if chosen_effort == "none" else "enabled"}
+        payload.update(self._chat_reasoning(effort))
         # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
         # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
         if max_tokens is not None:
@@ -572,6 +566,17 @@ class LlmClient:
                     )
             normalized.append({"role": role, "content": parts})
         return normalized
+
+    def _chat_reasoning(self, effort: str | None) -> dict[str, Any]:
+        """普通兼容接口不携带供应商专用字段，文本与原生工具请求保持一致。"""
+
+        chosen = self._effort(effort)
+        if not chosen:
+            return {}
+        fields: dict[str, Any] = {"reasoning_effort": chosen}
+        if "deepseek" in self.cfg.model.lower():
+            fields["thinking"] = {"type": "disabled" if chosen == "none" else "enabled"}
+        return fields
 
     def _effort(self, value: str | None) -> str:
         chosen = value or self.default_effort
