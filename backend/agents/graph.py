@@ -1615,7 +1615,7 @@ class AgentGraph:
                 data = client.chat_json(conversation, **call_kwargs)
             except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
-                    self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), failed=True)
+                    self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
                 invalid_json = "模型没有返回合法 JSON" in str(exc)
                 if invalid_json and isinstance(client, LlmClient) and not recovered_json:
                     recovered_json = True
@@ -1655,7 +1655,7 @@ class AgentGraph:
                         self._emit(state, agent, "model", f"结构化节点服务暂时不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "transient_failover"})
                         continue
                 raise
-            self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
+            self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")))
             actions = [
                 item
                 for item in self._normalize_actions(data.get("actions"), tools)
@@ -1714,7 +1714,7 @@ class AgentGraph:
                 text = client.chat(conversation, **call_kwargs)
             except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
-                    self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), failed=True)
+                    self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
                     supported = set(client.cfg.efforts)
@@ -1724,7 +1724,7 @@ class AgentGraph:
                     self._emit(state, agent, "model", "文本输出触顶，降低推理后在硬预算内恢复一次")
                     continue
                 raise
-            self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")))
+            self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")))
             data: dict[str, Any] = {}
             candidate = text.strip()
             if candidate.startswith("```"):
@@ -2136,7 +2136,7 @@ class AgentGraph:
         state["model_requests"] = calls + 1
         return min(max(1, output_limit), remaining)
 
-    def _add_tokens(self, state: AgentState, usage: object, *, agent: str = "", model_id: str = "", failed: bool = False) -> None:
+    def _add_tokens(self, state: AgentState, usage: object, *, agent: str = "", model_id: str = "", effort: str = "", failed: bool = False) -> None:
         """累计一次模型调用的分项用量，并执行运行级成本闸门。"""
 
         if isinstance(usage, int):
@@ -2180,6 +2180,7 @@ class AgentGraph:
                 "visible_output_tokens": max(completion - reasoning, 0),
                 "source_agent": agent,
                 "model_id": model_id,
+                "effort": effort,
                 "failed_response": failed,
                 "model_calls": state["model_calls"],
                 "estimated": bool(getattr(usage, "estimated", False)),

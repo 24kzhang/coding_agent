@@ -209,6 +209,7 @@ function App() {
           const own = events.filter((event) => eventOwner(event) === agent.id);
           const last = own.at(-1);
           const actualModel = own.filter((event) => typeof event.data?.model_id === "string" && event.data.model_id).at(-1)?.data?.model_id;
+          const actualEffort = own.filter((event) => typeof event.data?.effort === "string" && event.data.effort).at(-1)?.data?.effort;
           const state = agent.id === activeAgent && running
             ? "运行中"
             : last
@@ -222,11 +223,12 @@ function App() {
               state,
               task: last?.msg ?? "尚未接收任务",
               tokens: own.reduce((sum, event) => sum + event.tokens, 0),
-              modelId: typeof actualModel === "string" ? actualModel : ""
+              modelId: typeof actualModel === "string" ? actualModel : "",
+              effort: typeof actualEffort === "string" && effortOptions.some((option) => option.value === actualEffort) ? actualEffort as ReasoningEffort : ""
             }
           ];
         })
-      ) as Record<AgentName, { state: string; task: string; tokens: number; modelId: string }>,
+      ) as Record<AgentName, { state: string; task: string; tokens: number; modelId: string; effort: ReasoningEffort | "" }>,
     [activeAgent, events, running]
   );
 
@@ -949,7 +951,7 @@ function App() {
                   <p>{agentStats[agent.id].task}</p>
                   <footer>
                     <span>{models.find((model) => model.id === (agentStats[agent.id].modelId || profiles[agent.id]?.model_id))?.name ?? "自动选择"}{agentStats[agent.id].modelId ? "" : "（默认）"}</span>
-                    <span><Brain size={12} /> {effortLabel(profiles[agent.id]?.effort ?? "inherit")}</span>
+                    <span><Brain size={12} /> {effortLabel(agentStats[agent.id].effort || profiles[agent.id]?.effort || "inherit")}{agentStats[agent.id].effort ? "" : "（默认）"}</span>
                     <span>{agentStats[agent.id].tokens} tok</span>
                   </footer>
                 </article>
