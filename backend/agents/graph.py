@@ -1400,6 +1400,7 @@ class AgentGraph:
                     fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort", "max_output_tokens"] if target.name == "model.json" else []
                     return {"ok": True, "exists": target.exists(), "content_available": False,
                             "sensitive": True, "path": rel, "status": "metadata_only",
+                            "is_symlink": (fs.root / rel).is_symlink(),
                             "expected_model_fields": fields,
                             "text": f"私密文件安全元信息：{rel}；存在={target.exists()}。正文和凭据不提供，不能作为已读取内容修改。"
                             + ("受控 model_copy 格式的字段名（不是文件正文）：" + "、".join(fields) + "。真实配置只能通过 model_copy 生成，应用运行时读取。" if fields else "")}
@@ -1411,6 +1412,10 @@ class AgentGraph:
                             "text": f"所选范围为空：{rel}；本次未提供正文，不作为可修改快照。"}
                 if action.get("metadata_only"):
                     measure = str(action.get("measure") or "bytes")
+                    if measure == "path":
+                        linked = (fs.root / rel).is_symlink()
+                        return {"ok": True, "exists": True, "content_available": False, "path": rel, "is_symlink": linked,
+                                "text": f"文件安全元信息：{rel}；存在=True；符号链接={linked}。正文和私密链接目标不提供，本次不作为可修改快照。"}
                     if measure == "lines":
                         with target.open("rb") as stream:
                             value = sum(chunk.count(b"\n") for chunk in iter(lambda: stream.read(65_536), b""))

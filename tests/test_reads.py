@@ -39,3 +39,18 @@ def test_empty_ranges_do_not_read_a_character_or_create_snapshot(tmp_path, comma
     assert result["ok"] and result["content_available"] is False
     assert "不应返回的正文" not in result["text"]
     assert not fs.last_reads and "read" not in result
+
+
+def test_readlink_of_regular_private_file_is_metadata_not_subprocess_failure(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    private = fs.root / ".local/model.json"
+    private.parent.mkdir()
+    private.write_text('{"api_key":"TEST_ONLY_PRIVATE"}')
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    result = graph._do_action(inspection_read(fs, {}, "readlink .local/model.json"), fs, ShellTool(str(fs.root)), GitTool(str(fs.root)))
+    assert result["ok"] and result["is_symlink"] is False and result["content_available"] is False
+    assert "TEST_ONLY_PRIVATE" not in str(result) and not fs.last_reads
+    fs.write("main.py", "ready = True")
+    (fs.root / "linked.py").symlink_to("main.py")
+    link = graph._do_action(inspection_read(fs, {}, "readlink linked.py"), fs, ShellTool(str(fs.root)), GitTool(str(fs.root)))
+    assert link["ok"] and link["is_symlink"] is True and link["content_available"] is False
