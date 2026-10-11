@@ -107,7 +107,7 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     if program in contracts:
         required = "、".join(contracts[program]["parameters"].get("required", []))
         return [f"命令尚未执行：{program} 是 Agent 内部函数工具，不是系统命令。请直接调用该工具并按 JSON 参数合同传入 {required}；不要放入 run_command 或包装器中执行。"]
-    prepared = prepare_command(fs.root, actual, resolve_executable=False, cwd=cwd)
+    prepared = prepare_command(fs.root, actual, resolve_executable=True, cwd=cwd)
     if isinstance(prepared, dict):
         return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]
     return []

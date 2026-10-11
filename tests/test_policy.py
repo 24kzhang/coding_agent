@@ -51,6 +51,12 @@ def test_native_tool_names_are_revised_before_shell_execution(tmp_path):
     assert result["coding_ok"] and (fs.root / ".local/model.json").exists()
 
 
+def test_missing_executable_is_reported_before_any_process_is_started(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    issues = command_issues(fs, {}, "missing-program-for-contract-test file.txt")
+    assert len(issues) == 1 and "找不到命令" in issues[0] and "尚未执行" in issues[0]
+
+
 def test_composite_command_is_revised_before_shell_and_cannot_finish_early(tmp_path):
     events = []
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
