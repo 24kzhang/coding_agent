@@ -339,7 +339,20 @@ class LlmClient:
                     function = call.get("function") or {}
                     arguments = self._tool_arguments(function.get("arguments", "{}"))
                     actions.append(self._native_action(str(function.get("name") or ""), arguments))
-                return self._tool_result(actions, self._content_text(message.get("content") or ""))
+                result = self._tool_result(actions, self._content_text(message.get("content") or ""))
+                calls = []
+                for index, call in enumerate(message.get("tool_calls") or []):
+                    function = call.get("function") or {}
+                    arguments = function.get("arguments", "{}")
+                    calls.append({"id": str(call.get("id") or f"call_{index}"), "type": "function", "function": {
+                        "name": str(function.get("name") or ""),
+                        "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False),
+                    }})
+                if calls:
+                    result["native_message"] = {"role": "assistant", "content": self._content_text(message.get("content") or ""), "tool_calls": calls}
+                    if isinstance(message.get("reasoning_content"), str):
+                        result["native_message"]["reasoning_content"] = message["reasoning_content"]
+                return result
         raise LlmError(last_error or "没有可用的模型接口地址")
 
     @staticmethod
@@ -553,6 +566,16 @@ class LlmClient:
         for message in messages:
             role = str(message.get("role") or "user")
             content = message.get("content", "")
+            if not responses and (message.get("tool_calls") or role == "tool"):
+                item = {"role": role, "content": self._content_text(content or "")}
+                if role == "assistant":
+                    item["tool_calls"] = message["tool_calls"]
+                    if "reasoning_content" in message:
+                        item["reasoning_content"] = message["reasoning_content"]
+                elif role == "tool":
+                    item["tool_call_id"] = str(message.get("tool_call_id") or "")
+                normalized.append(item)
+                continue
             if isinstance(content, str):
                 normalized.append({"role": role, "content": content})
                 continue

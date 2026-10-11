@@ -22,6 +22,7 @@ from backend.agents.precheck import (
     source_versions,
 )
 from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX, NATIVE_CODER_PROMPT
+from backend.agents.trace import ToolTrace
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
 from backend.tools import FsTool, GitTool, tool_specs
@@ -533,7 +534,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     loop_guard = LoopGuard()
     native_fallback = False
     coder_output_limit = CODER_OUTPUT_TOKENS
+    native_trace = ToolTrace()
     for step in range(1, max_steps + 1):
+        native_trace.complete(observations)
         native_mode = isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []) and "longcat" not in model_name and empty_steps < 2 and not native_fallback
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
@@ -625,6 +628,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "content": graph._multimodal_content(stable_text, state, dynamic_text),
             },
         ]
+        protocol = getattr(getattr(client, "cfg", None), "protocol", "auto")
+        chat_history = protocol == "chat_completions" or (protocol == "auto" and "deepseek" not in model_name and "qwen3.8" not in model_name)
+        if native_mode and chat_history:
+            messages = [messages[0], {"role": "user", "content": graph._multimodal_content(stable_text, state)},
+                        *native_trace.messages(), {"role": "user", "content": dynamic_text}]
         # 任何真实或疑似密钥都不能再次发送给模型。受控 model_copy 不依赖模型看到密钥。
         messages = graph.model_store.redact(messages)
         # usage_before 用对象身份区分“本次响应已产生用量但解析失败”和“请求前就失败”；
@@ -768,6 +776,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             continue
         parse_failures = 0
         transient_failures = 0
+        native_trace.start(graph.model_store.redact(data.get("native_message")))
         # thought 是模型本轮判断，会进入事件流方便用户观察。
         thought = data.get("thought", "")
         if thought:
@@ -849,7 +858,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         dependency_mutated = False
         # guidance_replan 表示动作批次中途收到指导，剩余旧动作必须停止。
         guidance_replan = False
-        for action in actions:
+        for action_index, action in enumerate(actions):
             state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步工具动作前")
             if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
                 guidance_replan = True
@@ -1231,6 +1240,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 command = str(observation["cmd"])
                 if _is_verification_command(command) and (observation.get("result") or {}).get("code") != 126:
                     verification_commands.append(command)
+            native_trace.record(action_index, graph.model_store.redact(observation))
             graph._emit(state, "coder", "tool", observation["text"], data={
                 **observation, "tool": tool,
                 "path": path,
