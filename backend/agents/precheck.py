@@ -111,6 +111,10 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     if isinstance(prepared, dict):
         return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]
     argv = shlex.split(actual)
+    if argv and Path(argv[0]).name == "uv":
+        for index in range(len(argv) - 2):
+            if argv[index:index + 2] == ["-m", "pip"] and argv[index + 2] in {"list", "freeze", "show"}:
+                return ["依赖探查尚未执行：uv 的项目环境默认不安装 pip 模块。请使用 uv pip list、uv pip freeze 或 uv pip show，在相同项目目录查询；无需为了探查额外安装 pip，也不要重复确认已成功的 uv sync。"]
     for index in range(len(argv) - 2):
         if argv[index:index + 2] == ["-m", "json.tool"] and len(argv[index + 2:]) == 1 and not argv[-1].startswith("-"):
             target = process_cwd(cwd, argv) / argv[-1]

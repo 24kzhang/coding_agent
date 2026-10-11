@@ -34,6 +34,13 @@ def test_json_input_is_checked_in_effective_uv_directory(tmp_path):
     assert process_cwd(fs.root, ["uv", "run", "--directory=portal", "python", "--directory", "ignored"]) == fs.root / "portal"
 
 
+def test_uv_dependency_inspection_uses_uv_without_requiring_pip_module(tmp_path):
+    fs = FsTool(str(tmp_path / "workspace"))
+    assert command_issues(fs, {}, "uv run --frozen python -m pip list")
+    assert not command_issues(fs, {}, "uv pip list")
+    assert not command_issues(fs, {}, "python -m pip list")
+
+
 @pytest.mark.parametrize("command", [
     "uv --directory=workspace/portal sync",
     "uv sync --project=portal",
