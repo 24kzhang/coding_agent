@@ -17,6 +17,7 @@ from backend.agents.precheck import (
     manifest_issues,
     middleware_issues,
     name_issues,
+    native_command_name,
     server_issues,
     source_versions,
 )
@@ -430,6 +431,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_revision = -1
     preflight_issues: list[str] = []
     preflight_kind = ""
+    pending_native_command = ""
     completed_checks: list[dict] = []
     action_protocol_failures = 0
     edit_protocol_failures = 0
@@ -855,6 +857,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 guidance_replan = True
                 break
             tool = str(action.get("tool") or "")
+            if pending_native_command and tool == pending_native_command:
+                preflight_issues, preflight_kind, pending_native_command = [], "", ""
             if tool == "assert_text_absent":
                 advice = assertion_issues(state, action)
                 if advice:
@@ -876,6 +880,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if policy_issues:
                     diagnostic_progress = diagnostic_progress or policy_issues != preflight_issues
                     preflight_issues, preflight_kind = policy_issues, "command"
+                    pending_native_command = native_command_name(str(action.get("cmd", "")))
                     observations.extend(policy_issues)
                     graph._emit(state, "coder", "review", policy_issues[0])
                     break

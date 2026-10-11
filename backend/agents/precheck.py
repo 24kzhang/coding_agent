@@ -10,7 +10,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from backend.tools import FsTool
+from backend.tools import FsTool, tool_specs
 from backend.tools.scope import command_scope, delivery_root
 from backend.tools.shell import prepare_command
 
@@ -88,10 +88,25 @@ def middleware_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
     return issues[:12]
 
 
+def native_command_name(command: str) -> str:
+    """区分内部工具名称与明确指定路径的真实程序。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return ""
+    return argv[0] if argv and argv[0] in {item["name"] for item in tool_specs()} else ""
+
+
 def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     """执行前复用真实命令工具校验，策略错误只作未执行的修订诊断。"""
 
     cwd, actual = command_scope(fs, state, command)
+    contracts = {item["name"]: item for item in tool_specs()}
+    program = native_command_name(actual)
+    if program in contracts:
+        required = "、".join(contracts[program]["parameters"].get("required", []))
+        return [f"命令尚未执行：{program} 是 Agent 内部函数工具，不是系统命令。请直接调用该工具并按 JSON 参数合同传入 {required}；不要放入 run_command 或包装器中执行。"]
     prepared = prepare_command(fs.root, actual, resolve_executable=False, cwd=cwd)
     if isinstance(prepared, dict):
         return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]

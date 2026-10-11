@@ -2,8 +2,10 @@
 
 from types import SimpleNamespace
 
+from api.schema import ModelConfig
 from backend.agents.coder import coder
 from backend.agents.graph import AgentGraph
+from backend.agents.precheck import command_issues
 from backend.memory import MemoryStore
 from backend.tools import FsTool, GitTool, ShellTool
 from backend.tools.reads import inspection_read
@@ -28,6 +30,25 @@ def test_private_json_inspection_returns_metadata_and_shell_rejects_bypass(tmp_p
     assert result["ok"] and result["content_available"] is False
     assert "TEST_ONLY_PRIVATE" not in str(result) and not fs.last_reads
     assert FsTool.sensitive_path(fs.root, fs.root / ".LOCAL/unknown.json")
+
+
+def test_native_tool_names_are_revised_before_shell_execution(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    assert "内部函数工具" in command_issues(fs, {}, "model_copy test .local/model.json")[0]
+    assert "paths" in command_issues(fs, {}, "assert_text_present main.py ready")[0]
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    graph.model_store.upsert(ModelConfig(id="test", name="测试", model="generic", base_url="https://example.test", api_key="TEST_ONLY_KEY"))
+    replies = iter([
+        {"actions": [{"tool": "run_command", "cmd": "model_copy test .local/model.json"}], "done": True},
+        {"actions": [{"tool": "model_copy", "model_id": "test"}, {"tool": "write_file", "path": "main.py", "content": "ready = True"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不得执行内部工具名")))
+    result = coder(graph, {"workdir": str(fs.root), "session_id": "s1", "text": "创建入口"})
+    # 首轮错误命令仍需被真正的合法命令替代，不能靠 done 绕过。
+    assert any(event.kind == "review" and "内部函数工具" in event.msg for event in events)
+    assert result["coding_ok"] and (fs.root / ".local/model.json").exists()
 
 
 def test_composite_command_is_revised_before_shell_and_cannot_finish_early(tmp_path):
