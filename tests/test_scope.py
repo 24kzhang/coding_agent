@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from backend.agents.graph import AgentGraph
-from backend.agents.precheck import manifest_issues
+from backend.agents.precheck import command_issues, manifest_issues
 from backend.tools import FsTool
-from backend.tools.scope import command_scope
+from backend.tools.scope import command_scope, process_cwd
 
 
 def test_workspace_alias_is_normalized_before_execution(tmp_path):
@@ -22,6 +22,16 @@ def test_workspace_alias_is_normalized_before_execution(tmp_path):
     result = AgentGraph._run_command(None, fs, shell, state, command)
     assert captured == [(actual, {"timeout": 180})]
     assert result["requested_cmd"] == command
+
+
+def test_json_input_is_checked_in_effective_uv_directory(tmp_path):
+    fs = FsTool(str(tmp_path / "workspace"))
+    state = {"text": "项目输出到 portal"}
+    fs.write("inputs/source.json", "[]")
+    assert command_issues(fs, state, "uv --directory portal run python -m json.tool inputs/source.json")
+    assert not command_issues(fs, state, f"uv --directory portal run python -m json.tool {fs.root / 'inputs/source.json'}")
+    assert not command_issues(fs, state, "uv run --project portal python -m json.tool inputs/source.json")
+    assert process_cwd(fs.root, ["uv", "run", "--directory=portal", "python", "--directory", "ignored"]) == fs.root / "portal"
 
 
 @pytest.mark.parametrize("command", [

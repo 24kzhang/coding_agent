@@ -82,6 +82,29 @@ def command_cwd(fs: FsTool, state: dict[str, Any], command: str) -> Path:
     return command_scope(fs, state, command)[0]
 
 
+def process_cwd(cwd: Path, argv: list[str]) -> Path:
+    """解析 uv 的进程目录；--project 只定位项目，不改变被调用程序目录。"""
+
+    if not argv or Path(argv[0]).name != "uv":
+        return cwd
+    index = 1
+    valued = {"--directory", "-C", "--project", "--python", "--with", "--with-editable", "--with-requirements", "--group", "--package", "--env-file", "--config-file", "--cache-dir"}
+    while index < len(argv):
+        option, separator, value = argv[index].partition("=")
+        if option in valued:
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    return cwd
+                value = argv[index]
+            if option in {"--directory", "-C"}:
+                cwd = (cwd / value).resolve()
+        elif argv[index] not in {"run", "sync", "build"} and not argv[index].startswith("-"):
+            break
+        index += 1
+    return cwd
+
+
 def require_delivery_path(fs: FsTool, root: Path, rel: str) -> None:
     """禁止普通写入和受控配置写入越过用户指定的交付子目录。"""
 

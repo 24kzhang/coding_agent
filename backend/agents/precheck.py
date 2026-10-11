@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 
 from backend.tools import FsTool, tool_specs
-from backend.tools.scope import command_scope, delivery_root
+from backend.tools.scope import command_scope, delivery_root, process_cwd
 from backend.tools.shell import prepare_command
 
 
@@ -110,6 +110,12 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     prepared = prepare_command(fs.root, actual, resolve_executable=True, cwd=cwd)
     if isinstance(prepared, dict):
         return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]
+    argv = shlex.split(actual)
+    for index in range(len(argv) - 2):
+        if argv[index:index + 2] == ["-m", "json.tool"] and len(argv[index + 2:]) == 1 and not argv[-1].startswith("-"):
+            target = process_cwd(cwd, argv) / argv[-1]
+            if not target.is_file():
+                return [f"命令尚未执行：JSON 输入文件不存在于实际进程目录 {target.parent}。请使用已有输入文件的真实路径；交付目录与输入工作区不同，uv --directory 改变进程目录，--project 不改变进程目录。不要为探查输入而重新创建副本。"]
     return []
 
 
