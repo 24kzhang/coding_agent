@@ -18,6 +18,7 @@ from backend.agents.precheck import (
     middleware_issues,
     name_issues,
     native_command_name,
+    router_issues,
     server_issues,
     source_versions,
 )
@@ -1097,7 +1098,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         break
                     if preflight_kind == "names":
                         preflight_issues, preflight_kind = [], ""
-                    structural_issues = import_issues(fs, state, current_files)
+                    structural_issues = import_issues(fs, state, current_files) + router_issues(fs, state, current_files)
                     if structural_issues:
                         diagnostic_progress = diagnostic_progress or structural_issues != preflight_issues
                         preflight_issues = structural_issues

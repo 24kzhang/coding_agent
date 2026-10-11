@@ -88,6 +88,40 @@ def middleware_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
     return issues[:12]
 
 
+def router_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
+    """应用工厂不能在多次创建实例时累积闭包路由到同一个全局路由对象。"""
+
+    root = delivery_root(fs, state)
+    issues = []
+    for rel in files:
+        path = fs.safe(rel)
+        if path.suffix != ".py" or fs.is_sensitive(path) or not (root == fs.root or root in path.parents):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError):
+            continue
+        aliases = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "fastapi" for alias in node.names if alias.name == "APIRouter"}
+        shared = {target.id for node in tree.body if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id in aliases for target in node.targets if isinstance(target, ast.Name)}
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            local = {node.id for node in ast.walk(fn) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+            local.update(arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg))
+            returned = {node.value.id for node in fn.body if isinstance(node, ast.Return) and isinstance(node.value, ast.Name)}
+            candidates = (shared & returned) - local
+            # 明确重置路由表属于幂等注册，不把它误当作累积。
+            reset = {node.func.value.value.id for node in ast.walk(fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "clear" and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "routes" and isinstance(node.func.value.value, ast.Name)}
+            for child in fn.body:
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in child.decorator_list:
+                    if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute) and isinstance(decorator.func.value, ast.Name) and decorator.func.value.id in candidates - reset and decorator.func.attr in {"get", "post", "put", "patch", "delete", "route", "websocket"}:
+                        issues.append(f"{rel}:{decorator.lineno} 工厂 `{fn.name}` 在全局路由对象 `{decorator.func.value.id}` 上新增闭包并返回同一对象。重复创建实例会累积同名路由，后建实例可能仍调用旧实例的依赖或配置；请按实例创建路由对象，或用实际隔离测试证明注册幂等")
+                        break
+    return issues[:12]
+
+
 def native_command_name(command: str) -> str:
     """区分内部工具名称与明确指定路径的真实程序。"""
 
