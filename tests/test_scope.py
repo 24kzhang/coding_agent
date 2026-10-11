@@ -28,6 +28,7 @@ def test_json_input_is_checked_in_effective_uv_directory(tmp_path):
     fs = FsTool(str(tmp_path / "workspace"))
     state = {"text": "项目输出到 portal"}
     fs.write("inputs/source.json", "[]")
+    (fs.root / "portal").mkdir()
     assert command_issues(fs, state, "uv --directory portal run python -m json.tool inputs/source.json")
     assert not command_issues(fs, state, f"uv --directory portal run python -m json.tool {fs.root / 'inputs/source.json'}")
     assert not command_issues(fs, state, "uv run --project portal python -m json.tool inputs/source.json")
@@ -39,6 +40,17 @@ def test_uv_dependency_inspection_uses_uv_without_requiring_pip_module(tmp_path)
     assert command_issues(fs, {}, "uv run --frozen python -m pip list")
     assert not command_issues(fs, {}, "uv pip list")
     assert not command_issues(fs, {}, "python -m pip list")
+
+
+def test_script_and_explicit_directory_must_exist_before_launch(tmp_path):
+    fs = FsTool(str(tmp_path / "workspace"))
+    state = {"text": "项目输出到 portal"}
+    assert command_issues(fs, state, "uv run --directory portal python tools/probe.py")
+    fs.write("portal/pyproject.toml", "[project]\nname='portal'\nversion='0.1'\n")
+    assert command_issues(fs, state, "uv run --directory portal python tools/probe.py")
+    fs.write("portal/tools/probe.py", "print('检查')")
+    assert not command_issues(fs, state, "uv run --directory portal python tools/probe.py")
+    assert not command_issues(fs, state, "python tools/probe.py")
 
 
 @pytest.mark.parametrize("command", [

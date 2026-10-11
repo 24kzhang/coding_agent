@@ -111,6 +111,15 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     if isinstance(prepared, dict):
         return ["命令尚未执行：" + str(prepared["err"]) + "。请使用受控文件工具或独立可审查脚本，不要重试同一命令。"]
     argv = shlex.split(actual)
+    effective_cwd = process_cwd(cwd, argv)
+    if effective_cwd != cwd and not effective_cwd.is_dir():
+        return [f"命令尚未执行：显式进程目录 {effective_cwd} 尚不存在。请先通过真实写入创建项目，再执行已有脚本或验证命令。"]
+    for index, argument in enumerate(argv[:-1]):
+        name = Path(argument).name
+        if (re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name) or name in {"node", "ruby", "perl"}) and Path(argv[index + 1]).suffix in {".py", ".js", ".mjs", ".cjs", ".rb", ".pl"}:
+            target = effective_cwd / argv[index + 1]
+            if not target.is_file():
+                return [f"命令尚未执行：脚本 {target} 尚未创建。请先写入可审查脚本再运行，不得假设计划中提到的文件已经存在。"]
     if argv and Path(argv[0]).name == "uv":
         for index in range(len(argv) - 2):
             if argv[index:index + 2] == ["-m", "pip"] and argv[index + 2] in {"list", "freeze", "show"}:
