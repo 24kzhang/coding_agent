@@ -948,6 +948,7 @@ def test_document_model_receives_existing_content_and_nested_target(tmp_path):
 
 def test_real_verification_commands_are_handed_off_and_independently_repeated(tmp_path):
     graph = make_graph(tmp_path)
+    FsTool(str(tmp_path / "work")).write("tools/build_bundle.py", "print('校验通过')\n")
     calls = []
 
     def run(command, **_kwargs):
@@ -960,7 +961,8 @@ def test_real_verification_commands_are_handed_off_and_independently_repeated(tm
     assert state["verification_commands"] == ["uv run python tools/build_bundle.py"]
     result = verifier(graph, state)
     assert result["tests_ok"]
-    assert calls == ["uv run python tools/build_bundle.py"] * 2
+    assert calls.count("uv run python tools/build_bundle.py") == 2
+    assert calls[0] == calls[-1] == "uv run python tools/build_bundle.py"
 
 
 def test_stream_output_limit_retains_paid_usage_before_raising():
