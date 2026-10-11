@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -122,6 +123,38 @@ def _typescript_project_checks(fs: FsTool, files: list[str]) -> list[dict[str, A
     return checks
 
 
+def fixture_contracts(fs: FsTool, files: list[str]) -> list[dict[str, Any]]:
+    """只提取 fixture 与测试的声明事实，不假定不同目录之间的 fixture 作用域。"""
+
+    facts = []
+    for rel in files:
+        if not (rel.endswith(".py") and (Path(rel).name == "conftest.py" or Path(rel).name.startswith("test_"))):
+            continue
+        try:
+            path = fs.safe(rel)
+            if fs.is_sensitive(path):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, SyntaxError):
+            continue
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = [node for node in fn.decorator_list if isinstance(node, (ast.Call, ast.Attribute, ast.Name))]
+            fixture = next((node for node in decorators if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "fixture") or (isinstance(node, ast.Attribute) and node.attr == "fixture")), None)
+            if fixture is None and not fn.name.startswith("test_"):
+                continue
+            patches = []
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"setattr", "setitem", "setenv", "patch"}:
+                    patches.append(ast.unparse(node.func) + "(" + ", ".join(ast.unparse(arg) for arg in node.args[:2]) + ")")
+            facts.append({"文件": rel, "名称": fn.name, "声明类型": "fixture" if fixture else "测试",
+                          "依赖参数": [arg.arg for arg in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]],
+                          "自动应用": bool(isinstance(fixture, ast.Call) and any(keyword.arg == "autouse" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True for keyword in fixture.keywords)),
+                          "补丁目标": patches})
+    return facts
+
+
 def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool, files: list[str], command: str) -> list[str]:
     """在首次执行检查前比较源码与断言，不以静态审查代替实际测试。"""
 
@@ -154,11 +187,12 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
                          "通过后已变更或删除文件": [rel for rel, version in old.items() if current_versions.get(rel) != version],
                          "通过后新增文件": [rel for rel in current_versions if rel not in old]})
     result = graph._model_json(state, "verifier", client, [
-        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
+        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。检查每个调用有外部副作用的单元测试是否实际依赖替身 fixture（直接依赖、客户端 fixture 依赖或 autouse），不能因为同文件另一个用例用了替身就认为全部用例被隔离。明确标记的集成测试可以调用真实服务。检查下一轮发送的消息时，以第一轮实际请求快照和返回值重建时序：第一轮请求尚不包含其未来回复；正常历史先追加上一轮回复，再追加本轮输入，不能把本轮输入插到旧回复之前。不要猜测固定角色总数。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
         {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
          + "\n磁盘文件清单：\n" + "\n".join(files)
          + "\n\n实际执行证据（由程序记录版本，不是模型声称通过）：\n" + json.dumps(evidence, ensure_ascii=False)
          + "\n已通过且未变更的测试不能被猜测为会失败；仍可报告未覆盖的需求缺口，但不要改坏已验证路径。"
+         + "\n\n测试与 fixture 声明事实（按各文件作用域对照依赖，不代表已经执行）：\n" + json.dumps(fixture_contracts(fs, targets), ensure_ascii=False)
          + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
     ], temperature=0, plain_text=True)
     issues = result.get("issues")
