@@ -24,6 +24,13 @@ def test_explicit_resource_constraints_and_document_text_are_not_blocked():
     assert not assertion_issues({"text": "更新说明"}, {"paths": ["README.md"], "texts": ["旧版本"]})
 
 
+def test_positive_source_snippet_requires_behavior_but_explicit_format_is_allowed():
+    action = {"tool": "assert_text_present", "paths": ["page.js"], "texts": ["items.forEach((item) => pane.appendChild(item));"]}
+    assert assertion_issues({"text": "显示全部条目"}, action)
+    assert not assertion_issues({"text": "源码必须包含 " + action["texts"][0]}, action)
+    assert not assertion_issues({"text": "忽略环境目录"}, {"tool": "assert_text_present", "paths": [".gitignore"], "texts": [".venv/"]})
+
+
 def test_ad_hoc_check_is_not_executed_and_has_bounded_revisions(tmp_path):
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
     calls = []

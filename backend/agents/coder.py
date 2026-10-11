@@ -859,7 +859,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 preflight_issues, preflight_kind, pending_native_command = [], "", ""
             if tool in {"assert_text_absent", "assert_text_present"}:
                 assertion_paths = [fs.safe(tool_path(fs, state, str(path), write=False)) for path in action.get("paths", [])]
-                advice = ["文字断言尚未执行：私密文件不能通过断言读取正文或核对值。模型配置格式使用受控工具提供的字段合同，安全元信息可用 read_file；真实应用在运行时读取配置，不要反复探查私密正文。"] if any(fs.is_sensitive(path) for path in assertion_paths) else assertion_issues(state, action) if tool == "assert_text_absent" else []
+                advice = ["文字断言尚未执行：私密文件不能通过断言读取正文或核对值。模型配置格式使用受控工具提供的字段合同，安全元信息可用 read_file；真实应用在运行时读取配置，不要反复探查私密正文。"] if any(fs.is_sensitive(path) for path in assertion_paths) else assertion_issues(state, action)
                 if advice:
                     assertion_protocol_failures += 1
                     observations.extend(advice)
