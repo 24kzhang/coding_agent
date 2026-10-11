@@ -154,6 +154,10 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
             target = effective_cwd / argv[index + 1]
             if not target.is_file():
                 return [f"命令尚未执行：脚本 {target} 尚未创建。请先写入可审查脚本再运行，不得假设计划中提到的文件已经存在。"]
+            if target.suffix == ".py":
+                inputs = script_inputs(fs, target, effective_cwd)
+                if inputs:
+                    return inputs
     if argv and Path(argv[0]).name == "uv":
         for index in range(len(argv) - 2):
             if argv[index:index + 2] == ["-m", "pip"] and argv[index + 2] in {"list", "freeze", "show"}:
@@ -163,6 +167,58 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
             target = process_cwd(cwd, argv) / argv[-1]
             if not target.is_file():
                 return [f"命令尚未执行：JSON 输入文件不存在于实际进程目录 {target.parent}。请使用已有输入文件的真实路径；交付目录与输入工作区不同，uv --directory 改变进程目录，--project 不改变进程目录。不要为探查输入而重新创建副本。"]
+    return []
+
+
+def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
+    """只核对脚本中确定的字面只读输入；动态路径、受保护分支和写入场景交给运行。"""
+
+    try:
+        script = fs.safe(script.relative_to(fs.root).as_posix())
+        if fs.is_sensitive(script):
+            return []
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError, SyntaxError):
+        return []
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    shadowed = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "open" or isinstance(node, ast.Name) and node.id == "open" and isinstance(node.ctx, ast.Store) or isinstance(node, ast.ImportFrom) and any((alias.asname or alias.name) == "open" for alias in node.names) for node in ast.walk(tree))
+    path_names = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "pathlib" for alias in node.names if alias.name == "Path"}
+    reads, writes = [], set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        path, mode = None, None
+        if not shadowed and isinstance(node.func, ast.Name) and node.func.id == "open" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            path = node.args[0].value
+            mode = node.args[1] if len(node.args) > 1 else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), ast.Constant(value="r"))
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Name) and node.func.value.func.id in path_names and node.func.value.args and isinstance(node.func.value.args[0], ast.Constant) and isinstance(node.func.value.args[0].value, str):
+            path = node.func.value.args[0].value
+            if node.func.attr in {"read_text", "read_bytes"}:
+                mode = ast.Constant(value="r")
+            elif node.func.attr in {"write_text", "write_bytes"}:
+                mode = ast.Constant(value="w")
+            elif node.func.attr == "open":
+                mode = node.args[0] if node.args else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), ast.Constant(value="r"))
+        if path is None or not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
+            continue
+        if any(char in mode.value for char in "wax+"):
+            writes.add(path)
+            continue
+        ancestor = node
+        guarded = False
+        while ancestor in parents:
+            ancestor = parents[ancestor]
+            if isinstance(ancestor, (ast.If, ast.IfExp, ast.Try, ast.TryStar)):
+                guarded = True
+        if not guarded and mode.value.startswith("r"):
+            reads.append((path, node.lineno, node.col_offset))
+    opaque_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in {"open", *path_names})]
+    for path, line, column in reads:
+        # 之前的任意外部初始化调用可能创建输入，不能把未知副作用推断为必然缺失。
+        if any((call.lineno, call.col_offset) < (line, column) for call in opaque_calls):
+            continue
+        if path not in writes and not (cwd / path).is_file():
+            return [f"脚本尚未执行：{script.relative_to(fs.root)}:{line} 的字面只读输入 {path} 不存在于实际进程目录 {cwd}。请按输入文件真实位置构造路径，不能把交付目录误当成输入工作区；动态路径与异常回退仍由实际运行验证。"]
     return []
 
 
