@@ -335,6 +335,15 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
         tree = parse(path)
         if tree is None:
             continue
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+        def owner(node, ancestors=parents, module_tree=tree):
+            while node in ancestors:
+                node = ancestors[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return node
+            return module_tree
+
         module_aliases = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -387,6 +396,18 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             source = parse(module)
             names = exports(source) if source else None
             attribute = node.args[1].value
+            original = next((fn for fn in source.body if isinstance(fn, ast.AsyncFunctionDef) and fn.name == attribute), None) if source else None
+            replacement = node.args[2]
+            if original and isinstance(replacement, ast.Name):
+                scope = owner(node)
+                candidates = [fn for fn in scope.body if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == replacement.id]
+                if not candidates and scope is not tree:
+                    candidates = [fn for fn in tree.body if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == replacement.id]
+                if len(candidates) == 1 and isinstance(candidates[0], ast.FunctionDef):
+                    fake = candidates[0]
+                    returned = [item.value for item in ast.walk(fake) if isinstance(item, ast.Return) and owner(item) is fake]
+                    if returned and all(value is None or isinstance(value, (ast.Constant, ast.Tuple, ast.List, ast.Dict, ast.Set)) for value in returned):
+                        issues.append(f"{rel}:{node.lineno} 用同步替身 `{fake.name}` 替换异步函数 `{attribute}`，替身只返回不可 await 的普通值；调用方 await 会失败。请保留异步调用合同，或提供真正的可等待返回值")
             if names is not None and attribute not in names and not attribute.startswith("__"):
                 if module.name == "__init__.py" and locate([module.parent / attribute]):
                     continue

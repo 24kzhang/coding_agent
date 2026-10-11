@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.agents.graph import AgentGraph
-from backend.agents.precheck import command_issues, manifest_issues
+from backend.agents.precheck import command_issues, import_issues, manifest_issues
 from backend.tools import FsTool
 from backend.tools.scope import command_scope, process_cwd
 
@@ -51,6 +51,19 @@ def test_script_and_explicit_directory_must_exist_before_launch(tmp_path):
     fs.write("portal/tools/probe.py", "print('检查')")
     assert not command_issues(fs, state, "uv run --directory portal python tools/probe.py")
     assert not command_issues(fs, state, "python tools/probe.py")
+
+
+@pytest.mark.parametrize("definition,expected", [
+    ("def fake_send():\n        return ('回复', {})", True),
+    ("async def fake_send():\n        return ('回复', {})", False),
+    ("def fake_send():\n        return make_awaitable()", False),
+])
+def test_async_patch_contract_checks_only_proven_nonawaitable_returns(tmp_path, definition, expected):
+    fs = FsTool(str(tmp_path / "workspace"))
+    fs.write("portal/service.py", "async def send():\n    return '完成'\n")
+    fs.write("portal/test_api.py", "import service as mod\ndef env(monkeypatch):\n    " + definition + "\n    monkeypatch.setattr(mod, 'send', fake_send)\n")
+    issues = import_issues(fs, {"text": "项目输出到 portal"}, ["portal/service.py", "portal/test_api.py"])
+    assert bool(issues) is expected
 
 
 @pytest.mark.parametrize("command", [
