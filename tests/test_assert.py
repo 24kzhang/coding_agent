@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from backend.agents.coder import coder
 from backend.agents.graph import AgentGraph
 from backend.agents.precheck import assertion_issues
@@ -47,3 +49,21 @@ def test_ignore_rule_requires_presence_and_explicit_removal_remains_supported(tm
     fs.write("portal/.gitignore", ".venv/\n")
     scoped = {"tool": "assert_text_present", "paths": [".gitignore"], "texts": [".venv"]}
     assert graph._do_action(scoped, fs, shell, git, {"text": "项目输出到 portal"})["ok"]
+
+
+@pytest.mark.parametrize("tool", ["assert_text_present", "assert_text_absent"])
+def test_private_assertions_are_revised_without_reading_body(tmp_path, tool):
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    fs = FsTool(str(tmp_path / "work"))
+    path = fs.root / ".local/model.json"
+    path.parent.mkdir()
+    path.write_text('{"api_key":"TEST_ONLY_PRIVATE"}')
+    calls = []
+    def reply(messages, **_kwargs):
+        calls.append(messages)
+        assert "TEST_ONLY_PRIVATE" not in str(messages)
+        return {"actions": [{"tool": tool, "paths": [".local/model.json"], "texts": ["api_key"]}], "done": True}
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=reply)
+    graph._do_action = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("私密断言不得执行"))
+    result = coder(graph, {"workdir": str(fs.root), "session_id": "s1", "text": "核对 api_key 字段合同"})
+    assert not result["coding_ok"] and len(calls) == 3
