@@ -21,7 +21,7 @@ from backend.agents.precheck import (
     server_issues,
     source_versions,
 )
-from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX
+from backend.agents.prompts import CODER_PROMPT, LONGCAT_CODER_SUFFIX, NATIVE_CODER_PROMPT
 from backend.agents.types import AgentState
 from backend.agents.verifier import review_before_verification
 from backend.tools import FsTool, GitTool, tool_specs
@@ -534,6 +534,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     native_fallback = False
     coder_output_limit = CODER_OUTPUT_TOKENS
     for step in range(1, max_steps + 1):
+        native_mode = isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []) and "longcat" not in model_name and empty_steps < 2 and not native_fallback
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
         task_brief = _task_brief(state)
@@ -570,6 +571,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 "\n已进入收尾阶段：禁止仅为确认而读取文件。若实现已完成，必须返回 actions=[]、done=true；"
                 "若仍有缺口，只执行直接修复缺口的写入或测试命令。\n"
             )
+            if native_mode:
+                finish_instruction = finish_instruction.replace("返回 actions=[]、done=true", "调用 finish")
         # stable_text 在同一 Coding 循环中尽量保持不变，并放在图片之前，供 DeepSeek
         # 从首 token 开始复用前缀缓存。步数、进度和工具观察等变化内容统一追加到末尾。
         stable_text = (
@@ -613,7 +616,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         messages = [
             {
                 "role": "system",
-                "content": CODER_PROMPT
+                "content": (NATIVE_CODER_PROMPT if native_mode else CODER_PROMPT)
                 + (LONGCAT_CODER_SUFFIX if "longcat" in model_name else "")
                 + (f"\n\n{mcp_prompt}" if mcp_prompt else ""),
             },
@@ -630,18 +633,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         try:
             output_limit = graph._check_model_budget(state, coder_output_limit)
             # data 是模型返回的 ReAct JSON。
-            if (
-                isinstance(client, LlmClient)
-                and "tools" in getattr(client.cfg, "capabilities", [])
-                and "longcat" not in model_name
-                and empty_steps < 2
-                and not native_fallback
-            ):
+            if native_mode:
                 native_specs = _native_coder_specs(mcp_tools, reads_forbidden, state.get("repo") is not None)
                 data = client.chat_tools(
                     messages,
                     native_specs,
                     max_tokens=output_limit,
+                    require_call=True,
                 )
             elif "longcat" in model_name or empty_steps >= 2 or native_fallback:
                 # LongCat 的普通文本模式会稳定返回原生工具标签；直接使用该协议，避免先用

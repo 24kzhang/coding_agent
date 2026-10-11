@@ -57,7 +57,7 @@ def test_coder_counts_invalid_tool_usage_and_lowers_effort(tmp_path) -> None:
             self.last_usage = LlmUsage()
             self.calls = 0
 
-        def chat_tools(self, messages, tools, *, max_tokens=None, effort=None):
+        def chat_tools(self, messages, tools, *, max_tokens=None, effort=None, require_call=False):
             self.calls += 1
             if self.calls == 1:
                 self.last_usage = LlmUsage(

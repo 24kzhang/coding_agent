@@ -176,6 +176,7 @@ class LlmClient:
         max_tokens: int | None = None,
         effort: str | None = None,
         force_tool: str | None = None,
+        require_call: bool = False,
     ) -> dict[str, Any]:
         """使用供应商原生函数工具，并转换为 Agent 内部动作格式。"""
         self.last_usage = LlmUsage()
@@ -187,13 +188,13 @@ class LlmClient:
             protocol = "responses" if "deepseek" in model or "qwen3.8" in model else "chat_completions"
         if protocol == "responses":
             try:
-                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool)
+                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call)
             except LlmError as exc:
                 if self.cfg.protocol != "auto" or not any(
                     marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
                 ):
                     raise
-        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool)
+        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call)
 
     @staticmethod
     def _public_tools(tools: list[dict[str, Any]], *, responses: bool) -> list[dict[str, Any]]:
@@ -238,12 +239,13 @@ class LlmClient:
         max_tokens: int | None,
         effort: str | None,
         force_tool: str | None = None,
+        require_call: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "input": self._normalize_messages(messages, responses=True),
             "tools": self._public_tools(tools, responses=True),
-            "tool_choice": {"type": "function", "name": force_tool} if force_tool else "auto",
+            "tool_choice": {"type": "function", "name": force_tool} if force_tool else "required" if require_call else "auto",
         }
         payload["max_output_tokens"] = self._output_limit(max_tokens)
         chosen_effort = self._effort(effort)
@@ -301,12 +303,13 @@ class LlmClient:
         max_tokens: int | None,
         effort: str | None,
         force_tool: str | None = None,
+        require_call: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": self._normalize_messages(messages, responses=False),
             "tools": self._public_tools(tools, responses=False),
-            "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "auto",
+            "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "required" if require_call else "auto",
         }
         payload["max_tokens"] = self._output_limit(max_tokens)
         payload.update(self._chat_reasoning(effort))
