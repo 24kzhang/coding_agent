@@ -107,7 +107,7 @@ def _mentions_field(text: str, field: str) -> bool:
     escaped = re.escape(field)
     return bool(
         re.search(
-            rf"(?:`{escaped}(?:`|\.)|\"{escaped}\"|\|\s*{escaped}\s*\||^\s*[-*]\s*{escaped}\s*[:：])",
+            rf"(?:`{escaped}(?:`|\.)|\"{escaped}\"|\|\s*{escaped}\s*\||^\s*[-*]\s*{escaped}\s*[:：]|(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_]))",
             text,
             re.MULTILINE,
         )
@@ -230,6 +230,10 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             "完整对象",
             "完整详情",
             "完整记录",
+            "完整原始记录",
+            "完整原始对象",
+            "原始对象整体透传",
+            "原始 JSON 对象整体透传",
             "返回完整实体详情",
             "返回完整业务对象",
             "返回完整记录",

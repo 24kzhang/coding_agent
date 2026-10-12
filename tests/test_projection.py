@@ -2,7 +2,7 @@
 import json
 
 from backend.agents.graph import AgentGraph
-from backend.agents.planner import _plan_quality_issues
+from backend.agents.planner import _mentions_field, _plan_quality_issues
 from backend.memory import MemoryStore
 from llm.store import ModelStore
 
@@ -45,3 +45,9 @@ def test_resource_ban_does_not_mean_symbolic_field_deletion(tmp_path):
     graph, state, text = fixture(tmp_path, "详情展示所有详细信息。")
     text += '\n`cover` 是原始字段，禁止加载其资源 ≠ 删除该字段：详情接口必须原样返回 `cover` 的原始路径文本。'
     assert _plan_quality_issues(graph, state, text) == []
+
+
+def test_plain_and_grouped_identifiers_are_real_field_mentions():
+    assert _mentions_field('字段：`record_id/cover/details.zh`。', 'cover')
+    assert _mentions_field('字段record_id是编号。', 'record_id')
+    assert not _mentions_field('record_id_backup 或 xrecord_id 不是该字段。', 'record_id')
