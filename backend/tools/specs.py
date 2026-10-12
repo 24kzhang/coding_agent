@@ -60,7 +60,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ("run_command", "默认在用户声明的交付根目录运行一个独立命令；明确带工作区交付前缀的命令在父工作区运行。uv --project 不切目录：子项目模块调用应使用 uv run --directory <交付前缀> 和项目相对参数，或提供项目包导入配置。不支持管道、重定向、分号、&& 等复合 shell 语法，也不支持 python -c/node -e 等解释器内联代码。应写入脚本后运行。简单单文件 cat/head/tail 自动转换为受控文件读取（范围按字符或行），不执行 shell；grep/sed 应直接使用文件工具。已有仓库索引时目录确认返回缓存；Git 仅在执行目录有独立 .git 时可用", {"cmd": string}, ["cmd"], "ask", "write"),
         ("git_status", "读取 Git 工作区状态", {}, [], "allow", "read"),
         ("git_diff", "读取 Git 差异", {}, [], "allow", "read"),
-        ("model_copy", "把已配置模型安全复制为 JSON 配置；目标必须位于交付项目的 .local/ 私密目录，默认 .local/model.json。自动写入忽略规则并限制权限；字段包含 id、base_url、model、api_key、protocol、timeout、default_effort、max_output_tokens。应用调用必须尊重思考等级及输出上限，不能选择其他目录或把格式当成 TOML", {"model_id": string, "target": string}, ["model_id"], "allow", "write"),
+        ("model_copy", "把已配置模型安全复制为 JSON 配置；目标必须位于交付项目的 .local/ 私密目录，默认 .local/model.json。自动写入忽略规则并限制权限；字段包含 id、base_url、model、api_key、protocol、timeout、default_effort、max_output_tokens、request_options、output_token_field。应用从配置读取 request_options 原样合入请求，输出预算使用 output_token_field 指定字段并受 max_output_tokens 钳制；不能猜测供应商参数、选择其他目录或把格式当成 TOML", {"model_id": string, "target": string}, ["model_id"], "allow", "write"),
         ("finish", "所有实现与检查完成后提交中文摘要", {"summary": string}, ["summary"], "allow", "finish"),
     ]
     return [

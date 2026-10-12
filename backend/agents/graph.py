@@ -1354,6 +1354,7 @@ class AgentGraph:
                     str((state or {}).get("workdir") or fs.root),
                     target,
                 )
+                copied = json.loads(path.read_text(encoding="utf-8"))
                 rel = path.relative_to(Path(str((state or {}).get("workdir") or fs.root)).resolve()).as_posix()
                 parts = Path(rel).parts
                 ignore = Path(*parts[:parts.index(".local")]) / ".gitignore"
@@ -1366,6 +1367,8 @@ class AgentGraph:
                     "text": f"模型私密配置已复制到 {rel}；密钥未进入工具结果。",
                     "file": rel,
                     "files": [rel, ignore.as_posix()],
+                    "request_options": copied.get("request_options", {}),
+                    "output_token_field": copied.get("output_token_field", "max_tokens"),
                 }
             if tool == "append_file":
                 # rel 是实际追加文件的项目相对路径。
@@ -1399,7 +1402,7 @@ class AgentGraph:
                 target = fs.safe(rel)
                 if fs.is_sensitive(target):
                     # 私密正文始终不可读取；安全元信息是正常分支，不伪装成空文件或读取快照。
-                    fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort", "max_output_tokens"] if target.name == "model.json" else []
+                    fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort", "max_output_tokens", "request_options", "output_token_field"] if target.name == "model.json" else []
                     return {"ok": True, "exists": target.exists(), "content_available": False,
                             "sensitive": True, "path": rel, "status": "metadata_only",
                             "is_symlink": (fs.root / rel).is_symlink(),
