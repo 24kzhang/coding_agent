@@ -42,6 +42,19 @@ def test_uv_dependency_inspection_uses_uv_without_requiring_pip_module(tmp_path)
     assert not command_issues(fs, {}, "python -m pip list")
 
 
+@pytest.mark.parametrize("command,expected", [
+    ("uv run --project portal pytest -q", True),
+    ("uv run --project=portal python -m pytest -q", True),
+    ("uv run --directory portal python -m pytest -q", False),
+    ("uv run --project portal pytest -c portal/pyproject.toml", False),
+    ("uv run --project portal pytest portal/tests", False),
+])
+def test_uv_pytest_project_selection_does_not_replace_import_directory(tmp_path, command, expected):
+    fs = FsTool(str(tmp_path / "workspace"))
+    fs.write("portal/pyproject.toml", "[project]\nname='portal'\nversion='1'\n[tool.pytest.ini_options]\npythonpath=['.']\n")
+    assert bool(manifest_issues(fs, {"text": "项目输出到 portal"}, command)) is expected
+
+
 def test_script_and_explicit_directory_must_exist_before_launch(tmp_path):
     fs = FsTool(str(tmp_path / "workspace"))
     state = {"text": "项目输出到 portal"}

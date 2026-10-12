@@ -301,6 +301,7 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     """在 uv 触发项目构建前核对公开元数据文件与显式包目录。"""
 
     root, actual = command_scope(fs, state, command)
+    command_root = root
     try:
         argv = shlex.split(actual)
     except ValueError:
@@ -347,6 +348,12 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
 
     uv = table("tool", "uv")
     packaged = "build" in argv or uv.get("package", "build-system" in data)
+    tail = argv[index:]
+    pytest_call = bool(tail) and (Path(tail[0]).name == "pytest" or len(tail) >= 3 and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(tail[0]).name) and tail[1:3] == ["-m", "pytest"])
+    explicit_config = "-c" in tail or "--pyargs" in tail or any(value.startswith("-c=") for value in tail)
+    explicit_paths = bool(table("tool", "pytest", "ini_options").get("pythonpath")) and any(not arg.startswith("-") and (root == (command_root / arg).resolve() or root in (command_root / arg).resolve().parents) for arg in tail[1:])
+    if project_path is not None and not packaged and pytest_call and process_cwd(command_root, argv) != root and not (explicit_config or explicit_paths):
+        return [f"测试尚未执行：uv --project 选择 {root.relative_to(fs.root)} 的环境，但进程目录仍为 {process_cwd(command_root, argv)}。这个项目未作为包安装，无参数 pytest 会从错误位置收集并导入模块；请改用 uv run --directory <项目目录> python -m pytest，或明确指定项目测试路径与带 pythonpath 的配置。"]
     if not packaged:
         return []
     references = []
