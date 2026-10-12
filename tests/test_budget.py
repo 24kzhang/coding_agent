@@ -7,7 +7,7 @@ import pytest
 from api.schema import ModelConfig
 from backend.agents.graph import AgentGraph
 from backend.memory import MemoryStore
-from llm.client import LlmClient, LlmOutputLimitError
+from llm.client import LlmClient, LlmError, LlmOutputLimitError, LlmUsage
 from llm.store import ModelStore
 
 
@@ -47,3 +47,34 @@ def test_invalid_structured_call_at_effective_budget_is_output_limit(monkeypatch
     monkeypatch.setattr("llm.client.httpx.Client", lambda **kwargs: original(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)), **kwargs))
     with pytest.raises(LlmOutputLimitError, match="有效生成预算"):
         LlmClient(cfg).chat_json([], structured_tools=True, max_tokens=6000)
+
+
+def test_recovery_does_call_third_model_after_format_and_budget_failures(tmp_path, monkeypatch):
+    """格式、预算恢复消耗的次数不能让已宣布的第三个备用模型从未被调用。"""
+
+    store = ModelStore(tmp_path / "models.json")
+    for ident in ["first", "second", "third"]:
+        store.upsert(ModelConfig(id=ident, name="测试", model=ident, base_url="https://example.test", api_key="TEST_ONLY_KEY"))
+    calls = []
+    counts = {}
+
+    class Client(LlmClient):
+        def chat_json(self, _messages, **kwargs):
+            ident = self.cfg.id
+            calls.append(ident)
+            counts[ident] = counts.get(ident, 0) + 1
+            if ident == "third":
+                self.last_usage = LlmUsage(prompt=10, completion=50)
+                return {"ok": True}
+            if counts[ident] == 1:
+                self.last_usage = LlmUsage(prompt=10, completion=50)
+                raise LlmError("结构化函数没有返回唯一的 result 对象")
+            self.last_usage = LlmUsage(prompt=10, completion=kwargs["max_tokens"])
+            raise LlmOutputLimitError("输出预算触顶")
+
+    monkeypatch.setattr("backend.agents.graph.LlmClient", Client)
+    graph = AgentGraph(store, MemoryStore(tmp_path / "mem"))
+    graph._ensure_mcp_tools = lambda *_args, **_kwargs: []
+    state = {"session_id": "s1", "workdir": str(tmp_path)}
+    assert graph._model_json(state, "verifier", Client(store.get("first")), [{"role": "user", "content": "返回审查结论"}])["ok"]
+    assert calls == ["first", "first", "first", "second", "second", "second", "third"]

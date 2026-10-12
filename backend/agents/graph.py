@@ -42,6 +42,9 @@ MAX_CODER_ATTEMPTS = 4
 MAX_MODEL_CALLS = 72
 MAX_UNCACHED_INPUT_TOKENS = 800_000
 MAX_OUTPUT_TOKENS = 160_000
+# 模型恢复独立于真正的只读工具往返；两种循环仍各自有界。
+MODEL_RECOVERY_ATTEMPTS = 12
+MCP_MAX_ROUNDS = 4
 
 
 class RunBudgetError(RuntimeError):
@@ -1631,8 +1634,9 @@ class AgentGraph:
         recovered_limit = False
         recovered_json = False
         failed_models: set[str] = set()
+        mcp_rounds = 0
         default_limit = 12_000 if agent == "planner" else 6_000
-        for _step in range(4):
+        for _step in range(MODEL_RECOVERY_ATTEMPTS):
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or default_limit))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
             if isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []):
@@ -1662,21 +1666,27 @@ class AgentGraph:
                     self._emit(state, agent, "model", f"结构化输出触顶，{recovery}并在模型及运行预算内重试一次", data={"reason": "output_limit", "max_tokens": next_limit, "effort": client.default_effort})
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not state.get("model_id"):
+                    if _step + 1 >= MODEL_RECOVERY_ATTEMPTS:
+                        raise
                     failed_models.add(client.cfg.id)
                     next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
+                        recovered_limit = recovered_json = False
                         conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
                         self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
                         continue
                 if unavailable_error(exc) and isinstance(client, LlmClient):
+                    if _step + 1 >= MODEL_RECOVERY_ATTEMPTS:
+                        raise
                     self.unavailable_models.add(client.cfg.id)
                     failed_models.add(client.cfg.id)
                     next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
+                        recovered_limit = recovered_json = False
                         self._emit(state, agent, "model", f"结构化节点服务暂时不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "transient_failover"})
                         continue
                 raise
@@ -1688,6 +1698,7 @@ class AgentGraph:
             ][:2]
             if not actions:
                 return data
+            mcp_rounds += 1
             observations: list[str] = []
             for action in actions:
                 signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
@@ -1713,7 +1724,9 @@ class AgentGraph:
                     },
                 ]
             )
-        raise LlmError("智能节点连续调用 MCP，未在轮次上限内返回原始结构化结果")
+            if mcp_rounds >= MCP_MAX_ROUNDS:
+                raise LlmError("智能节点连续调用 MCP，未在工具往返上限内返回原始结构化结果")
+        raise LlmError("结构化节点在模型恢复与换模上限内未返回完整结果")
 
     def _model_text(
         self,
@@ -1734,7 +1747,8 @@ class AgentGraph:
         seen: set[str] = set()
         recovered_limit = False
         failed_models: set[str] = set()
-        for _step in range(4):
+        mcp_rounds = 0
+        for _step in range(MODEL_RECOVERY_ATTEMPTS):
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or 4_000))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
             usage_before = getattr(client, "last_usage", None)
@@ -1744,12 +1758,15 @@ class AgentGraph:
                 if getattr(client, "last_usage", None) is not usage_before:
                     self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
                 if unavailable_error(exc) and isinstance(client, LlmClient):
+                    if _step + 1 >= MODEL_RECOVERY_ATTEMPTS:
+                        raise
                     self.unavailable_models.add(client.cfg.id)
                     failed_models.add(client.cfg.id)
                     next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
+                        recovered_limit = False
                         self._emit(state, agent, "model", f"文本节点服务不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "unavailable_failover"})
                         continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
@@ -1790,6 +1807,7 @@ class AgentGraph:
             ][:2]
             if not actions:
                 return text
+            mcp_rounds += 1
             observations: list[str] = []
             for action in actions:
                 signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
@@ -1815,7 +1833,9 @@ class AgentGraph:
                     },
                 ]
             )
-        raise LlmError("智能节点连续调用 MCP，未在轮次上限内返回最终文本")
+            if mcp_rounds >= MCP_MAX_ROUNDS:
+                raise LlmError("智能节点连续调用 MCP，未在工具往返上限内返回最终文本")
+        raise LlmError("文本节点在模型恢复与换模上限内未返回完整结果")
 
     def _call_mcp_action(self, action: dict[str, Any], state: AgentState) -> dict[str, Any]:
         """校验动态工具名、服务和参数后执行一次 MCP tools/call。"""
