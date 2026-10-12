@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from backend.agents.precheck import source_versions
+from backend.agents.precheck import import_issues, source_versions
 from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
@@ -178,6 +178,8 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
                         + ("\n[审查上下文在此截断，磁盘仍有后续内容。]" if len(text) > limit else ""))
         budget -= min(len(text), limit)
     client = graph._client("verifier", state)
+    patch_contracts: list[dict] = []
+    import_issues(fs, state, targets, contracts=patch_contracts)
     evidence = []
     current_versions = source_versions(fs, state, files)
     for check in state.get("completed_checks", []):
@@ -193,6 +195,7 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
          + "\n\n实际执行证据（由程序记录版本，不是模型声称通过）：\n" + json.dumps(evidence, ensure_ascii=False)
          + "\n已通过且未变更的测试不能被猜测为会失败；仍可报告未覆盖的需求缺口，但不要改坏已验证路径。"
          + "\n\n测试与 fixture 声明事实（按各文件作用域对照依赖，不代表已经执行）：\n" + json.dumps(fixture_contracts(fs, targets), ensure_ascii=False)
+         + "\n\n被替换函数的可见状态副作用（不能仅模拟回复而跳过后续流程所依赖的状态登记）：\n" + json.dumps(patch_contracts, ensure_ascii=False)
          + "\n\n当前源码与测试：\n" + "\n\n".join(snippets)},
     ], temperature=0, plain_text=True)
     issues = result.get("issues")

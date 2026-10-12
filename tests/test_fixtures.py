@@ -1,5 +1,6 @@
 """结构化 fixture 事实帮助审查发现局部替身覆盖与遗漏依赖。"""
 
+from backend.agents.precheck import import_issues
 from backend.agents.verifier import fixture_contracts
 from backend.tools import FsTool
 
@@ -26,3 +27,17 @@ def client():
     assert "fake_sender" in by_name["test_mocked"]["依赖参数"]
     assert "fake_sender" not in by_name["test_uncovered"]["依赖参数"]
     assert 'Service, \'send\'' in by_name["fake_sender"]["补丁目标"][0]
+
+
+def test_mock_contract_exposes_original_global_state_commit(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service.py", "registry = {}\ndef deliver(item):\n    reply = remote_send(item)\n    registry[item.id] = item\n    return reply\n")
+    fs.write("test_api.py", "import service as mod\ndef test_flow(monkeypatch):\n    monkeypatch.setattr(mod, 'deliver', lambda item: '回复')\n")
+    facts = []
+    assert not import_issues(fs, {}, ["service.py", "test_api.py"], contracts=facts)
+    assert facts[0]["原函数的模块状态写入"] == ["registry[item.id] = item"]
+    assert facts[0]["替身表达式"] == "lambda item: '回复'"
+    fs.write("service.py", "registry = {}\ndef deliver(item, registry):\n    registry[item.id] = item\n    return '回复'\n")
+    facts = []
+    import_issues(fs, {}, ["test_api.py"], contracts=facts)
+    assert not facts

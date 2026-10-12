@@ -425,7 +425,7 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     return issues
 
 
-def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
+def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dict] | None = None) -> list[str]:
     """只报告可由静态本地模块证明的缺失名称，动态导出交给真实测试。"""
 
     root = delivery_root(fs, state)
@@ -559,6 +559,21 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             source = parse(module)
             names = exports(source) if source else None
             attribute = node.args[1].value
+            if contracts is not None and source is not None:
+                function = next((fn for fn in source.body if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == attribute), None)
+                globals_ = {name.id for item in source.body if isinstance(item, (ast.Assign, ast.AnnAssign)) for target in (item.targets if isinstance(item, ast.Assign) else [item.target]) for name in ast.walk(target) if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)}
+                writes = []
+                if function:
+                    declared = {name for item in ast.walk(function) if isinstance(item, ast.Global) for name in item.names}
+                    local = {name.id for name in ast.walk(function) if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)} | {arg.arg for arg in ast.walk(function.args) if isinstance(arg, ast.arg)}
+                    globals_ -= local - declared
+                    for item in ast.walk(function):
+                        targets = item.targets if isinstance(item, ast.Assign) else [item.target] if isinstance(item, (ast.AnnAssign, ast.AugAssign)) else []
+                        if any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in globals_ for target in targets):
+                            writes.append(ast.unparse(item))
+                if writes:
+                    contracts.append({"补丁文件": rel, "补丁位置": node.lineno, "被替换函数": f"{module.relative_to(fs.root)}:{attribute}",
+                                      "原函数的模块状态写入": writes, "替身表达式": ast.unparse(node.args[2])})
             original = next((fn for fn in source.body if isinstance(fn, ast.AsyncFunctionDef) and fn.name == attribute), None) if source else None
             replacement = node.args[2]
             if original and isinstance(replacement, ast.Name):
