@@ -120,7 +120,7 @@ def _excludes_field(text: str, field: str, *, allow_projection: bool) -> bool:
     for clause in re.split(r"[。；;\n]", text):
         if allow_projection and re.search(r"列表|卡片|索引|摘要", clause) and not re.search(r"详情|详细|完整对象|完整记录", clause):
             continue
-        checked = re.sub(r"(?:不等于|不允许|不应|不得|不可|不能|禁止|不)(?:删除|移除|排除)", "", clause)
+        checked = re.sub(r"(?:不等于|不代表|不意味着|不允许|不应|不得|不可|不能|禁止|不|≠|!=)\s*(?:删除|移除|排除)", "", clause)
         if _mentions_field(clause, field) and re.search(r"接口\s*不返回|(?:字段|键).{0,12}(?:删除|移除|排除)|(?:不返回|删除|移除|排除).{0,20}[`\"]" + re.escape(field), checked):
             return True
     return False

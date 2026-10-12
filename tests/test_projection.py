@@ -39,3 +39,9 @@ def test_list_and_detail_sentences_on_same_line_have_distinct_scopes(tmp_path):
     graph, state, text = fixture(tmp_path, "详情展示所有详细信息。")
     text += '\n列表不返回 `cover` 加载地址。详情提供全部原始字段，`cover` 字段禁止删除。'
     assert _plan_quality_issues(graph, state, text) == []
+
+
+def test_resource_ban_does_not_mean_symbolic_field_deletion(tmp_path):
+    graph, state, text = fixture(tmp_path, "详情展示所有详细信息。")
+    text += '\n`cover` 是原始字段，禁止加载其资源 ≠ 删除该字段：详情接口必须原样返回 `cover` 的原始路径文本。'
+    assert _plan_quality_issues(graph, state, text) == []
