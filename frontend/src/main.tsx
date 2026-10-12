@@ -179,13 +179,18 @@ function App() {
   // tokenTotal 是整个会话的累计用量；供应商实值与估算不能混为一谈。
   const tokenTotal = useMemo(() => events.reduce((sum, event) => sum + event.tokens, 0), [events]);
   const usage = useMemo(() => {
-    const total = { input: 0, cached: 0, output: 0, reasoning: 0, estimated: false };
+    const total = { input: 0, cached: 0, output: 0, reasoning: 0, reasoningKnown: 0, reasoningUnknown: 0, estimated: false };
     for (const event of events.filter((item) => item.kind === "usage")) {
       const data = event.data ?? {};
       total.input += typeof data.prompt_tokens === "number" ? data.prompt_tokens : 0;
       total.cached += typeof data.cached_input_tokens === "number" ? data.cached_input_tokens : 0;
       total.output += typeof data.output_tokens === "number" ? data.output_tokens : 0;
-      total.reasoning += typeof data.reasoning_tokens === "number" ? data.reasoning_tokens : 0;
+      if (typeof data.reasoning_tokens === "number" && (data.reasoning_tokens_known === true || data.reasoning_tokens > 0)) {
+        total.reasoning += data.reasoning_tokens;
+        total.reasoningKnown += 1;
+      } else {
+        total.reasoningUnknown += 1;
+      }
       total.estimated ||= data.estimated === true;
     }
     return total;
@@ -938,7 +943,7 @@ function App() {
               <span>输入 {usage.input.toLocaleString()}</span>
               <span>缓存 {usage.cached.toLocaleString()}</span>
               <span>输出 {usage.output.toLocaleString()}</span>
-              <span>推理 {usage.reasoning.toLocaleString()}</span>
+              <span>推理 {usage.reasoningKnown ? `${usage.reasoning.toLocaleString()}${usage.reasoningUnknown ? "（部分未提供）" : ""}` : "未提供"}</span>
             </div>
             <div className="agent-board">
               {agents.map((agent) => (

@@ -2165,6 +2165,7 @@ class AgentGraph:
             cached = 0
             cache_miss = 0
             reasoning = 0
+            reasoning_known = False
             total = usage
         else:
             total = int(getattr(usage, "total", 0) or 0)
@@ -2176,6 +2177,7 @@ class AgentGraph:
                 or max(prompt - cached, 0)
             )
             reasoning = int(getattr(usage, "reasoning", 0) or 0)
+            reasoning_known = bool(getattr(usage, "reasoning_known", reasoning > 0))
         state["tokens"] = int(state.get("tokens", 0)) + total
         state["model_calls"] = int(state.get("model_calls", 0)) + 1
         state["cached_input_tokens"] = int(state.get("cached_input_tokens", 0)) + cached
@@ -2188,7 +2190,7 @@ class AgentGraph:
             "usage",
             (
                 f"输入 {prompt} token（缓存命中 {cached}、未命中 {cache_miss}），"
-                f"输出 {completion} token（正文 {max(completion - reasoning, 0)}、推理 {reasoning}）"
+                f"输出 {completion} token（正文 {max(completion - reasoning, 0) if reasoning_known else '未拆分'}、推理 {reasoning if reasoning_known else '供应商未提供'}）"
             ),
             tokens=total,
             data={
@@ -2196,8 +2198,9 @@ class AgentGraph:
                 "cached_input_tokens": cached,
                 "uncached_input_tokens": cache_miss,
                 "output_tokens": completion,
-                "reasoning_tokens": reasoning,
-                "visible_output_tokens": max(completion - reasoning, 0),
+                "reasoning_tokens": reasoning if reasoning_known else None,
+                "reasoning_tokens_known": reasoning_known,
+                "visible_output_tokens": max(completion - reasoning, 0) if reasoning_known else None,
                 "source_agent": agent,
                 "model_id": model_id,
                 "effort": effort,

@@ -42,6 +42,8 @@ class LlmUsage:
     reasoning: int = 0
     # 估算值与供应商返回值分开，缓存和成本结论不能建立在估算命中上。
     estimated: bool = False
+    # 供应商未返回推理明细时，兼容计算用的 0 不能作为已观测的零推理证据。
+    reasoning_known: bool | None = None
 
     def __post_init__(self) -> None:
         self.prompt = max(0, self.prompt)
@@ -49,6 +51,8 @@ class LlmUsage:
         self.cached = max(0, min(self.cached, self.prompt))
         self.cache_miss = min(self.prompt, max(self.cache_miss, self.prompt - self.cached))
         self.reasoning = max(0, min(self.reasoning, self.completion))
+        if self.reasoning_known is None:
+            self.reasoning_known = self.reasoning > 0
 
     @property
     def total(self) -> int:
@@ -676,6 +680,7 @@ class LlmClient:
                 cached=min(cached, prompt),
                 cache_miss=min(cache_miss, prompt),
                 reasoning=min(reasoning, completion),
+                reasoning_known=output_details.get("reasoning_tokens") is not None,
             )
         estimated_prompt = self.estimate_tokens(self._messages_text(messages))
         return LlmUsage(
@@ -1084,6 +1089,7 @@ class LlmClient:
                 cached=min(cached, prompt),
                 cache_miss=min(cache_miss, prompt),
                 reasoning=min(reasoning, completion),
+                reasoning_known=completion_details.get("reasoning_tokens") is not None,
             )
         # prompt_text 是所有输入消息拼接后的文本，用于估算输入 token。
         prompt_text = self._messages_text(messages)
