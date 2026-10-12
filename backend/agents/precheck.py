@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -155,6 +157,9 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
             if not target.is_file():
                 return [f"命令尚未执行：脚本 {target} 尚未创建。请先写入可审查脚本再运行，不得假设计划中提到的文件已经存在。"]
             if target.suffix == ".py":
+                imports = script_imports(fs, target, effective_cwd)
+                if imports:
+                    return imports
                 inputs = script_inputs(fs, target, effective_cwd)
                 if inputs:
                     return inputs
@@ -167,6 +172,48 @@ def command_issues(fs: FsTool, state: dict, command: str) -> list[str]:
             target = process_cwd(cwd, argv) / argv[-1]
             if not target.is_file():
                 return [f"命令尚未执行：JSON 输入文件不存在于实际进程目录 {target.parent}。请使用已有输入文件的真实路径；交付目录与输入工作区不同，uv --directory 改变进程目录，--project 不改变进程目录。不要为探查输入而重新创建副本。"]
+    return []
+
+
+def script_imports(fs: FsTool, script: Path, cwd: Path) -> list[str]:
+    """非安装型项目的子目录脚本须显式暴露项目包，不能把 cwd 当成 sys.path[0]。"""
+
+    try:
+        script = fs.safe(script.relative_to(fs.root).as_posix())
+        if fs.is_sensitive(script):
+            return []
+        project = next((parent for parent in script.parents if parent == fs.root or fs.root in parent.parents if (parent / "pyproject.toml").is_file()), None)
+        if project is None or project == script.parent:
+            return []
+        manifest = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+        uv = manifest.get("tool", {}).get("uv", {})
+        if uv.get("package", "build-system" in manifest):
+            return []
+        if any((cwd / value).resolve() == project for value in os.environ.get("PYTHONPATH", "").split(os.pathsep) if value):
+            return []
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError, SyntaxError, TypeError, AttributeError):
+        return []
+    sys_names = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names if alias.name == "sys"}
+    path_setup = []
+    for node in tree.body:
+        target = node.value.func.value if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in {"insert", "append", "extend"} else None
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
+        for value in [target, *targets]:
+            if isinstance(value, ast.Attribute) and value.attr == "path" and isinstance(value.value, ast.Name) and value.value.id in sys_names:
+                path_setup.append(node.lineno)
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)) or isinstance(node, ast.ImportFrom) and (not node.module or node.level):
+            continue
+        modules = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module]
+        for name in modules:
+            if name.split(".")[0] in sys.stdlib_module_names:
+                continue
+            rel = Path(*name.split("."))
+            local = (project / rel).with_suffix(".py").is_file() or (project / rel / "__init__.py").is_file()
+            in_script_dir = (script.parent / rel).with_suffix(".py").is_file() or (script.parent / rel / "__init__.py").is_file()
+            if local and not in_script_dir and not any(line < node.lineno for line in path_setup):
+                return [f"脚本尚未执行：{script.relative_to(fs.root)}:{node.lineno} 导入项目包 {name}，但直接运行文件只将 {script.parent} 放到入口搜索路径。该项目未安装为包，也未在导入前设置 sys.path；请从项目目录使用 python -m <脚本模块>，或显式配置导入路径，不要只靠 uv --project/工作目录解决脚本导入。"]
     return []
 
 
