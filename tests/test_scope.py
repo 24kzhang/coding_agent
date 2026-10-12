@@ -79,6 +79,28 @@ def test_async_patch_contract_checks_only_proven_nonawaitable_returns(tmp_path, 
     assert bool(issues) is expected
 
 
+@pytest.mark.parametrize("source,expected", [
+    ("def send():\n    import httpx\n    return httpx.Client()\n", True),
+    ("import httpx\ndef send():\n    return httpx.Client()\n", False),
+    ("def __getattr__(name):\n    return external_lookup(name)\n", False),
+])
+def test_patch_target_cannot_use_local_import_as_global_attribute(tmp_path, source, expected):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("service.py", source)
+    fs.write("test_api.py", "import service as mod\ndef test_send(monkeypatch):\n    monkeypatch.setattr(mod.httpx, 'Client', object, raising=False)\n")
+    assert bool(import_issues(fs, {}, ["service.py", "test_api.py"])) is expected
+
+
+def test_explicit_package_module_reexport_keeps_patch_target_resolution(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("pkg/__init__.py", "from . import service\n")
+    fs.write("pkg/service.py", "def send():\n    import httpx\n    return httpx.Client()\n")
+    fs.write("test_api.py", "from pkg import service as mod\ndef test_send(monkeypatch):\n    monkeypatch.setattr(mod.httpx, 'Client', object)\n")
+    assert import_issues(fs, {}, ["test_api.py"])
+    fs.write("pkg/__init__.py", "from . import service\nservice = external_object\n")
+    assert not import_issues(fs, {}, ["test_api.py"])
+
+
 @pytest.mark.parametrize("command", [
     "uv --directory=workspace/portal sync",
     "uv sync --project=portal",

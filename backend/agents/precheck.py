@@ -467,6 +467,12 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             if names is None:
                 continue
             for alias in node.names:
+                if alias.name != "*" and module.name == "__init__.py":
+                    child = locate([module.parent / alias.name])
+                    reexport = any(isinstance(item, ast.ImportFrom) and item.level == 1 and item.module is None and any(value.name == alias.name and (value.asname or value.name) == alias.name for value in item.names) for item in source.body)
+                    shadowed_export = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name == alias.name or isinstance(item, (ast.Assign, ast.AnnAssign)) and any(isinstance(name, ast.Name) and name.id == alias.name and isinstance(name.ctx, ast.Store) for name in ast.walk(item)) for item in source.body)
+                    if child and (alias.name not in names or reexport and not shadowed_export):
+                        module_aliases[alias.asname or alias.name] = child
                 if alias.name == "*" or alias.name in names:
                     continue
                 if module.name == "__init__.py" and ((module.parent / (alias.name + ".py")).exists()
@@ -480,8 +486,21 @@ def import_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and isinstance(node.func.value, ast.Name) and node.func.value.id == "monkeypatch"
                     and node.func.attr == "setattr" and len(node.args) >= 3
-                    and isinstance(node.args[0], ast.Name) and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[0], (ast.Name, ast.Attribute)) and isinstance(node.args[1], ast.Constant)
                     and isinstance(node.args[1].value, str)):
+                continue
+            target_object = node.args[0]
+            if isinstance(target_object, ast.Attribute):
+                chain = target_object
+                while isinstance(chain.value, ast.Attribute):
+                    chain = chain.value
+                module = module_aliases.get(chain.value.id) if isinstance(chain.value, ast.Name) else None
+                if module is not None:
+                    source = parse(module)
+                    names = exports(source) if source else None
+                    if names is not None and chain.attr not in names and not (module.name == "__init__.py" and locate([module.parent / chain.attr])):
+                        issues.append(f"{rel}:{node.lineno} 的 pytest 补丁目标 `{ast.unparse(target_object)}` 先访问了本地模块 {module.relative_to(fs.root)} 未导出的 `{chain.attr}`；函数内部导入不是模块全局属性。请对照实际查找位置注入替身")
+                # 已导出的对象可能来自外部模块或动态实例，不猜测其后续成员。
                 continue
             if any(keyword.arg == "raising" and isinstance(keyword.value, ast.Constant) and keyword.value.value is False for keyword in node.keywords):
                 continue
