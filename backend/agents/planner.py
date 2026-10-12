@@ -114,6 +114,18 @@ def _mentions_field(text: str, field: str) -> bool:
     )
 
 
+def _excludes_field(text: str, field: str, *, allow_projection: bool) -> bool:
+    """按句子范围区分投影和详情，禁止删除字段不等于计划真的删除字段。"""
+
+    for clause in re.split(r"[。；;\n]", text):
+        if allow_projection and re.search(r"列表|卡片|索引|摘要", clause) and not re.search(r"详情|详细|完整对象|完整记录", clause):
+            continue
+        checked = re.sub(r"(?:不等于|不允许|不应|不得|不可|不能|禁止|不)(?:删除|移除|排除)", "", clause)
+        if _mentions_field(clause, field) and re.search(r"接口\s*不返回|(?:字段|键).{0,12}(?:删除|移除|排除)|(?:不返回|删除|移除|排除).{0,20}[`\"]" + re.escape(field), checked):
+            return True
+    return False
+
+
 def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) -> list[str]:
     """按用户硬约束和仓库事实检查计划初稿，返回需要模型修订的问题。"""
 
@@ -146,10 +158,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         excluded = []
         for field in fields:
             for line in markdown.splitlines():
-                # 精简列表与完整详情是不同的输出合同，不能把卡片投影当成详情删字段。
-                if not complete_list and re.search(r"列表|卡片|索引|摘要", line) and not re.search(r"详情|详细|完整对象|完整记录", line):
-                    continue
-                if _mentions_field(line, field) and re.search(r"接口\s*不返回|(?:字段|键).{0,12}(?:删除|移除|排除)|(?:不返回|删除|移除|排除).{0,20}[`\"]" + re.escape(field), line):
+                if _excludes_field(line, field, allow_projection=not complete_list):
                     excluded.append(field)
                     break
         if excluded:

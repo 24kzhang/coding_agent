@@ -33,3 +33,9 @@ def test_detail_omission_cannot_hide_in_list_sentence(tmp_path):
     graph, state, text = fixture(tmp_path, "详情展示所有详细信息。")
     text += '\n列表和详情都不返回 `cover`。'
     assert any("明确排除了原始字段：cover" in issue for issue in _plan_quality_issues(graph, state, text))
+
+
+def test_list_and_detail_sentences_on_same_line_have_distinct_scopes(tmp_path):
+    graph, state, text = fixture(tmp_path, "详情展示所有详细信息。")
+    text += '\n列表不返回 `cover` 加载地址。详情提供全部原始字段，`cover` 字段禁止删除。'
+    assert _plan_quality_issues(graph, state, text) == []
