@@ -16,6 +16,9 @@ from llm.store import ModelStore
     ("deepseek-chat", [], "none", {"type": "disabled"}),
     ("deepseek-chat", [], "medium", {"type": "enabled"}),
     ("custom", ["reasoning"], "low", None),
+    ("mimo-v2.6-flash-free", ["reasoning"], "none", {"type": "disabled"}),
+    ("mimo-v2.6-flash-free", ["reasoning"], "high", {"type": "enabled"}),
+    ("z-ai/glm-5.3-flash", ["reasoning"], "none", {"type": "enabled"}),
 ])
 def test_chat_reasoning_fields_follow_model_capabilities(monkeypatch, tools, model, capabilities, effort, expected):
     captured = []
@@ -44,7 +47,12 @@ def test_chat_reasoning_fields_follow_model_capabilities(monkeypatch, tools, mod
         client.chat([], effort=effort)
     assert len(captured) == 1
     assert captured[0].get("thinking") == expected
-    assert captured[0]["reasoning_effort"] == ("high" if model.startswith("deepseek") and effort == "medium" else effort)
+    if "mimo" in model:
+        assert "reasoning_effort" not in captured[0]
+        assert "max_completion_tokens" in captured[0] and "max_tokens" not in captured[0]
+    else:
+        actual = "low" if "glm-5.3" in model and effort == "none" else "high" if model.startswith("deepseek") and effort == "medium" else effort
+        assert captured[0]["reasoning_effort"] == actual
 
 
 @pytest.mark.parametrize("override,profile,expected", [(None, "inherit", "none"), ("high", "inherit", "none"), (None, "low", "low"), ("low", "inherit", "low")])
@@ -65,6 +73,24 @@ def test_explicit_model_inherits_its_own_default_instead_of_primary(tmp_path):
                                  default_effort=effort, efforts=["none", "high"]))
     graph = AgentGraph(store, MemoryStore(tmp_path / "mem"))
     assert graph._client("coder", {"model_id": "selected"}).default_effort == "none"
+
+
+def test_gateway_mapping_overrides_vendor_defaults_and_private_copy(tmp_path):
+    """同模型经不同中转服务时，使用配置映射而不是错误地发送官方默认字段。"""
+
+    cfg = ModelConfig(id="mapped", name="中转模型", model="mimo-v2.6", base_url="https://example.test", api_key="TEST_ONLY_KEY", output_token_field="max_tokens", reasoning_style="effort", effort_map={"low": "light", "high": "deep"}, default_effort="low")
+    model = LlmClient(cfg)
+    assert model.chat_token_field() == "max_tokens"
+    assert model._chat_reasoning("low") == {"reasoning_effort": "light"}
+    assert model._chat_reasoning("high") == {"reasoning_effort": "deep"}
+    store = ModelStore(tmp_path / "models.json")
+    store.upsert(cfg)
+    work = tmp_path / "work"
+    work.mkdir()
+    import json
+    private = json.loads(store.copy_private("mapped", str(work)).read_text())
+    assert private["request_options"] == {"reasoning_effort": "light"}
+    assert private["output_token_field"] == "max_tokens"
 
 
 @pytest.mark.parametrize("protocol", ["chat_completions", "responses"])

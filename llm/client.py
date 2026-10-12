@@ -26,6 +26,21 @@ class LlmOutputLimitError(LlmError):
     """已付费输出达到上限，但没有产出完整结构化结果。"""
 
 
+def unavailable_error(error: Exception) -> bool:
+    """仅将服务、认证或模型可用性故障交给备用模型，余额与输出错误保留原语义。"""
+
+    if isinstance(error, (LlmBalanceError, LlmOutputLimitError)):
+        return False
+    text = str(error).lower()
+    markers = (
+        "错误 401", "错误 403", "错误 404", "错误 405", "错误 429",
+        "错误 500", "错误 502", "错误 503", "错误 504", "返回 404", "返回 405",
+        "响应超时", "调用失败", "连接失败", "connecttimeout", "readtimeout",
+        "接口不存在", "no endpoints", "model not found", "model is not available",
+    )
+    return any(marker in text for marker in markers)
+
+
 @dataclass
 class LlmUsage:
     """统一记录 token 用量，并拆分缓存与推理开销。"""
@@ -181,6 +196,7 @@ class LlmClient:
         effort: str | None = None,
         force_tool: str | None = None,
         require_call: bool = False,
+        temperature: float = 0.2,
     ) -> dict[str, Any]:
         """使用供应商原生函数工具，并转换为 Agent 内部动作格式。"""
         self.last_usage = LlmUsage()
@@ -192,13 +208,13 @@ class LlmClient:
             protocol = "responses" if "deepseek" in model or "qwen3.8" in model else "chat_completions"
         if protocol == "responses":
             try:
-                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call)
+                return self._responses_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call, temperature=temperature)
             except LlmError as exc:
                 if self.cfg.protocol != "auto" or not any(
                     marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
                 ):
                     raise
-        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call)
+        return self._chat_tools(messages, tools, max_tokens=max_tokens, effort=effort, force_tool=force_tool, require_call=require_call, temperature=temperature)
 
     @staticmethod
     def _public_tools(tools: list[dict[str, Any]], *, responses: bool) -> list[dict[str, Any]]:
@@ -218,6 +234,13 @@ class LlmClient:
         """所有协议都携带模型级上限，调用方不能绕过已配置的成本边界。"""
 
         return max(1, min(int(requested) if requested is not None else self.cfg.max_output_tokens, self.cfg.max_output_tokens))
+
+    def chat_token_field(self) -> str:
+        """兼容接口仍需使用供应商实际支持的输出预算字段。"""
+
+        if self.cfg.output_token_field != "auto":
+            return self.cfg.output_token_field
+        return "max_completion_tokens" if "mimo" in self.cfg.model.lower() else "max_tokens"
 
     @staticmethod
     def _tool_arguments(value: Any) -> dict[str, Any]:
@@ -244,9 +267,11 @@ class LlmClient:
         effort: str | None,
         force_tool: str | None = None,
         require_call: bool = False,
+        temperature: float = 0.2,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
+            "temperature": temperature,
             "input": self._normalize_messages(messages, responses=True),
             "tools": self._public_tools(tools, responses=True),
             "tool_choice": {"type": "function", "name": force_tool} if force_tool else "required" if require_call else "auto",
@@ -268,6 +293,10 @@ class LlmClient:
                             time.sleep(0.4)
                             continue
                         break
+                    except httpx.TimeoutException as exc:
+                        raise LlmError(f"{url} 模型响应超时：{type(exc).__name__}") from exc
+                    except httpx.HTTPError as exc:
+                        raise LlmError(f"{url} 调用失败：{type(exc).__name__}") from exc
                     if response.status_code in {404, 405}:
                         last_error = f"{url} 返回 {response.status_code}"
                         break
@@ -308,24 +337,40 @@ class LlmClient:
         effort: str | None,
         force_tool: str | None = None,
         require_call: bool = False,
+        temperature: float = 0.2,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
+            "temperature": temperature,
             "messages": self._normalize_messages(messages, responses=False),
             "tools": self._public_tools(tools, responses=False),
             "tool_choice": {"type": "function", "function": {"name": force_tool}} if force_tool else "required" if require_call else "auto",
         }
-        payload["max_tokens"] = self._output_limit(max_tokens)
+        payload[self.chat_token_field()] = self._output_limit(max_tokens)
         payload.update(self._chat_reasoning(effort))
+        if self.cfg.stream_tools:
+            payload.update(stream=True, stream_options={"include_usage": True})
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
         last_error = ""
         with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
             for url in self._urls():
                 try:
-                    response = client.post(url, headers=headers, json=payload)
+                    if self.cfg.stream_tools:
+                        with client.stream("POST", url, headers=headers, json=payload) as stream:
+                            if stream.status_code >= 400:
+                                stream.read()
+                                response = stream
+                            else:
+                                response = httpx.Response(stream.status_code, json=self._stream_tool_data(stream))
+                    else:
+                        response = client.post(url, headers=headers, json=payload)
                 except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                     last_error = f"{url} 调用失败：{exc}"
                     continue
+                except httpx.TimeoutException as exc:
+                    raise LlmError(f"{url} 模型响应超时：{type(exc).__name__}") from exc
+                except httpx.HTTPError as exc:
+                    raise LlmError(f"{url} 调用失败：{type(exc).__name__}") from exc
                 if response.status_code in {404, 405}:
                     last_error = f"{url} 返回 {response.status_code}"
                     continue
@@ -358,6 +403,65 @@ class LlmClient:
                         result["native_message"]["reasoning_content"] = message["reasoning_content"]
                 return result
         raise LlmError(last_error or "没有可用的模型接口地址")
+
+    def _stream_tool_data(self, response: httpx.Response) -> dict[str, Any]:
+        """收齐流式原生调用后再交给同一参数校验，推理正文不进入日志。"""
+
+        if "text/event-stream" not in response.headers.get("content-type", ""):
+            response.read()
+            return response.json()
+        calls: dict[int, dict[str, Any]] = {}
+        content: list[str] = []
+        reasoning: list[str] = []
+        usage = None
+        finished = None
+        deadline = time.monotonic() + self.cfg.timeout
+        for line in response.iter_lines():
+            if time.monotonic() > deadline:
+                raise LlmError("模型响应超时：流式工具生成超过总时长")
+            if not line.startswith("data:"):
+                continue
+            value = line[5:].strip()
+            if value == "[DONE]":
+                break
+            if not value:
+                continue
+            try:
+                item = json.loads(value)
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise LlmError("模型流式工具响应不是合法 JSON") from exc
+            if item.get("error"):
+                self._raise_http_error(502, json.dumps(item["error"], ensure_ascii=False))
+            if isinstance(item.get("usage"), dict):
+                usage = item["usage"]
+            for choice in item.get("choices") or []:
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                if isinstance(delta.get("content"), str):
+                    content.append(delta["content"])
+                thought = delta.get("reasoning_content", delta.get("reasoning"))
+                if isinstance(thought, str):
+                    reasoning.append(thought)
+                for call in delta.get("tool_calls") or []:
+                    index = int(call.get("index", 0))
+                    current = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    if call.get("id"):
+                        current["id"] = str(call["id"])
+                    function = call.get("function") or {}
+                    current["function"]["name"] += str(function.get("name") or "")
+                    current["function"]["arguments"] += str(function.get("arguments") or "")
+                if choice.get("finish_reason"):
+                    finished = choice["finish_reason"]
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        data = {"choices": [{"message": message, "finish_reason": finished}]}
+        if usage is not None:
+            data["usage"] = usage
+        if finished is None:
+            raise LlmError("模型流式工具响应缺少结束标记，未执行任何动作")
+        return data
 
     @staticmethod
     def _native_action(name: str, arguments: Any) -> dict[str, Any]:
@@ -405,7 +509,7 @@ class LlmClient:
         payload.update(self._chat_reasoning(effort))
         # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
         # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
-        payload["max_tokens"] = self._output_limit(max_tokens)
+        payload[self.chat_token_field()] = self._output_limit(max_tokens)
         # response_format 请求兼容接口强制返回 JSON；普通对话不携带该字段。
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -614,13 +718,26 @@ class LlmClient:
         return normalized
 
     def _chat_reasoning(self, effort: str | None) -> dict[str, Any]:
-        """普通兼容接口不携带供应商专用字段，文本与原生工具请求保持一致。"""
+        """按照供应商思考合同转换参数，文本与原生工具请求保持一致。"""
 
         chosen = self._effort(effort)
         if not chosen:
             return {}
+        style = self.cfg.reasoning_style
+        if style == "none":
+            return {}
+        if style == "effort":
+            return {"reasoning_effort": chosen}
+        if style in {"thinking", "both"}:
+            fields = {"thinking": {"type": "disabled" if chosen in {"none", "disabled"} else "enabled"}}
+            if style == "both":
+                fields["reasoning_effort"] = chosen
+            return fields
+        name = self.cfg.model.lower()
+        if "mimo" in name:
+            return {"thinking": {"type": "disabled" if chosen == "none" else "enabled"}}
         fields: dict[str, Any] = {"reasoning_effort": chosen}
-        if "deepseek" in self.cfg.model.lower():
+        if "deepseek" in name or "glm-" in name:
             fields["thinking"] = {"type": "disabled" if chosen == "none" else "enabled"}
         return fields
 
@@ -629,6 +746,12 @@ class LlmClient:
         if chosen == "inherit":
             chosen = self.cfg.default_effort
         chosen = chosen if chosen in self.cfg.efforts else self.cfg.default_effort
+        if self.cfg.effort_map:
+            return self.cfg.effort_map.get(chosen, chosen)
+        if "mimo" in self.cfg.model.lower():
+            return "none" if chosen == "none" else "high"
+        if "glm-5.3" in self.cfg.model.lower():
+            return {"none": "low", "minimal": "low", "medium": "high"}.get(chosen, chosen)
         # 统一界面的等级映射到供应商真正支持的等级，避免未知值被服务端忽略后启用高推理。
         if "deepseek" in self.cfg.model.lower():
             return {"minimal": "low", "medium": "high"}.get(chosen, chosen)
@@ -798,7 +921,7 @@ class LlmClient:
                     "parameters": {"type": "object", "properties": {"result": {"type": "object", "additionalProperties": True}},
                                    "required": ["result"], "additionalProperties": False}}
             instruction = {"role": "system", "content": "本次只调用 return_json，把原始要求的完整对象放进 result 参数；不要输出 JSON 正文或解释，不改变原始字段合同。"}
-            result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json")
+            result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json", temperature=temperature)
             actions = result.get("actions") or []
             if len(actions) != 1 or actions[0].get("tool") != "return_json" or not isinstance(actions[0].get("result"), dict):
                 raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作")

@@ -25,6 +25,11 @@ export interface ModelConfig {
   efforts: ReasoningEffort[];
   default_effort: ReasoningEffort;
   max_output_tokens: number;
+  // 中转服务的实际参数映射，保存模型时完整保留。
+  output_token_field?: "auto" | "max_tokens" | "max_completion_tokens";
+  reasoning_style?: "auto" | "effort" | "thinking" | "both" | "none";
+  effort_map?: Record<string, string>;
+  stream_tools?: boolean;
   has_key?: boolean;
   key_hint?: string;
 }

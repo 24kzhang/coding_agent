@@ -45,6 +45,12 @@ class ModelConfig(BaseModel):
     default_effort: ReasoningEffort = "low"
     # max_output_tokens 为各 Agent 的输出预算提供模型级上限。
     max_output_tokens: int = Field(default=16_384, ge=256, le=262_144)
+    # 中转服务可能采用自己的预算与思考参数，显式配置优先于供应商默认适配。
+    output_token_field: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto"
+    reasoning_style: Literal["auto", "effort", "thinking", "both", "none"] = "auto"
+    effort_map: dict[str, str] = Field(default_factory=dict)
+    # 原生工具响应可按 SSE 接收，但完整参数与终止信号到齐前绝不执行。
+    stream_tools: bool = False
 
 
 class ModelPublic(BaseModel):
@@ -62,6 +68,10 @@ class ModelPublic(BaseModel):
     efforts: list[ReasoningEffort]
     default_effort: ReasoningEffort
     max_output_tokens: int
+    output_token_field: str = "auto"
+    reasoning_style: str = "auto"
+    effort_map: dict[str, str] = Field(default_factory=dict)
+    stream_tools: bool = False
     has_key: bool
     key_hint: str = ""
 

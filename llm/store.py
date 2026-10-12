@@ -208,12 +208,11 @@ class ModelStore:
         return result
 
     def fallbacks(self, current_id: str, excluded: set[str] | None = None) -> list[ModelConfig]:
-        """返回当前模型失败后可用的启用模型，结构化任务把 LongCat 放到最后。"""
+        """按配置顺序返回当前模型之外的启用备用模型。"""
 
         blocked = set(excluded or set())
         blocked.add(current_id)
-        # 保留配置文件顺序作为 fallback 优先级。用户可通过调整 models.json 顺序或 agent_models
-        # 明确指定 LongCat 优先；这里不再为 JSON 任务强行把 LongCat 排到最后。
+        # 用户配置顺序就是备用优先级，不根据供应商名称隐式改变排序。
         return [model for model in self.all() if model.enabled and model.id not in blocked]
 
     def upsert(self, cfg: ModelConfig) -> ModelConfig:
@@ -279,6 +278,11 @@ class ModelStore:
             "default_effort": cfg.default_effort,
             "max_output_tokens": cfg.max_output_tokens,
         }
+        from llm.client import LlmClient
+
+        client = LlmClient(cfg)
+        payload["request_options"] = client._chat_reasoning(cfg.default_effort)
+        payload["output_token_field"] = client.chat_token_field()
         fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
         temp = Path(name)
         try:

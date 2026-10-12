@@ -36,6 +36,7 @@ def test_json_function_returns_nested_quotes_in_one_request(monkeypatch, protoco
     client = LlmClient(cfg)
     assert client.chat_json([], structured_tools=True, max_tokens=100) == result
     assert len(captured) == 1 and client.last_usage.completion == 20
+    assert captured[0]["temperature"] == 0.1
     assert captured[0]["tool_choice"] == ({"type": "function", "name": "return_json"} if protocol == "responses" else {"type": "function", "function": {"name": "return_json"}})
 
 
