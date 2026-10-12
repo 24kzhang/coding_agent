@@ -242,6 +242,31 @@ class LlmClient:
             return self.cfg.output_token_field
         return "max_completion_tokens" if "mimo" in self.cfg.model.lower() else "max_tokens"
 
+    def effective_output_limit(self, requested: int | None, effort: str | None = None) -> int:
+        """识别模型配置与中转档位共同决定的真实生成上限。"""
+
+        limit = self._output_limit(requested)
+        chosen = effort or self.default_effort
+        if chosen == "inherit" or chosen not in self.cfg.efforts:
+            chosen = self.cfg.default_effort
+        cap = (getattr(self.cfg, "effort_budgets", {}) or {}).get(chosen)
+        return min(limit, cap) if isinstance(cap, int) and cap > 0 else limit
+
+    def recover_effort(self, requested: int) -> bool:
+        """共享生成预算的档位必须扩容；真正的思考强度档位才可以降低。"""
+
+        budgets = getattr(self.cfg, "effort_budgets", {}) or {}
+        if budgets:
+            candidates = [(cap, level) for level, cap in budgets.items() if level in self.cfg.efforts and cap >= requested]
+            if candidates:
+                self.default_effort = min(candidates)[1]
+            else:
+                self.default_effort = max((cap, level) for level, cap in budgets.items() if level in self.cfg.efforts)[1]
+            return True
+        supported = set(self.cfg.efforts)
+        self.default_effort = next((level for level in ["none", "minimal", "low"] if level in supported), self.default_effort)
+        return False
+
     @staticmethod
     def _tool_arguments(value: Any) -> dict[str, Any]:
         """兼容字符串或已解码对象，保留严格校验且不回显任何参数正文。"""
@@ -386,7 +411,12 @@ class LlmClient:
                 actions: list[dict[str, Any]] = []
                 for call in message.get("tool_calls") or []:
                     function = call.get("function") or {}
-                    arguments = self._tool_arguments(function.get("arguments", "{}"))
+                    try:
+                        arguments = self._tool_arguments(function.get("arguments", "{}"))
+                    except LlmError as exc:
+                        if self.last_usage.completion >= int(self.effective_output_limit(max_tokens, effort) * 0.95):
+                            raise LlmOutputLimitError("原生工具参数在有效生成预算处未完成，未执行任何动作") from exc
+                        raise
                     actions.append(self._native_action(str(function.get("name") or ""), arguments))
                 result = self._tool_result(actions, self._content_text(message.get("content") or ""))
                 calls = []
@@ -924,6 +954,8 @@ class LlmClient:
             result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json", temperature=temperature)
             actions = result.get("actions") or []
             if len(actions) != 1 or actions[0].get("tool") != "return_json" or not isinstance(actions[0].get("result"), dict):
+                if self.last_usage.completion >= int(self.effective_output_limit(max_tokens) * 0.95):
+                    raise LlmOutputLimitError("结构化函数在有效生成预算处未完成，未执行任何动作")
                 raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作")
             return actions[0]["result"]
 

@@ -689,6 +689,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 ("原生工具调用参数不是合法 JSON" in error_text or isinstance(exc, LlmOutputLimitError))
                 and isinstance(client, LlmClient)
                 and client.default_effort != "none"
+                and not getattr(client.cfg, "effort_budgets", {})
             ):
                 supported = set(getattr(client.cfg, "efforts", []))
                 lowered = (

@@ -29,6 +29,7 @@ export interface ModelConfig {
   output_token_field?: "auto" | "max_tokens" | "max_completion_tokens";
   reasoning_style?: "auto" | "effort" | "thinking" | "both" | "none";
   effort_map?: Record<string, string>;
+  effort_budgets?: Record<string, number>;
   stream_tools?: boolean;
   has_key?: boolean;
   key_hint?: string;

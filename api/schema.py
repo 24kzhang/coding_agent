@@ -49,6 +49,8 @@ class ModelConfig(BaseModel):
     output_token_field: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto"
     reasoning_style: Literal["auto", "effort", "thinking", "both", "none"] = "auto"
     effort_map: dict[str, str] = Field(default_factory=dict)
+    # 当思考档位实际控制总生成预算时，声明各档位的有效上限。
+    effort_budgets: dict[str, int] = Field(default_factory=dict)
     # 原生工具响应可按 SSE 接收，但完整参数与终止信号到齐前绝不执行。
     stream_tools: bool = False
 
@@ -71,6 +73,7 @@ class ModelPublic(BaseModel):
     output_token_field: str = "auto"
     reasoning_style: str = "auto"
     effort_map: dict[str, str] = Field(default_factory=dict)
+    effort_budgets: dict[str, int] = Field(default_factory=dict)
     stream_tools: bool = False
     has_key: bool
     key_hint: str = ""

@@ -1655,16 +1655,11 @@ class AgentGraph:
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
                     next_limit = min(limit * 2, client.cfg.max_output_tokens)
-                    supported = set(client.cfg.efforts)
-                    if "none" in supported:
-                        client.default_effort = "none"
-                    elif "minimal" in supported:
-                        client.default_effort = "minimal"
-                    elif "low" in supported:
-                        client.default_effort = "low"
+                    shared_budget = client.recover_effort(next_limit)
                     kwargs = {**kwargs, "max_tokens": next_limit}
                     conversation.append({"role": "user", "content": "上一次输出耗尽预算且 JSON 未完成。本次必须精简推理和正文，只返回节点要求的完整 JSON；不内嵌整份实现源码。"})
-                    self._emit(state, agent, "model", "结构化输出触顶，已降低推理并在模型及运行预算内重试一次", data={"reason": "output_limit", "max_tokens": next_limit, "effort": client.default_effort})
+                    recovery = "已扩充档位的有效生成预算" if shared_budget else "已降低推理"
+                    self._emit(state, agent, "model", f"结构化输出触顶，{recovery}并在模型及运行预算内重试一次", data={"reason": "output_limit", "max_tokens": next_limit, "effort": client.default_effort})
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not state.get("model_id"):
                     failed_models.add(client.cfg.id)
@@ -1759,11 +1754,11 @@ class AgentGraph:
                         continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
-                    supported = set(client.cfg.efforts)
-                    client.default_effort = "none" if "none" in supported else "minimal" if "minimal" in supported else "low" if "low" in supported else client.default_effort
-                    kwargs = {**kwargs, "max_tokens": min(limit * 2, client.cfg.max_output_tokens)}
+                    next_limit = min(limit * 2, client.cfg.max_output_tokens)
+                    shared_budget = client.recover_effort(next_limit)
+                    kwargs = {**kwargs, "max_tokens": next_limit}
                     conversation.append({"role": "user", "content": "上次推理耗尽输出预算。请精简推理，只返回完整的最终正文。"})
-                    self._emit(state, agent, "model", "文本输出触顶，降低推理后在硬预算内恢复一次")
+                    self._emit(state, agent, "model", "文本输出触顶，" + ("扩充有效生成预算" if shared_budget else "降低推理") + "后在硬预算内恢复一次")
                     continue
                 raise
             self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")))
