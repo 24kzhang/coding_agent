@@ -56,3 +56,13 @@ def test_tool_arguments_accept_decoded_objects_and_never_repair_truncated_action
         with pytest.raises(LlmError) as captured:
             LlmClient._tool_arguments(value)
         assert "TEST_ONLY_PRIVATE" not in str(captured.value)
+
+
+def test_structured_contract_error_reports_keys_without_argument_values():
+    cfg = ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="TEST_ONLY_KEY", model="generic")
+    client = LlmClient(cfg)
+    client.chat_tools = lambda *_args, **_kwargs: {"actions": [{"tool": "return_json", "markdown": "UNDISCLOSED_VALUE"}]}
+    with pytest.raises(LlmError) as captured:
+        client.chat_json([], structured_tools=True)
+    assert '"keys": ["tool", "markdown"]' in str(captured.value)
+    assert "UNDISCLOSED_VALUE" not in str(captured.value)

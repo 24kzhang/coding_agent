@@ -1654,7 +1654,7 @@ class AgentGraph:
                     if call_kwargs.get("structured_tools"):
                         correction = "上一输出未遵循结构化函数合同。本轮必须直接调用 return_json，把原要求的完整 JSON 对象放入 result 参数，正确转义字符串中的双引号、反斜线与换行；不要输出正文、代码围栏或其他函数，不重复已执行工具。"
                     conversation.append({"role": "user", "content": correction})
-                    self._emit(state, agent, "model", "结构化 JSON 转义不完整，已在同模型与预算内进行一次格式修订", data={"reason": "json_repair"})
+                    self._emit(state, agent, "model", "结构化返回未遵循合同，已在同模型与预算内进行一次格式修订", data={"reason": "json_repair", "diagnostic": str(exc)[:240]})
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True

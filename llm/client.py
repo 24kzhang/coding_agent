@@ -956,7 +956,8 @@ class LlmClient:
             if len(actions) != 1 or actions[0].get("tool") != "return_json" or not isinstance(actions[0].get("result"), dict):
                 if self.last_usage.completion >= int(self.effective_output_limit(max_tokens) * 0.95):
                     raise LlmOutputLimitError("结构化函数在有效生成预算处未完成，未执行任何动作")
-                raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作")
+                facts = [{"name": str(action.get("tool") or "")[:64], "keys": [str(key)[:64] for key in list(action)[:10]]} for action in actions[:3]]
+                raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作；调用结构：" + json.dumps(facts, ensure_ascii=False))
             return actions[0]["result"]
 
         # chat_kwargs 只在调用方真的设置预算时携带 max_tokens，保持对旧测试桩和兼容客户端的调用合同。
