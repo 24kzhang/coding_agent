@@ -30,7 +30,7 @@ from backend.tools import FsTool, GitTool, tool_specs
 from backend.tools.reads import inspection_read
 from backend.tools.scope import delivery_root, tool_path
 from llm import LlmBalanceError, LlmClient, LlmError
-from llm.client import LlmOutputLimitError
+from llm.client import LlmOutputLimitError, unavailable_error
 
 if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
@@ -379,10 +379,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     git = GitTool(state["workdir"])
     # client 是 coder 智能体对应的模型客户端。
     client = graph._client("coder", state)
-    # fallback_configs 用于结构化输出协议连续失败时自动换模型。显式指定模型时尊重用户选择。
+    # 首选模型仍优先使用，不可用时按配置顺序换模并保留当前任务与磁盘事实。
     current_model_id = str(getattr(getattr(client, "cfg", None), "id", ""))
     fallback_configs = (
-        graph.model_store.fallbacks(current_model_id) if current_model_id and not state.get("model_id") else []
+        graph._fallback_models("coder", state, current_model_id) if current_model_id else []
     )
     failed_model_ids: set[str] = {current_model_id} if current_model_id else set()
     # mcp_tools 在 Coding 真正开始时按需发现；答疑节点也有独立的 MCP ReAct 入口。
@@ -538,7 +538,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     native_trace = ToolTrace()
     for step in range(1, max_steps + 1):
         native_trace.complete(observations)
-        native_mode = isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []) and "longcat" not in model_name and empty_steps < 2 and not native_fallback
+        native_mode = isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []) and empty_steps < 2 and not native_fallback
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
         # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
         task_brief = _task_brief(state)
@@ -671,6 +671,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 graph._add_tokens(state, failed_usage, agent="coder", model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
             # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = str(exc)[:240]
+            if unavailable_error(exc):
+                graph.unavailable_models.add(str(getattr(getattr(client, "cfg", None), "id", "")))
+            if unavailable_error(exc) and switch_coder_model("服务不可用"):
+                transient_failures = 0
+                continue
             if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
                 native_fallback = True
                 coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 16_000)

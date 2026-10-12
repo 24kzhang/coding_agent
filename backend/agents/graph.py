@@ -12,7 +12,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from api.schema import AgentEvent, SkillContext, TaskResult
+from api.schema import AgentEvent, ModelConfig, SkillContext, TaskResult
 from backend.agents.answer import answer
 from backend.agents.coder import coder
 from backend.agents.doc import doc
@@ -32,7 +32,7 @@ from backend.tools import ContainerShellTool, FsTool, GitTool, ShellTool
 from backend.tools.scope import command_scope, delivery_root, require_delivery_path, tool_path
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
-from llm.client import LlmOutputLimitError
+from llm.client import LlmOutputLimitError, unavailable_error
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 4
@@ -79,6 +79,8 @@ class AgentGraph:
         self.repo_map = RepoMap()
         # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
+        # 同一次运行中已经不可用的模型不再被下一个节点反复选中。
+        self.unavailable_models: set[str] = set()
         # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
         self.shell_tool: ShellTool | ContainerShellTool | None = None
         # agent 是编译后的 LangGraph 状态机。
@@ -1616,6 +1618,8 @@ class AgentGraph:
     ) -> dict[str, Any]:
         """让结构化智能节点可选调用共享只读 MCP，再返回节点原有 JSON。"""
 
+        if isinstance(client, LlmClient) and getattr(client.cfg, "id", None) in self.unavailable_models:
+            client = self._client(agent, {**state, "model_id": client.cfg.id})
         tools = self._ensure_mcp_tools(state, shared_only=True)
         conversation = self.model_store.redact(
             self._optional_mcp_system(state, messages, tools)
@@ -1639,7 +1643,10 @@ class AgentGraph:
                 invalid_json = any(marker in str(exc) for marker in ("模型没有返回合法 JSON", "原生工具调用参数不是合法 JSON", "原生工具参数必须是 JSON 对象", "原生工具参数 JSON 顶层必须是对象", "结构化函数没有返回唯一的 result 对象"))
                 if invalid_json and isinstance(client, LlmClient) and not recovered_json:
                     recovered_json = True
-                    conversation.append({"role": "user", "content": "上一输出不是合法 JSON。保持原始对象字段和内容合同，只返回完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不要输出代码围栏，不重复已执行的工具。"})
+                    correction = "上一输出不是合法 JSON。保持原始对象字段和内容合同，只返回完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不要输出代码围栏，不重复已执行的工具。"
+                    if call_kwargs.get("structured_tools"):
+                        correction = "上一输出未遵循结构化函数合同。本轮必须直接调用 return_json，把原要求的完整 JSON 对象放入 result 参数，正确转义字符串中的双引号、反斜线与换行；不要输出正文、代码围栏或其他函数，不重复已执行工具。"
+                    conversation.append({"role": "user", "content": correction})
                     self._emit(state, agent, "model", "结构化 JSON 转义不完整，已在同模型与预算内进行一次格式修订", data={"reason": "json_repair"})
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
@@ -1658,17 +1665,17 @@ class AgentGraph:
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not state.get("model_id"):
                     failed_models.add(client.cfg.id)
-                    next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
+                    next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
                         conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
                         self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
                         continue
-                transient = any(marker in str(exc) for marker in ("模型响应超时", "响应超时", "连接失败", "ConnectTimeout", "ReadTimeout", "错误 429", "错误 500", "错误 502", "错误 503", "错误 504"))
-                if transient and isinstance(client, LlmClient) and not isinstance(exc, LlmBalanceError) and not state.get("model_id"):
+                if unavailable_error(exc) and isinstance(client, LlmClient):
+                    self.unavailable_models.add(client.cfg.id)
                     failed_models.add(client.cfg.id)
-                    next_cfg = next((cfg for cfg in self.model_store.fallbacks(client.cfg.id) if cfg.id not in failed_models), None)
+                    next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
                     if next_cfg is not None:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
@@ -1720,12 +1727,15 @@ class AgentGraph:
     ) -> str:
         """让文本智能节点可选调用共享只读 MCP，再返回节点原有纯文本。"""
 
+        if isinstance(client, LlmClient) and getattr(client.cfg, "id", None) in self.unavailable_models:
+            client = self._client(agent, {**state, "model_id": client.cfg.id})
         tools = self._ensure_mcp_tools(state, shared_only=True)
         conversation = self.model_store.redact(
             self._optional_mcp_system(state, messages, tools)
         )
         seen: set[str] = set()
         recovered_limit = False
+        failed_models: set[str] = set()
         for _step in range(4):
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or 4_000))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
@@ -1735,6 +1745,15 @@ class AgentGraph:
             except LlmError as exc:
                 if getattr(client, "last_usage", None) is not usage_before:
                     self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
+                if unavailable_error(exc) and isinstance(client, LlmClient):
+                    self.unavailable_models.add(client.cfg.id)
+                    failed_models.add(client.cfg.id)
+                    next_cfg = next(iter(self._fallback_models(agent, state, client.cfg.id, failed_models)), None)
+                    if next_cfg is not None:
+                        client = LlmClient(next_cfg)
+                        client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
+                        self._emit(state, agent, "model", f"文本节点服务不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "unavailable_failover"})
+                        continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True
                     supported = set(client.cfg.efforts)
@@ -1957,9 +1976,21 @@ class AgentGraph:
             "missing_classes": missing_classes,
         }
 
+    def _fallback_models(self, agent: str, state: AgentState, current_id: str, excluded: set[str] | None = None) -> list[ModelConfig]:
+        """换模继续原任务，同时保留图片输入所需能力。"""
+
+        blocked = set(excluded or set()) | self.unavailable_models
+        needs_vision = bool(state.get("attachments")) and agent in {"manager", "planner", "coder", "answer", "verifier"}
+        return [cfg for cfg in self.model_store.fallbacks(current_id) if cfg.id not in blocked and (not needs_vision or "vision" in cfg.capabilities)]
+
     """根据智能体名称创建对应模型客户端。"""
     def _client(self, agent: str, state: AgentState) -> LlmClient:
         cfg = self.model_store.for_agent(agent, state.get("model_id"))
+        if cfg.id in self.unavailable_models:
+            candidates = self._fallback_models(agent, state, cfg.id)
+            if candidates:
+                cfg = candidates[0]
+                self._emit(state, agent, "model", f"本轮首选模型已不可用，继续使用 {cfg.id}")
         if state.get("attachments") and agent in {"manager", "planner", "coder", "answer"}:
             if "vision" not in cfg.capabilities:
                 if state.get("model_id"):
