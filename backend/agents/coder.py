@@ -916,6 +916,17 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if edit_protocol_failures >= 3:
                     coding_summary = "编辑连续三次未遵守当前快照边界，已停止且未覆盖文件。"
                 break
+            if tool == "write_file" and edit_path in unchecked_rewrites:
+                edit_protocol_failures += 1
+                message = f"编辑尚未执行：拒绝重复整体重写 {edit_path}，该文件已成功写入但尚未验证。请基于当前源码精确修改，或先运行对应检查再根据具体失败修复；不要再次生成整份文件。"
+                observations.append(message)
+                graph._emit(state, "coder", "error" if edit_protocol_failures >= 3 else "review", message,
+                            data={"reason": "unchecked_rewrite", "path": edit_path})
+                action_failed = True
+                diagnostic_progress = True
+                if edit_protocol_failures >= 3:
+                    coding_summary = "整体重写连续三次未改为精确修改或验证，已停止且保留原文件。"
+                break
             if tool in {"replace_file", "replace_block"} and edit_path in read_paths and not fs.is_sensitive(fs.safe(edit_path)):
                 try:
                     if tool == "replace_file":
@@ -994,14 +1005,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 observation = {
                     "ok": False,
                     "text": f"拒绝重复动作：{action.get('tool')} 已执行或拒绝过。下一步必须改用其他动作推进任务。",
-                }
-            elif tool == "write_file" and path in unchecked_rewrites:
-                observation = {
-                    "ok": False,
-                    "text": (
-                        f"拒绝重复整体重写：{path} 已成功写入但尚未验证。"
-                        "请先运行该文件对应的语法检查、测试或构建；只有验证暴露具体问题后才能继续修改。"
-                    ),
                 }
             elif tool == "list_files" and state.get("repo") is not None:
                 observation = {

@@ -57,3 +57,19 @@ def test_repeated_invalid_edits_stop_without_writing(tmp_path):
     result = coder(graph, {"workdir": str(fs.root), "session_id": "s1", "text": "更新入口"})
     assert not result["coding_ok"] and len(calls) == 4
     assert (fs.root / "main.py").read_text() == original
+
+
+def test_unvalidated_whole_rewrite_is_revised_without_tool_execution(tmp_path):
+    events = []
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"), emit=events.append)
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}]},
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = False\n"}]},
+        {"actions": [{"tool": "replace_file", "path": "main.py", "old": "True", "new": "False"}], "done": True},
+    ])
+    graph._client = lambda *_args: SimpleNamespace(last_usage=LlmUsage(), chat_json=lambda *_args, **_kwargs: next(replies))
+    state = coder(graph, {"workdir": str(tmp_path / "work"), "session_id": "s1", "text": "创建模块"})
+    assert state["coding_ok"] and (tmp_path / "work/main.py").read_text() == "ready = False\n"
+    assert any(event.data.get("reason") == "unchecked_rewrite" for event in events)
+    assert sum(event.kind == "tool" and event.data.get("tool") == "write_file" for event in events) == 1
+    assert not any(event.kind == "error" or event.data.get("ok") is False for event in events)
