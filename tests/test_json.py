@@ -66,3 +66,11 @@ def test_structured_contract_error_reports_keys_without_argument_values():
         client.chat_json([], structured_tools=True)
     assert '"keys": ["tool", "markdown"]' in str(captured.value)
     assert "UNDISCLOSED_VALUE" not in str(captured.value)
+
+
+@pytest.mark.parametrize("text", ['{"ok":true,"issues":[]}', '```json\n{"result":{"ok":true,"issues":[]}}\n```'])
+def test_readonly_structured_nodes_accept_plain_json_from_gateway(text):
+    cfg = ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="TEST_ONLY_KEY", model="generic")
+    client = LlmClient(cfg)
+    client.chat_tools = lambda *_args, **_kwargs: {"actions": [], "summary": text}
+    assert client.chat_json([], structured_tools=True) == {"ok": True, "issues": []}

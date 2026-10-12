@@ -953,6 +953,20 @@ class LlmClient:
             instruction = {"role": "system", "content": "本次只调用 return_json，把原始要求的完整对象放进 result 参数；不要输出 JSON 正文或解释，不改变原始字段合同。"}
             result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json", temperature=temperature)
             actions = result.get("actions") or []
+            if not actions:
+                # 一些兼容网关忽略强制工具选择；只读分析可以接受严格的 JSON 正文。
+                # 非空工具列表仍按原生合同校验，不能把意外写入工具包装成数据返回。
+                text = str(result.get("summary") or "").strip()
+                if text.startswith("```"):
+                    text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
+                try:
+                    plain = json.loads(text)
+                except (ValueError, json.JSONDecodeError):
+                    plain = None
+                if isinstance(plain, dict) and plain:
+                    if set(plain) == {"result"} and isinstance(plain["result"], dict):
+                        return plain["result"]
+                    return plain
             if len(actions) != 1 or actions[0].get("tool") != "return_json" or not isinstance(actions[0].get("result"), dict):
                 if self.last_usage.completion >= int(self.effective_output_limit(max_tokens) * 0.95):
                     raise LlmOutputLimitError("结构化函数在有效生成预算处未完成，未执行任何动作")
