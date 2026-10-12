@@ -137,6 +137,7 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     if missing_fields:
         issues.append("数据字段说明遗漏真实 schema 字段：" + "、".join(missing_fields))
     require_complete = bool(re.search(r"(?:所有|全部|完整).{0,12}(?:详细信息|详情信息|原始字段|字段)", goal))
+    complete_list = bool(re.search(r"(?:列表|卡片|首页).{0,30}(?:所有|全部|完整).{0,12}(?:详细信息|原始字段|字段)", goal))
     if require_complete and fields:
         for match in re.finditer(r"(?:所有|全部|完整)\s*(\d+)\s*个?\s*(?:原始)?字段", markdown):
             if int(match.group(1)) < len(fields):
@@ -145,6 +146,9 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         excluded = []
         for field in fields:
             for line in markdown.splitlines():
+                # 精简列表与完整详情是不同的输出合同，不能把卡片投影当成详情删字段。
+                if not complete_list and re.search(r"列表|卡片|索引|摘要", line) and not re.search(r"详情|详细|完整对象|完整记录", line):
+                    continue
                 if _mentions_field(line, field) and re.search(r"接口\s*不返回|(?:字段|键).{0,12}(?:删除|移除|排除)|(?:不返回|删除|移除|排除).{0,20}[`\"]" + re.escape(field), line):
                     excluded.append(field)
                     break
