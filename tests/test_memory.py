@@ -76,6 +76,24 @@ def test_memory_restores_runtime_guidance_as_user_message(tmp_path) -> None:
     assert store.interrupted(workdir, "s1") is False
 
 
+def test_history_restores_image_metadata_after_restart(tmp_path) -> None:
+    """原始附件在新进程中可恢复；无效编号不能暴露文件路径或破坏历史。"""
+
+    root = tmp_path / "mem"
+    workdir = str(tmp_path / "proj")
+    store = MemoryStore(root)
+    stream = BytesIO()
+    Image.new("RGB", (16, 16), "white").save(stream, format="PNG")
+    info = store.save_file(workdir, "s1", "参考图.png", "image/png", stream.getvalue())
+    store.append(workdir, "s1", "user", "input", "message", "根据参考图制作页面", {"attachments": [info["id"], "../private"]})
+    message = MemoryStore(root).list_history()[0]["sessions"][0]["messages"][0]
+    assert message["content"] == "根据参考图制作页面"
+    assert message["attachments"] == [{"id": info["id"], "name": "参考图.png", "mime": "image/png", "size": info["size"], "url": f"/api/sessions/s1/files/{info['id']}"}]
+    assert "path" not in message["attachments"][0]
+    store.delete_file(workdir, "s1", info["id"])
+    assert "attachments" not in MemoryStore(root).list_history()[0]["sessions"][0]["messages"][0]
+
+
 def test_memory_history_restores_all_session_events(tmp_path) -> None:
     """恢复会话时应按顺序返回整个会话的全部事件。"""
 

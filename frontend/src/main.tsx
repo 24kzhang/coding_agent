@@ -687,7 +687,8 @@ function App() {
         {
           id: `${Date.now()}-user`,
           role: "user",
-          content: trimmedTask + (uploaded.length ? `\n\n已附加 ${uploaded.length} 张图片。` : "")
+          content: trimmedTask,
+          attachments: uploaded
         }
       ]);
       setTask("");
@@ -880,7 +881,7 @@ function App() {
                   })}
                   disabled={models.length === 0 || running}
                 >
-                  {effortOptions.map((item) => (
+                  {effortOptions.filter((item) => item.value === "inherit" || (models.find((model) => model.id === profiles[agent.id]?.model_id) ?? models.find((model) => model.enabled))?.efforts.includes(item.value)).map((item) => (
                     <option value={item.value} key={item.value}>{item.label}</option>
                   ))}
                 </select>
@@ -902,6 +903,16 @@ function App() {
               <div className={`message-row ${msg.role}`} key={msg.id}>
                 <article className={`bubble ${msg.role}`}>
                   <span className="message-role">{msg.role === "user" ? "用户" : "Agent"}</span>
+                  {!!msg.attachments?.length && (
+                    <div className="message-images">
+                      {msg.attachments.map((attachment) => (
+                        <a key={attachment.id} href={`${API}${attachment.url}`} target="_blank" rel="noreferrer" title={`查看图片：${attachment.name}`}>
+                          <img src={`${API}${attachment.url}`} alt={attachment.name} loading="lazy" />
+                          <span>{attachment.name}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
                   <div className="message-content">
                     {msg.role === "agent" ? (
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>

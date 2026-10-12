@@ -487,6 +487,23 @@ class MemoryStore:
             return None
         # messages 是可恢复到对话窗口的用户消息和最终回复。
         messages = self._history_messages(records)
+        # 用户消息中的附件编号一直保存在原始记录中，恢复时补齐安全访问地址。
+        records_by_id = {str(rec.get("id", "")): rec for rec in records}
+        for message in messages:
+            if message["role"] != "user":
+                continue
+            rec = records_by_id.get(message["id"], {})
+            meta = rec.get("m") if isinstance(rec.get("m"), dict) else {}
+            attachments = []
+            for file_id in meta.get("attachments", []) if isinstance(meta.get("attachments"), list) else []:
+                try:
+                    info = self.file_info(workdir, path.name, str(file_id))
+                except (ValueError, FileNotFoundError, OSError, KeyError, TypeError, json.JSONDecodeError):
+                    continue
+                attachments.append({key: info[key] for key in ("id", "name", "mime", "size")})
+                attachments[-1]["url"] = f"/api/sessions/{path.name}/files/{info['id']}"
+            if attachments:
+                message["attachments"] = attachments
         # events 是整个会话产生的事件摘要，恢复会话时重新显示在右侧事件流。
         events = self._history_events(records)
         # title 是会话展示名；没有自定义名时用文件名也就是 session_id。

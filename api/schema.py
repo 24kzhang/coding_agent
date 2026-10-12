@@ -246,6 +246,8 @@ class HistoryMessage(BaseModel):
     role: Literal["user", "agent"]
     # 显示在对话窗口里的消息正文。
     content: str
+    # 附件沿用上传接口的安全元数据，历史恢复不返回磁盘路径或图片正文。
+    attachments: list[AttachmentInfo] = Field(default_factory=list)
 
 
 class HistorySession(BaseModel):

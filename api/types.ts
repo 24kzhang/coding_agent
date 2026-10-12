@@ -89,6 +89,8 @@ export interface HistoryMessage {
   role: "user" | "agent";
   // 消息正文。
   content: string;
+  // 原始图片附件，可在实时与恢复后的消息中查看。
+  attachments?: AttachmentInfo[];
 }
 
 export interface HistorySession {
