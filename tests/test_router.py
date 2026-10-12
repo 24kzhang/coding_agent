@@ -21,3 +21,12 @@ def test_module_level_singleton_routes_remain_valid(tmp_path):
     fs = FsTool(str(tmp_path / "work"))
     fs.write("routes.py", "from fastapi import APIRouter\nrouter=APIRouter()\n@router.get('/items')\ndef items():\n    return []\n")
     assert not router_issues(fs, {}, ["routes.py"])
+
+
+def test_app_factory_must_not_mount_reused_closure_router(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    source = "from fastapi import APIRouter, FastAPI\nrouter=APIRouter()\ndef create_app(config):\n    app=FastAPI()\n    @router.get('/config')\n    def current_config():\n        return config\n    app.include_router(router)\n    return app\n"
+    fs.write("main.py", source)
+    assert router_issues(fs, {}, ["main.py"])
+    fs.write("main.py", source.replace("    app=FastAPI()", "    router=APIRouter()\n    app=FastAPI()"))
+    assert not router_issues(fs, {}, ["main.py"])
