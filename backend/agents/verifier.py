@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +11,7 @@ from backend.agents.precheck import import_issues, source_versions
 from backend.agents.prompts import VERIFIER_PROMPT
 from backend.agents.types import AgentState
 from backend.tools import FsTool
-from backend.tools.scope import delivery_root
+from backend.tools.scope import command_scope, delivery_root
 from llm import LlmBalanceError, LlmError
 
 if TYPE_CHECKING:
@@ -155,9 +156,27 @@ def fixture_contracts(fs: FsTool, files: list[str]) -> list[dict[str, Any]]:
     return facts
 
 
+def _syntax_only(fs: FsTool, state: AgentState, command: str) -> bool:
+    """识别不执行项目业务的语法检查，目录与命令安全仍由原守卫检查。"""
+
+    cwd, actual = command_scope(fs, state, command)
+    try:
+        args = shlex.split(actual)
+    except ValueError:
+        return False
+    if len(args) >= 3 and Path(args[0]).name == "uv" and args[1] == "run":
+        args = args[2:]
+    if len(args) >= 3 and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(args[0]).name) and args[1] == "-m" and args[2] in {"compileall", "py_compile"}:
+        module = args[2]
+        return not (cwd / (module + ".py")).exists() and not (cwd / module).exists()
+    return len(args) == 3 and Path(args[0]).name == "node" and args[1] == "--check"
+
+
 def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool, files: list[str], command: str) -> list[str]:
     """在首次执行检查前比较源码与断言，不以静态审查代替实际测试。"""
 
+    if _syntax_only(fs, state, command):
+        return []
     root = delivery_root(fs, state)
     targets = [rel for rel in files if (root == fs.root or root in fs.safe(rel).parents)
                and (Path(rel).suffix in {".py", ".js", ".ts", ".tsx", ".html", ".css", ".toml"}
