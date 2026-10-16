@@ -510,6 +510,16 @@ class MemoryStore:
         title = self._session_title(records) or path.name
         # last 是最后一条记录，用于更新时间和中断判断。
         last = records[-1]
+        from api.schema import TaskResult
+
+        result = None
+        for rec in reversed(records):
+            if rec.get("ag") == "manager" and rec.get("tl") == "final" and rec.get("k") == "result":
+                try:
+                    result = TaskResult.model_validate(rec.get("m") or {}).model_dump()
+                except ValueError:
+                    pass
+                break
         return {
             "id": path.name,
             "title": title,
@@ -518,6 +528,7 @@ class MemoryStore:
             "interrupted": self._records_interrupted(records),
             "messages": messages,
             "events": events,
+            "result": result,
             **self._session_capabilities(records),
         }
 

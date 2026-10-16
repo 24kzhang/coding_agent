@@ -95,6 +95,8 @@ export interface HistoryMessage {
 }
 
 export interface HistorySession {
+  // 恢复最新最终结果中的用量和耗时。
+  result?: TaskResult | null;
   // 会话 id。
   id: string;
   // 会话展示名称。
@@ -268,4 +270,6 @@ export interface TaskResult {
   tokens: number;
   // 本轮执行总耗时，单位毫秒。
   duration_ms: number;
+  // 估算值在界面单独标记。
+  metrics_estimated?: boolean;
 }

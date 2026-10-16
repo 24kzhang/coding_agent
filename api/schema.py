@@ -266,6 +266,8 @@ class HistorySession(BaseModel):
     updated_at: str
     # 该会话是否疑似中断。
     interrupted: bool = False
+    # 恢复最新最终结果中的用量、耗时及估算标记。
+    result: TaskResult | None = None
     # 可恢复到前端对话窗口的用户消息和 agent 最终回复。
     messages: list[HistoryMessage] = Field(default_factory=list)
     # 整个会话的事件流；历史恢复时按 JSONL 中的原始顺序显示在右侧事件面板。
@@ -447,3 +449,5 @@ class TaskResult(BaseModel):
     tokens: int = 0
     # duration_ms 是从 AgentGraph 开始到 final 节点的耗时。
     duration_ms: int = 0
+    # 只在用户授权的模拟估算中设置，实际运行保留默认值。
+    metrics_estimated: bool = False

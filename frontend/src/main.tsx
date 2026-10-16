@@ -484,7 +484,7 @@ function App() {
     setSelectedSkills(session.skills ?? []);
     setSelectedMcps(session.mcps ?? []);
     setContainerShell(session.container_shell ?? true);
-    setResult(null);
+    setResult(session.result ?? null);
     setHistoryModalOpen(false);
     setNotice(`已恢复会话：${session.title || session.id}`);
   }
@@ -948,7 +948,7 @@ function App() {
                 <strong>{sessionId ? sessionTitle || sessionId : "未创建"}</strong>
               </button>
               <Metric label="项目" value={workdir ? shortPath(workdir) : "未选择"} />
-              <Metric label="耗时" value={result ? formatDuration(result.duration_ms) : "--"} />
+              <Metric label={result?.metrics_estimated ? "耗时（估算）" : "耗时"} value={result ? formatDuration(result.duration_ms) : "--"} />
             </div>
             <div className="usage-breakdown" aria-label="模型用量明细">
               <span>输入 {usage.input.toLocaleString()}</span>

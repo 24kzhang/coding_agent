@@ -282,3 +282,17 @@ def test_long_term_memory_deduplicates_content_across_writes(tmp_path) -> None:
     store.remember(workdir, "默认使用 uv")
 
     assert store.project_memory(workdir).count("默认使用 uv") == 1
+
+
+def test_history_restores_result_metrics(tmp_path):
+    """恢复最新结果，保留真实耗时和用户授权的估算标记。"""
+    store = MemoryStore(tmp_path / 'memory')
+    workdir = str(tmp_path / 'project')
+    store.append(workdir, 'metrics', 'user', 'input', 'message', '创建项目')
+    store.append(workdir, 'metrics', 'manager', 'final', 'result', '完成',
+                 {'ok': True, 'summary': '完成', 'tokens': 60000,
+                  'duration_ms': 1080000, 'metrics_estimated': True})
+    restored = MemoryStore(tmp_path / 'memory').list_history()[0]['sessions'][0]
+    assert restored['result']['tokens'] == 60000
+    assert restored['result']['duration_ms'] == 1080000
+    assert restored['result']['metrics_estimated'] is True
