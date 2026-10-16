@@ -15,12 +15,12 @@ frontend/dist/
 .jbeval
 .playwright-cli
 /.jbeval/
-/run_test/exercises/exercises-dataset-main.zip
 /memory/config/models.json
 /memory/legacy/
 /MCP/auth.json
 
-# 本地教程、测试现场和会话记录不作为产品交付推送。
+# 本地文档、任务工作区和运行记忆保留在本机。
 /docs/
 /run_test/
-/memory/data/projects/*/sessions/
+/memory/data/
+/output/
