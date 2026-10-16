@@ -1253,6 +1253,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             native_trace.record(action_index, graph.model_store.redact(observation))
             graph._emit(state, "coder", "tool", observation["text"], data={
                 **observation, "tool": tool,
+                "arguments": {"说明": "参数被凭据守卫拒绝"} if secret_write else action,
                 "path": path,
                 "command": "[参数被凭据守卫拒绝]" if secret_write else str(action.get("cmd") or ""),
             })

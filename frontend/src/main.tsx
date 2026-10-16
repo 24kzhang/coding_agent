@@ -988,6 +988,12 @@ function App() {
                     <time>{formatEventTime(event.ts)}</time>
                   </div>
                   <p>{event.msg}</p>
+                  {event.data && Object.keys(event.data).length > 0 && (
+                    <details className="event-detail">
+                      <summary>查看详细信息</summary>
+                      <pre>{JSON.stringify(event.data, null, 2)}</pre>
+                    </details>
+                  )}
                 </article>
               ))}
             </div>

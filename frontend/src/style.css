@@ -1737,3 +1737,7 @@ select:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 实时与恢复事件共用详情，长工具结果保持可读。 */
+.event-detail summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.event-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: 12px; padding: 8px; }

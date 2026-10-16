@@ -149,6 +149,10 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
         selected_names = [f"Skill:{item.id}" for item in ctx.skills]
         selected_names.extend(f"MCP:{item.get('id')}" for item in state.get("mcp_servers", []))
         graph._emit(state, "manager", "capability", "本轮已启用：" + "、".join(selected_names))
+    for skill in ctx.skills:
+        graph._emit(state, "manager", "skill", f"已读取技能 {skill.name}（{len(skill.content)} 字符）", data={
+            "技能": skill.id, "说明": skill.description, "读取内容": skill.content,
+        })
     if interrupted:
         # 会话疑似中断时，在最近上下文里提醒下游以磁盘当前状态为准。
         ctx.recent.append("检测到上次会话可能异常中断，本次会继续以当前磁盘状态为准。")

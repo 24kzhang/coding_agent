@@ -1713,6 +1713,7 @@ class AgentGraph:
                     agent,
                     "tool",
                     f"智能节点按需调用 {action['tool']}：{'成功' if result.get('ok') else '失败'}",
+                    data={"工具调用": action, "工具返回": result},
                 )
             conversation.extend(
                 [
@@ -1822,6 +1823,7 @@ class AgentGraph:
                     agent,
                     "tool",
                     f"智能节点按需调用 {action['tool']}：{'成功' if result.get('ok') else '失败'}",
+                    data={"工具调用": action, "工具返回": result},
                 )
             conversation.extend(
                 [
