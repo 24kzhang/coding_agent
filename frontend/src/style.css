@@ -501,11 +501,11 @@ select:disabled {
 }
 
 .bubble.agent {
-  max-height: min(62vh, 620px);
-  overflow: auto;
+  /* 长计划完整展开，统一使用外层对话窗口滚动。 */
+  max-height: none;
+  overflow: visible;
   border-color: #aebfd4;
   background: #fbfdff;
-  scrollbar-gutter: stable;
 }
 
 /* Markdown 使用紧凑技术文档排版，标题不会在消息框里膨胀成 Hero 字号。 */
