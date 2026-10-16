@@ -450,7 +450,7 @@ def test_structured_node_fails_over_after_exhausted_recovery_unless_explicit(tmp
 
 
 @pytest.mark.parametrize("balance", [False, True])
-def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypatch, balance):
+def test_structured_node_timeout_and_balance_fail_over(tmp_path, monkeypatch, balance):
     graph = make_graph(tmp_path)
     for name in ("primary", "backup"):
         graph.model_store.upsert(ModelConfig(id=name, name="测试模型", model=name, base_url="https://example.test", api_key="TEST_ONLY_KEY"))
@@ -469,13 +469,8 @@ def test_structured_node_timeout_fails_over_but_balance_stops(tmp_path, monkeypa
     monkeypatch.setattr("backend.agents.graph.LlmClient", Client)
     state = {"session_id": "s1", "workdir": str(tmp_path / "work")}
     client = Client(graph.model_store.get("primary"))
-    if balance:
-        with pytest.raises(LlmBalanceError):
-            graph._model_json(state, "verifier", client, [])
-        assert calls == ["primary"]
-    else:
-        assert graph._model_json(state, "verifier", client, [])["ok"] is True
-        assert calls == ["primary", "backup"]
+    assert graph._model_json(state, "verifier", client, [])["ok"] is True
+    assert calls == ["primary", "backup"]
 
 
 @pytest.mark.parametrize("failure", ["模型没有返回合法 JSON：字符串未转义", "原生工具调用参数不是合法 JSON：Expecting delimiter，位置 12"])

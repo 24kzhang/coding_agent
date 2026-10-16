@@ -663,8 +663,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 else:
                     data = client.chat_json(messages)
             graph._add_tokens(state, client.last_usage, agent="coder", model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")))
-        except LlmBalanceError:
-            raise
         except LlmError as exc:
             failed_usage = getattr(client, "last_usage", None)
             if failed_usage is not usage_before:
@@ -673,9 +671,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             error_text = str(exc)[:240]
             if unavailable_error(exc):
                 graph.unavailable_models.add(str(getattr(getattr(client, "cfg", None), "id", "")))
-            if unavailable_error(exc) and switch_coder_model("服务不可用"):
+            if unavailable_error(exc) and switch_coder_model("余额或额度不足" if isinstance(exc, LlmBalanceError) else "服务不可用"):
                 transient_failures = 0
                 continue
+            if isinstance(exc, LlmBalanceError):
+                raise
             if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient):
                 native_fallback = True
                 coder_output_limit = min(coder_output_limit + 2_000, client.cfg.max_output_tokens, 16_000)

@@ -19,7 +19,7 @@ class LlmError(RuntimeError):
 
 
 class LlmBalanceError(LlmError):
-    """账户余额或额度明确不足，调用方必须立即停止。"""
+    """账户余额或额度明确不足，停止调用当前模型并尝试备用模型。"""
 
 
 class LlmOutputLimitError(LlmError):
@@ -27,9 +27,11 @@ class LlmOutputLimitError(LlmError):
 
 
 def unavailable_error(error: Exception) -> bool:
-    """仅将服务、认证或模型可用性故障交给备用模型，余额与输出错误保留原语义。"""
+    """服务、认证和余额故障可换模，输出错误仍由原恢复逻辑处理。"""
 
-    if isinstance(error, (LlmBalanceError, LlmOutputLimitError)):
+    if isinstance(error, LlmBalanceError):
+        return True
+    if isinstance(error, LlmOutputLimitError):
         return False
     text = str(error).lower()
     markers = (
@@ -803,7 +805,7 @@ class LlmClient:
             "账户余额",
         )
         if status == 402 or any(marker in lower for marker in balance_markers):
-            raise LlmBalanceError("模型账户余额不足，已停止后续调用并保留现场")
+            raise LlmBalanceError("模型账户余额或额度不足，当前模型不可用")
         raise LlmError(f"模型接口错误 {status}: {safe}")
 
     def _responses_usage(

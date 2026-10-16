@@ -42,7 +42,7 @@ def setup_graph(tmp_path, monkeypatch, mode, status=503):
 
 
 @pytest.mark.parametrize("mode", ["json", "text", "coder"])
-@pytest.mark.parametrize("status", [401, 503, "timeout"])
+@pytest.mark.parametrize("status", [401, 402, 503, "timeout"])
 def test_explicit_primary_fails_over_without_losing_contract(tmp_path, monkeypatch, mode, status):
     graph, calls, events = setup_graph(tmp_path, monkeypatch, mode, status)
     state = {"session_id": "s1", "workdir": str(tmp_path / "project"), "text": "检查仓库", "model_id": "first", "attachments": [{"id": "pic"}]}
@@ -67,10 +67,11 @@ def test_explicit_primary_fails_over_without_losing_contract(tmp_path, monkeypat
     assert graph._client("planner", state).cfg.id == "healthy"
 
 
-def test_balance_error_preserves_stop_semantics(tmp_path, monkeypatch):
+def test_balance_error_stops_when_no_capable_backup(tmp_path, monkeypatch):
     graph, calls, _events = setup_graph(tmp_path, monkeypatch, "text", 402)
+    graph.unavailable_models.add("healthy")
     with pytest.raises(LlmBalanceError):
-        state = {"model_id": "first", "workdir": str(tmp_path), "session_id": "balance"}
+        state = {"model_id": "first", "workdir": str(tmp_path), "session_id": "balance", "attachments": [{"id": "pic"}]}
         graph._model_text(state, "answer", graph._client("answer", state), [{"role": "user", "content": "测试"}])
     assert len(calls) == 1
 
