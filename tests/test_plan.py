@@ -34,3 +34,19 @@ def test_executed_plan_cannot_be_replayed_as_unexecuted(tmp_path):
     store.append(work, "s1", "planner", "state", "plan_executed", "执行通过")
     graph = AgentGraph(ModelStore(tmp_path / "models.json"), store)
     assert graph._latest_saved_plan(work, "s1") is None
+
+
+def test_state_handoff_cannot_be_approved_when_required_value_is_missing(tmp_path, monkeypatch):
+    """临时生成的任务标识必须实际保存给下一次无状态请求。"""
+    from backend.agents.planner import _semantic_plan_issues
+
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    monkeypatch.setattr(graph, '_client', lambda *_: object())
+    monkeypatch.setattr(graph, '_model_json', lambda *_args, **_kwargs: {
+        'ok': True, 'issues': [], 'handoffs': [{
+            'required': ['任务标识', '上次结果'], 'available_next': ['上次结果'],
+            'evidence': '首轮临时生成任务标识，但返回与保存时只留下结果。',
+        }],
+    })
+    issues = _semantic_plan_issues(graph, {'text': '后续请求继续原任务'}, '原始合同', '无状态接口方案')
+    assert len(issues) == 1 and '任务标识' in issues[0]

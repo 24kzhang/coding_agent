@@ -26,6 +26,13 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
     """独立检查执行合同的规则冲突，接受满足需求的不同实现架构。"""
 
     client = graph._client("verifier", state)
+    author = str(state.get("plan_author_id") or "")
+    if isinstance(client, LlmClient) and author == client.cfg.id and not state.get("model_id"):
+        candidates = graph._fallback_models("verifier", state, author)
+        if candidates:
+            cfg = candidates[0]
+            client = LlmClient(cfg)
+            client.default_effort = graph.model_store.effort_for_agent("verifier", state.get("effort"), model=cfg)
     result = graph._model_json(
         state, "verifier", client,
         [
@@ -39,8 +46,13 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
                 "尤其检查工作区相对路径是否被错误地解释为某个输入目录的子路径；只读输入目录不得成为输出目录。"
                 "检查仅首次、一次、后续复用等时序要求：每次重新构造不等于首次构造后保存复用，即使最终内容相同也不能替换操作次数约束。"
                 "检查全部、必须等要求是否在别处被可选、不显示、降级、人工清单等措辞削弱；验收不能把缺失工具当成自动豁免。"
-                "每个问题引用用户原句与计划原句，确认是逻辑冲突而非个人偏好。只返回 JSON："
-                '{"ok":true,"issues":[],"summary":"中文结论"}'
+                "每个问题引用用户原句与计划原句，确认是逻辑冲突而非个人偏好。"
+                "对每个跨步骤或跨请求交互，必须做状态交接表：required 列出下一轮仍然需要的所有状态标识，"
+                "available_next 只列按计划的实际返回与保存方式能到达下一轮的状态标识，同一状态使用完全相同的标识。"
+                "不能把模型上次回复当作上次输入原文的可靠副本；不能假定未声明的隐藏会话、隐式缓存或状态自动传递。"
+                "首轮临时加入、但返回与保存时未包含的必要状态，会在后续无状态请求中消失，必须报告。"
+                "handoffs 的 evidence 引用生产、保存与下一轮消费的具体句子；无跨步骤状态时返回空数组。只返回 JSON："
+                '{"ok":true,"issues":[],"handoffs":[{"required":[],"available_next":[],"evidence":"中文证据"}],"summary":"中文结论"}'
             )},
             {"role": "user", "content": graph._multimodal_content(
                 context, state, "\n\n待审查的完整执行合同：\n" + markdown
@@ -52,6 +64,14 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
     if not isinstance(issues, list):
         return ["一致性审查未返回有效问题列表"]
     normalized = [str(issue).strip() for issue in issues if str(issue).strip()][:8]
+    for handoff in result.get("handoffs") or []:
+        if not isinstance(handoff, dict):
+            continue
+        required = {str(value).strip() for value in handoff.get("required", []) if str(value).strip()}
+        available = {str(value).strip() for value in handoff.get("available_next", []) if str(value).strip()}
+        missing = sorted(required - available)
+        if missing:
+            normalized.append("跨步骤必要状态未交接：" + "、".join(missing) + "；" + str(handoff.get("evidence") or "计划未声明保存与传递方式"))
     if result.get("ok") is not True and not normalized:
         return ["一致性审查未确认计划可执行：" + str(result.get("summary") or "缺少结论")]
     return normalized
@@ -443,7 +463,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
         best_stage = "format" if best_issues else "semantic"
         if not best_issues:
-            best_issues = _semantic_plan_issues(graph, state, context_text, normalized_markdown)
+            best_issues = _semantic_plan_issues(graph, {**state, "plan_author_id": str(getattr(getattr(client, "cfg", None), "id", ""))}, context_text, normalized_markdown)
         stage_repairs = {"format": 0, "semantic": 0}
         repair_models = {str(getattr(getattr(client, "cfg", None), "id", ""))}
         repair_counts: dict[str, int] = {}
@@ -536,7 +556,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             repaired_issues = _plan_quality_issues(graph, state, str(repaired["markdown"]))
             repaired_stage = "format" if repaired_issues else "semantic"
             if not repaired_issues:
-                repaired_issues = _semantic_plan_issues(graph, state, context_text, str(repaired["markdown"]))
+                repaired_issues = _semantic_plan_issues(graph, {**state, "plan_author_id": str(getattr(getattr(client, "cfg", None), "id", ""))}, context_text, str(repaired["markdown"]))
             improved = len(repaired_issues) < len(best_issues)
             # 格式检查与语义检查的问题数量不可直接比较质量；下一轮必须看到
             # 最新候选和它真实未解决的问题，避免一直重修已解决的旧字段问题。
