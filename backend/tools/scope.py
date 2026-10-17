@@ -11,11 +11,21 @@ PREFIX_RULE = re.compile(
     r"(?:所有|全部)(?:项目|输出|交付|新增|生成)?文件(?:必须|只能|统一|应当)?(?:使用|写入|放在)\s*[`“\"]?([\w./-]+)/\.\.\."
 )
 
+def _scope_texts(state: dict[str, Any]) -> list[str]:
+    """权限路径只依据用户目标与新指导，自动计划不能改变交付边界。"""
+    original = str(state.get("original_goal") or "")
+    texts = [original or str(state.get("text") or "")]
+    if original and state.get("original_text"):
+        texts.append(str(state["original_text"]))
+    texts.extend(str(value) for value in state.get("guidance", []))
+    return texts
+
+
 def delivery_root(fs: FsTool, state: dict[str, Any]) -> Path:
     """读取任务明确声明的统一交付前缀，输入文件仍可留在父工作区。"""
 
     pattern = PREFIX_RULE
-    texts = [str(state.get("text") or ""), *(str(item) for item in state.get("guidance", []))]
+    texts = _scope_texts(state)
     selected: str | None = None
     for text in texts:
         match = pattern.search(text)
@@ -35,7 +45,7 @@ def tool_path(fs: FsTool, state: dict[str, Any], rel: str, *, write: bool) -> st
     output = delivery_root(fs, state)
     if output == fs.root or Path(rel).is_absolute() or ".." in Path(rel).parts:
         return rel
-    texts = [str(state.get("text") or ""), *(str(value) for value in state.get("guidance", []))]
+    texts = _scope_texts(state)
     if any(PREFIX_RULE.search(text) for text in texts):
         return rel
     prefix = output.relative_to(fs.root).as_posix()

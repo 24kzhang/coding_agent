@@ -83,6 +83,7 @@ def manager(graph: AgentGraph, state: AgentState) -> AgentState:
         state = {
             **state,
             "text": graph._compose_saved_plan_text(saved_plan, state["text"]),
+            "original_goal": str(saved_plan.get("goal") or ""),
             "plan": saved_plan,
             # 自然语言“执行计划”与旧 execute_plan 按钮具有相同语义，必须进入执行态。
             "execute_plan": True,

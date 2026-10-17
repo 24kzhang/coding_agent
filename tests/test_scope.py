@@ -124,3 +124,12 @@ def test_malformed_manifest_tables_do_not_crash_precheck(tmp_path, malformed):
     fs = FsTool(str(tmp_path / "workspace"))
     fs.write("portal/pyproject.toml", malformed + '\n[build-system]\nrequires = []\n')
     assert manifest_issues(fs, {"text": "项目输出到 portal"}, "uv sync") == []
+
+
+def test_generated_plan_cannot_override_user_delivery_boundary(tmp_path):
+    from backend.tools.scope import delivery_root
+    fs = FsTool(str(tmp_path / 'workspace'))
+    state = {'text': '自动计划：项目输出到 wrong', 'original_goal': '项目输出到 portal', 'original_text': '执行计划'}
+    assert delivery_root(fs, state) == fs.root / 'portal'
+    state['guidance'] = ['项目输出到 revised']
+    assert delivery_root(fs, state) == fs.root / 'revised'

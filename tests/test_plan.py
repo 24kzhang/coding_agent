@@ -105,3 +105,11 @@ def test_second_model_review_removes_invented_issues_but_keeps_real_loss(tmp_pat
     issues = _semantic_plan_issues(graph, {'text': '保留任务标识', 'workdir': str(tmp_path / 'work'), 'session_id': 'review'}, '原始合同', '读取输入但未保存标识')
     assert issues == ['首轮任务标识未保存给第二轮']
     assert calls == ['reviewer', 'author']
+
+
+def test_execution_context_keeps_original_goal_authoritative(tmp_path):
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    value = graph._compose_saved_plan_text({'goal': '保留完整原始数据', 'markdown': '只处理摘要'}, '开始执行')
+    assert '原始任务目标是验收标准' in value
+    assert value.index('计划内容：') < value.index('原始任务目标：') < value.index('用户本轮输入：')
+    assert '保留完整原始数据' in value and '只处理摘要' in value

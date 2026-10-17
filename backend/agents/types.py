@@ -16,6 +16,8 @@ class AgentState(TypedDict, total=False):
     text: str
     # original_text 保存本轮最初输入，便于早到指导参与 manager 分类时稳定重建有效任务。
     original_text: str
+    # 已确认计划对应的原始用户目标，不能被自动计划改写工具路径边界。
+    original_goal: str
     # guidance 保存本轮运行中已经应用的用户指导，后发送的指导优先级更高。
     guidance: list[str]
     # guidance_revision 每应用一批指导递增，Coder 用它丢弃基于旧要求生成的未执行动作。

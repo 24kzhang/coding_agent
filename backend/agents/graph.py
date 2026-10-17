@@ -594,14 +594,15 @@ class AgentGraph:
     def _compose_saved_plan_text(self, saved_plan: dict[str, Any], text: str) -> str:
         return "\n".join(
             [
-                "用户确认执行已保存计划。",
-                f"用户本轮输入：{text}",
+                "用户确认执行已保存计划。自动计划是执行参考，原始任务目标是验收标准；两者冲突时以原始目标为准，必须统一实现，不能沿用计划中的互斥规则。",
+                "",
+                "计划内容：",
+                str(saved_plan.get("markdown") or ""),
                 "",
                 "原始任务目标：",
                 str(saved_plan.get("goal") or ""),
                 "",
-                "计划内容：",
-                str(saved_plan.get("markdown") or ""),
+                f"用户本轮输入：{text}",
             ]
         )
 
