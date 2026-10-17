@@ -1,11 +1,100 @@
 {
   "models": [
     {
+      "id": "DeepSeek-V4.1-Flash",
+      "name": "DeepSeek-V4.1-Flash",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "api_key",
+      "model": "deepseek-flash",
+      "ctx": 128000,
+      "enabled": true,
+      "timeout": 120,
+      "protocol": "chat_completions",
+      "capabilities": [
+        "text",
+        "vision",
+        "tools",
+        "reasoning"
+      ],
+      "efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "none",
+      "max_output_tokens": 16384,
+      "output_token_field": "auto",
+      "reasoning_style": "auto",
+      "effort_map": {},
+      "effort_budgets": {},
+      "stream_tools": false
+    },
+    {
+      "id": "qwen3.8-flash",
+      "name": "qwen3.8-flash",
+      "base_url": "https://llm-ct6tpt24ijcd4vpp.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "api_key": "api_key",
+      "model": "qwen3.8-flash",
+      "ctx": 128000,
+      "enabled": true,
+      "timeout": 120,
+      "protocol": "chat_completions",
+      "capabilities": [
+        "text",
+        "vision",
+        "tools",
+        "reasoning"
+      ],
+      "efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "none",
+      "max_output_tokens": 16384,
+      "output_token_field": "auto",
+      "reasoning_style": "auto",
+      "effort_map": {},
+      "effort_budgets": {},
+      "stream_tools": false
+    },
+    {
       "id": "longcat",
-      "name": "LongCat 预览",
+      "name": "LongCat 2.5-preview",
       "base_url": "https://api.longcat.chat/openai/v1",
-      "api_key": "",
+      "api_key": "api_key",
       "model": "LongCat-2.5-Preview",
+      "ctx": 128000,
+      "enabled": true,
+      "timeout": 120,
+      "protocol": "chat_completions",
+      "capabilities": [
+        "text",
+        "tools"
+      ],
+      "efforts": [
+        "none"
+      ],
+      "default_effort": "none",
+      "max_output_tokens": 16384,
+      "output_token_field": "auto",
+      "reasoning_style": "none",
+      "effort_map": {},
+      "effort_budgets": {},
+      "stream_tools": false
+    },
+    {
+      "id": "longcat-2.0",
+      "name": "LongCat 2.0",
+      "base_url": "https://api.longcat.chat/openai/v1",
+      "api_key": "api_key",
+      "model": "LongCat-2.0",
       "ctx": 128000,
       "enabled": true,
       "timeout": 120,
@@ -27,42 +116,42 @@
     }
   ],
   "agent_models": {
-    "manager": "longcat",
-    "planner": "longcat",
-    "coder": "longcat",
-    "verifier": "longcat",
-    "answer": "longcat",
-    "doc": "longcat",
-    "compact": "longcat"
+    "manager": "DeepSeek-V4.1-Flash",
+    "planner": "DeepSeek-V4.1-Flash",
+    "coder": "qwen3.8-flash",
+    "verifier": "DeepSeek-V4.1-Flash",
+    "answer": "longcat-2.0",
+    "doc": "longcat-2.0",
+    "compact": "longcat-2.0"
   },
   "agent_profiles": {
     "manager": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "DeepSeek-V4.1-Flash",
+      "effort": "medium"
     },
     "planner": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "DeepSeek-V4.1-Flash",
+      "effort": "high"
     },
     "coder": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "qwen3.8-flash",
+      "effort": "high"
     },
     "verifier": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "DeepSeek-V4.1-Flash",
+      "effort": "medium"
     },
     "answer": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "longcat-2.0",
+      "effort": "none"
     },
     "doc": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "longcat-2.0",
+      "effort": "none"
     },
     "compact": {
-      "model_id": "longcat",
-      "effort": "inherit"
+      "model_id": "longcat-2.0",
+      "effort": "none"
     }
   }
 }
