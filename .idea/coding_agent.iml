@@ -14,6 +14,9 @@
       <excludeFolder url="file://$MODULE_DIR$/run_test/exercises/app/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.cache/本轮测试/旧站备份/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.cache/runtime/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.cache" />
+      <excludeFolder url="file://$MODULE_DIR$/docs" />
+      <excludeFolder url="file://$MODULE_DIR$/tests" />
     </content>
     <orderEntry type="jdk" jdkName="uv (coding_agent)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

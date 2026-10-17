@@ -20,6 +20,6 @@ frontend/dist/
 /MCP/auth.json
 
 # 本地文档、任务工作区和运行记忆保留在本机。
-/run_test/
 /output/
 /tests/
+/docs/

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0d2b22" />
+  <title>动作库 · 健身动作咨询</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <a class="skip" href="#main">跳到主内容</a>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">力</span>
+        <div class="brand-text">
+          <strong>力场</strong>
+          <span>动作库 · 教练咨询</span>
+        </div>
+      </div>
+      <nav class="nav" aria-label="主导航">
+        <a class="nav-item is-active" href="/" aria-current="page">
+          <span class="nav-dot" aria-hidden="true"></span>动作库
+        </a>
+      </nav>
+      <div class="side-card">
+        <p class="side-card-kicker">今日提醒</p>
+        <p class="side-card-title">动作做对比做多更重要</p>
+        <p class="side-card-body">选一个动作，点开右侧教练，问清发力与呼吸。</p>
+      </div>
+      <p class="side-foot">数据 {{ total }} 条 · 媒体 © Gym visual</p>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="head">
+        <div class="head-text">
+          <p class="eyebrow">EXERCISE INDEX</p>
+          <h1>动作库</h1>
+          <p class="sub">按分类、目标肌肉与器械筛选，点开任意动作查看完整要点并咨询教练。</p>
+        </div>
+        <div class="search">
+          <label class="sr-only" for="q">搜索动作名称</label>
+          <input id="q" name="q" type="search" autocomplete="off" placeholder="搜索动作名称，如：深蹲…" />
+        </div>
+      </header>
+
+      <section class="filters" aria-label="筛选条件">
+        <div class="filter-row" data-facet="category">
+          <span class="filter-label">动作分类</span>
+          <div class="chips" role="group" aria-label="动作分类">
+            <button type="button" class="chip is-on" data-value="" aria-pressed="true">全部</button>
+            {% for v in facets.categories %}
+            <button type="button" class="chip" data-value="{{ v }}" aria-pressed="false">{{ v }}</button>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="filter-row" data-facet="target">
+          <span class="filter-label">目标肌肉</span>
+          <div class="chips" role="group" aria-label="目标肌肉">
+            <button type="button" class="chip is-on" data-value="" aria-pressed="true">全部</button>
+            {% for v in facets.targets %}
+            <button type="button" class="chip" data-value="{{ v }}" aria-pressed="false">{{ v }}</button>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="filter-row" data-facet="equipment">
+          <span class="filter-label">使用器械</span>
+          <div class="chips" role="group" aria-label="使用器械">
+            <button type="button" class="chip is-on" data-value="" aria-pressed="true">全部</button>
+            {% for v in facets.equipments %}
+            <button type="button" class="chip" data-value="{{ v }}" aria-pressed="false">{{ v }}</button>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+
+      <div class="result-bar">
+        <p class="count" id="count" aria-live="polite">共 {{ total }} 个动作</p>
+        <button type="button" class="ghost" id="clear" disabled>清空筛选</button>
+      </div>
+
+      <p class="notice" id="notice" role="status" aria-live="polite" hidden></p>
+
+      <section class="grid" id="grid" aria-busy="false" aria-label="动作列表"></section>
+
+      <div class="empty" id="empty" hidden>
+        <p class="empty-title">没有匹配的动作</p>
+        <p class="empty-body">试试清空筛选，或换一个关键词。</p>
+        <button type="button" class="primary" id="empty-clear">清空筛选</button>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="modal" id="modal" aria-labelledby="m-title">
+    <div class="modal-inner">
+      <button type="button" class="close" id="close" aria-label="关闭">×</button>
+      <section class="detail" aria-label="动作详情">
+        <p class="eyebrow" id="m-id">动作编号</p>
+        <h2 id="m-title">动作名称</h2>
+        <div class="tags" id="m-tags"></div>
+        <figure class="media">
+          <img id="m-gif" src="" alt="" width="360" height="360" />
+        </figure>
+        <h3>动作描述</h3>
+        <p class="desc" id="m-desc">暂无数据</p>
+        <h3>分步要点</h3>
+        <ol class="steps" id="m-steps"></ol>
+        <h3>肌肉与器械</h3>
+        <dl class="facts" id="m-facts"></dl>
+        <h3>数据信息</h3>
+        <dl class="facts" id="m-meta"></dl>
+      </section>
+
+      <section class="chat" aria-label="动作咨询聊天">
+        <div class="coach">
+          <span class="coach-avatar" aria-hidden="true">教</span>
+          <div>
+            <p class="coach-name">动作教练 <span class="beta">Beta</span></p>
+            <p class="coach-sub">基于动作数据与专业知识回答</p>
+          </div>
+        </div>
+        <div class="log" id="log" role="log" aria-live="polite" aria-label="聊天记录"></div>
+        <div class="suggest" id="suggest">
+          <p class="suggest-title">你可以这样问：</p>
+          <button type="button" class="suggest-item" data-q="这个动作主要练哪些肌肉？">这个动作主要练哪些肌肉？</button>
+          <button type="button" class="suggest-item" data-q="新手做这个动作要注意什么？">新手做这个动作要注意什么？</button>
+          <button type="button" class="suggest-item" data-q="这个动作的呼吸节奏怎么安排？">这个动作的呼吸节奏怎么安排？</button>
+        </div>
+        <form class="composer" id="composer">
+          <label class="sr-only" for="msg">输入你的问题</label>
+          <textarea id="msg" name="message" rows="2" maxlength="2000" placeholder="输入你的问题…" autocomplete="off"></textarea>
+          <div class="composer-actions">
+            <button type="button" class="ghost" id="stop" hidden>停止</button>
+            <button type="submit" class="primary" id="send" aria-label="发送">发送</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
