@@ -378,12 +378,14 @@ class AgentGraph:
             # options_raw 是模型返回的原始选项列表。
             options_raw = item.get("options")
             # options 是清洗后的选项，最多保留 4 个。
-            options = [self._clean_plan_text(option, "") for option in options_raw] if isinstance(options_raw, list) else []
+            options = [re.sub(r"^[A-Da-d]\s*[.、)）:：]\s*", "", self._clean_plan_text(option, "")) for option in options_raw] if isinstance(options_raw, list) else []
             options = [option for option in options if option][:4]
             if len(options) < 2:
                 options = ["按推荐方案执行", "继续补充细节"]
             # recommended 是推荐选项；如果不在选项列表里，就强制使用第一个选项。
-            recommended = self._clean_plan_text(item.get("recommended"), options[0])
+            recommended = re.sub(r"^[A-Da-d]\s*[.、)）:：]\s*", "", self._clean_plan_text(item.get("recommended"), options[0]))
+            if re.fullmatch(r"[A-Da-d]", recommended) and ord(recommended.upper()) - ord("A") < len(options):
+                recommended = options[ord(recommended.upper()) - ord("A")]
             if recommended not in options:
                 recommended = options[0]
             # reason 是推荐理由，异常时给出通用理由。
@@ -438,12 +440,12 @@ class AgentGraph:
         # text 是模型返回字段转成字符串后的内容。
         text = str(value or "").strip()
         # bad_markers 是不应该展示给用户的错误或 JSON 残片特征。
-        bad_markers = ["Expecting", "JSONDecodeError", "模型没有返回合法 JSON", "\\n", "{", "}", "[", "]"]
+        bad_markers = ["Expecting", "JSONDecodeError", "模型没有返回合法 JSON"]
         if not text or any(marker in text for marker in bad_markers):
             text = fallback
         # 合并多余空白，避免选项展示很乱。
         text = re.sub(r"\s+", " ", text)
-        return self._trim(text, 120)
+        return text
 
     """从会话记忆中查找最近仍未完成的 pending_plan。"""
     def _latest_pending_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:

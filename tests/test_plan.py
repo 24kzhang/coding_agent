@@ -113,3 +113,16 @@ def test_execution_context_keeps_original_goal_authoritative(tmp_path):
     assert '原始任务目标是验收标准' in value
     assert value.index('计划内容：') < value.index('原始任务目标：') < value.index('用户本轮输入：')
     assert '保留完整原始数据' in value and '只处理摘要' in value
+
+
+def test_plan_choices_keep_full_text_and_normalize_option_labels(tmp_path):
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    question = '请选择技术方案？' + '这里是必须完整保留的约束。' * 30
+    reason = '推荐理由需完整保存。' * 25
+    items = graph._normalize_plan_questions([{'question': question, 'options': ['A. 首选方案', 'B. 返回 JSON {"ok":true}'], 'recommended': 'B', 'reason': reason}])
+    assert items[0]['question'] == question and items[0]['reason'] == reason
+    assert items[0]['options'] == ['首选方案', '返回 JSON {"ok":true}']
+    assert items[0]['recommended'] == items[0]['options'][1]
+    rendered = graph._format_plan_questions(items)
+    assert question in rendered and reason in rendered
+    assert 'A. A.' not in rendered
