@@ -83,3 +83,25 @@ def test_handoff_accepts_different_names_for_same_persisted_value(tmp_path, monk
         }],
     })
     assert _semantic_plan_issues(graph, {'text': '继续原任务'}, '原始合同', '状态交接计划') == []
+
+
+def test_second_model_review_removes_invented_issues_but_keeps_real_loss(tmp_path, monkeypatch):
+    from api.schema import ModelConfig
+    from backend.agents.planner import _semantic_plan_issues
+    from llm.client import LlmClient
+
+    models = ModelStore(tmp_path / 'models.json')
+    for name in ('author', 'reviewer'):
+        models.upsert(ModelConfig(id=name, name='测试模型', model=name, base_url='https://example.test', api_key='TEST_ONLY_KEY'))
+    graph = AgentGraph(models, MemoryStore(tmp_path / 'mem'))
+    monkeypatch.setattr(graph, '_client', lambda *_: LlmClient(models.get('reviewer')))
+    calls = []
+    def review(_state, _agent, client, _messages, **_kwargs):
+        calls.append(client.cfg.id)
+        if client.cfg.id == 'reviewer':
+            return {'ok': False, 'issues': ['读取只读输入等于写入', '首轮任务标识未保存给第二轮'], 'handoffs': []}
+        return {'issues': ['首轮任务标识未保存给第二轮'], 'discarded': ['读取操作不修改输入']}
+    monkeypatch.setattr(graph, '_model_json', review)
+    issues = _semantic_plan_issues(graph, {'text': '保留任务标识', 'workdir': str(tmp_path / 'work'), 'session_id': 'review'}, '原始合同', '读取输入但未保存标识')
+    assert issues == ['首轮任务标识未保存给第二轮']
+    assert calls == ['reviewer', 'author']
