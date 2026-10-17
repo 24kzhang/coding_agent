@@ -96,3 +96,20 @@ def test_all_multimodal_roles_route_text_model_to_vision(tmp_path, role):
     graph = AgentGraph(store, MemoryStore(tmp_path / 'mem'))
     state = {'workdir': str(tmp_path / 'work'), 'session_id': 'vision', 'attachments': [{'id': 'picture'}]}
     assert graph._client(role, state).cfg.id == 'vision'
+
+
+def test_plan_revision_never_switches_image_task_to_text_model(tmp_path, monkeypatch):
+    from backend.agents.planner import planner
+
+    graph, _requests, _events = setup_graph(tmp_path, monkeypatch, 'json')
+    calls = []
+    monkeypatch.setattr(graph, '_ctx_text', lambda *_: '创建可验证的项目')
+    monkeypatch.setattr('backend.agents.planner._plan_quality_issues', lambda _g, _s, md: [] if md == '完整合同' else ['合同未完整'])
+    monkeypatch.setattr('backend.agents.planner._semantic_plan_issues', lambda *_: [])
+    def reply(_state, _role, client, _messages, **_kwargs):
+        calls.append(client.cfg.id)
+        return {'status': 'plan', 'markdown': '完整合同' if client.cfg.id == 'healthy' else '初稿'}
+    monkeypatch.setattr(graph, '_model_json', reply)
+    result = planner(graph, {'session_id': 'imageplan', 'workdir': str(tmp_path / 'work'), 'text': '创建项目', 'attachments': [{'id': 'pic', 'name': '参考图'}]})
+    assert result['plan']['markdown'] == '完整合同'
+    assert calls == ['first', 'first', 'healthy']

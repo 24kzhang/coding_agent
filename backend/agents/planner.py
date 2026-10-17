@@ -346,7 +346,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     client = graph._client("planner", state)
     # fallback_configs 只包含 enabled=True 的其他模型；显式 model_id 覆盖时尊重用户选择，不自动切换。
     fallback_configs = (
-        graph.model_store.fallbacks(getattr(getattr(client, "cfg", None), "id", ""))
+        graph._fallback_models("planner", state, getattr(getattr(client, "cfg", None), "id", ""))
         if getattr(getattr(client, "cfg", None), "id", "") and not state.get("model_id")
         else []
     )
