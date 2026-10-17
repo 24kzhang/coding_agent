@@ -51,3 +51,10 @@ def test_plain_and_grouped_identifiers_are_real_field_mentions():
     assert _mentions_field('字段：`record_id/cover/details.zh`。', 'cover')
     assert _mentions_field('字段record_id是编号。', 'record_id')
     assert not _mentions_field('record_id_backup 或 xrecord_id 不是该字段。', 'record_id')
+
+
+def test_parameterized_binary_resource_is_not_a_record_detail_api(tmp_path):
+    graph, state, text = fixture(tmp_path, '详情左侧展示所有详细信息。')
+    text = text.replace('GET /api/records/{id}', 'GET /api/records/detail')
+    text += '\n### GET /api/files/{path}\n返回 FileResponse，Content-Type: image/webp。\n'
+    assert _plan_quality_issues(graph, state, text) == []
