@@ -1680,7 +1680,7 @@ class AgentGraph:
                         conversation.append({"role": "user", "content": "上一模型连续耗尽输出预算。本次保持原始输出合同和已有工具事实，只返回简明、完整的 JSON；不重复执行已有工具。"})
                         self._emit(state, agent, "model", f"结构化输出连续触顶，切换到 {next_cfg.id} 完成原节点合同", data={"reason": "output_limit_failover"})
                         continue
-                if unavailable_error(exc) and isinstance(client, LlmClient):
+                if (unavailable_error(exc) or invalid_json) and isinstance(client, LlmClient):
                     if _step + 1 >= MODEL_RECOVERY_ATTEMPTS:
                         raise
                     self.unavailable_models.add(client.cfg.id)
@@ -1690,7 +1690,7 @@ class AgentGraph:
                         client = LlmClient(next_cfg)
                         client.default_effort = self.model_store.effort_for_agent(agent, state.get("effort"), model=next_cfg)
                         recovered_limit = recovered_json = False
-                        self._emit(state, agent, "model", f"结构化节点服务暂时不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "transient_failover"})
+                        self._emit(state, agent, "model", f"结构化节点当前模型不可用，切换到 {next_cfg.id} 继续原合同", data={"reason": "json_failover" if invalid_json else "transient_failover"})
                         continue
                 raise
             self._add_tokens(state, client.last_usage, agent=agent, model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")))

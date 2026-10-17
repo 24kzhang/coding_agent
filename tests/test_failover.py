@@ -22,6 +22,9 @@ def setup_graph(tmp_path, monkeypatch, mode, status=503):
         data = json.loads(request.content)
         calls.append(data)
         if data["model"] == "first":
+            if status == "invalid":
+                message = {"tool_calls": [{"id": "broken", "type": "function", "function": {"name": "return_json", "arguments": "{"}}]}
+                return httpx.Response(200, json={"choices": [{"message": message}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
             if status == "timeout":
                 raise httpx.ReadTimeout("读取超时", request=request)
             return httpx.Response(status, json={"error": "服务不可用"})
@@ -113,3 +116,14 @@ def test_plan_revision_never_switches_image_task_to_text_model(tmp_path, monkeyp
     result = planner(graph, {'session_id': 'imageplan', 'workdir': str(tmp_path / 'work'), 'text': '创建项目', 'attachments': [{'id': 'pic', 'name': '参考图'}]})
     assert result['plan']['markdown'] == '完整合同'
     assert calls == ['first', 'first', 'healthy']
+
+
+def test_invalid_json_switches_after_one_repair_without_losing_task(tmp_path, monkeypatch):
+    graph, calls, events = setup_graph(tmp_path, monkeypatch, 'json', 'invalid')
+    state = {'workdir': str(tmp_path / 'work'), 'session_id': 'jsonfallback', 'model_id': 'first', 'attachments': [{'id': 'pic'}]}
+    messages = [{'role': 'user', 'content': '必须保留的原始任务'}]
+    assert graph._model_json(state, 'planner', graph._client('planner', state), messages) == {'ok': True}
+    assert [item['model'] for item in calls] == ['first', 'first', 'healthy']
+    assert calls[-1]['messages'][0] == messages[0]
+    assert graph._client('planner', state).cfg.id == 'healthy'
+    assert not any(event.kind == 'error' for event in events)
