@@ -1812,3 +1812,26 @@ def test_coder_waits_for_transient_gateway_recovery(tmp_path, monkeypatch) -> No
     assert client.calls == 5
     assert delays == [1.0, 2.0, 4.0, 8.0]
     assert result["coding_ok"] is True
+
+
+def test_coder_can_rerun_command_in_same_batch_after_fix(tmp_path):
+    """同一批先修复再复验，不能仍用修改前的命令去重缓存。"""
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'app.py').write_text('VALUE =\n')
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    client = RerunAfterFixClient()
+    original = client.chat_json
+    def reply(messages, **kwargs):
+        result = original(messages, **kwargs)
+        if client.calls == 3:
+            result['actions'].append({'tool': 'run_command', 'cmd': 'python -m py_compile app.py'})
+            result['done'] = True
+        return result
+    client.chat_json = reply
+    graph._client = lambda *_: client
+    result = coder(graph, {'workdir': str(project), 'session_id': 'batch', 'text': '修复并验证',
+                           'repo': {'files': ['app.py'], 'snippets': {}, 'stack': ['Python']}})
+    assert result['coding_ok']
+    assert result['commands'] == ['python -m py_compile app.py', 'python -m py_compile app.py']
+    assert client.calls == 3

@@ -1197,7 +1197,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     # 同一批中的后续查询也必须看到刚写入的源码，不能只在批次末失效。
                     search_cache.clear()
                     read_cache.clear()
-                    seen_actions = {item for item in seen_actions if '"tool": "search_files"' not in item}
+                    seen_actions = {
+                        item for item in seen_actions
+                        if '"tool": "search_files"' not in item and '"tool": "run_command"' not in item
+                    }
                 detail = path or str(action.get("cmd") or "")
                 progress_items.append(f"{tool}:{detail}" if detail else tool)
                 if not observation.get("cached") and (tool in {"append_file", "assert_text_absent", "model_copy", "replace_block", "replace_file", "run_command", "write_file"} or tool.startswith("mcp__")):
