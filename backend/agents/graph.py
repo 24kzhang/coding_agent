@@ -2011,7 +2011,7 @@ class AgentGraph:
             if candidates:
                 cfg = candidates[0]
                 self._emit(state, agent, "model", f"本轮首选模型已不可用，继续使用 {cfg.id}")
-        if state.get("attachments") and agent in {"manager", "planner", "coder", "answer"}:
+        if state.get("attachments") and agent in {"manager", "planner", "coder", "answer", "verifier"}:
             if "vision" not in cfg.capabilities:
                 if state.get("model_id"):
                     raise LlmError(f"所选模型“{cfg.name}”不支持图片输入")

@@ -86,3 +86,13 @@ def test_reused_node_client_does_not_retry_known_unavailable_model(tmp_path, mon
     assert graph._model_json(state, "planner", client, messages)["ok"]
     assert graph._model_json(state, "planner", client, messages)["ok"]
     assert [row["model"] for row in calls] == ["first", "healthy", "healthy"]
+
+
+@pytest.mark.parametrize('role', ['manager', 'planner', 'coder', 'answer', 'verifier'])
+def test_all_multimodal_roles_route_text_model_to_vision(tmp_path, role):
+    store = ModelStore(tmp_path / 'models.json')
+    for ident, caps in [('text', ['text', 'tools']), ('vision', ['text', 'tools', 'vision'])]:
+        store.upsert(ModelConfig(id=ident, name='测试模型', model=ident, base_url='https://example.test/v1', api_key='TEST_ONLY_KEY', capabilities=caps))
+    graph = AgentGraph(store, MemoryStore(tmp_path / 'mem'))
+    state = {'workdir': str(tmp_path / 'work'), 'session_id': 'vision', 'attachments': [{'id': 'picture'}]}
+    assert graph._client(role, state).cfg.id == 'vision'
