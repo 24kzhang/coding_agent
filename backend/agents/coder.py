@@ -312,14 +312,21 @@ def _is_verification_command(command: str) -> bool:
     if any(arg in {"-c", "-e"} for arg in argv):
         return False
     names = [Path(arg).name.lower() for arg in argv]
+    # 测试目录中的入口无须名为 test：集成、界面和其他验收脚本都属于验证。
+    if any(Path(arg).suffix in {".py", ".js", ".mjs", ".cjs", ".ts"}
+           and any(part.lower() in {"tests", "test", "e2e"} for part in Path(arg).parts[:-1])
+           for arg in argv):
+        return True
     if any(name in {"pytest", "ruff", "mypy", "pyright", "compileall", "py_compile", "unittest"} for name in names):
         return True
     if "node" in names and "--check" in argv:
         return True
     if "-m" in argv:
         index = argv.index("-m")
-        if index + 1 < len(argv) and argv[index + 1].split(".")[-1] in {"build", "test", "check", "smoke", "lint", "typecheck"}:
-            return True
+        if index + 1 < len(argv):
+            parts = argv[index + 1].split(".")
+            if parts[-1] in {"build", "test", "check", "smoke", "lint", "typecheck"} or any(part in {"tests", "test", "e2e"} for part in parts[:-1]):
+                return True
     return any(re.search(r"(?:^|[-_])(?:test|typecheck|build|smoke|lint|check)(?:[-_]|$)", Path(name).stem) for name in names)
 
 
@@ -431,7 +438,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     # mutation_count 记录真实写入或修改次数，用于识别“已经产出代码却持续只读”的失控循环。
     mutation_count = 0
     file_revision = 0
-    preflight_revision = -1
+    preflight_revision: tuple[int, str] | None = None
     preflight_issues: list[str] = []
     preflight_kind = ""
     pending_native_command = ""
@@ -1125,11 +1132,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     if preflight_kind == "imports":
                         preflight_issues = []
                         preflight_kind = ""
-                    fresh_review = preflight_revision != file_revision
+                    review_key = (file_revision, str(action["cmd"]))
+                    fresh_review = preflight_revision != review_key
                     if fresh_review:
                         preflight_issues = middleware_issues(fs, state, current_files) + review_before_verification(graph, {**state, "completed_checks": completed_checks, "failed_checks": list(failed_checks.values())}, fs, current_files, str(action["cmd"]))
                         preflight_kind = "review" if preflight_issues else ""
-                        preflight_revision = file_revision
+                        preflight_revision = review_key
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
                     if preflight_issues and fresh_review:
                         # 尚未执行命令，保留审查建议为实施待办；不伪造命令结果或测试通过。

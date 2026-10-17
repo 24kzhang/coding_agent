@@ -36,6 +36,8 @@ issues 只包含当前命令会实际执行的确定缺陷，每项必须有源�
 自动计划不能弱化原始要求，但后续才需创建的文档、烟测脚本不能阻止当前单元测试。
 已通过且未变更的路径不能凭猜测判为失败；真实失败诊断必须沿修改后的代码重新计算。
 第三方框架的异常转换和生命周期必须按实际调用位置判断。
+检查验收脚本能否实际观察要求的行为；资源加载看 DOM 属性与请求，不能用展示文本里的路径替代。
+必需验收的失败分支不能通过跳过或返回零伪装成完成；环境与依赖问题应按真实诊断处理。
 不要把待执行测试称为通过，不讨论测试没有覆盖且与本次执行无关的界面细节。"""
 
 
@@ -94,6 +96,13 @@ def _reject_empty_tests(result: dict[str, Any]) -> dict[str, Any]:
     is_test = "pytest" in cmd or bool(re.search(r"\brun\s+test\b", cmd))
     if is_test and result.get("ok") and re.search(r"\b(?:no tests? (?:ran|found)|0 tests?|tests?\s+0|0 passing)\b", output, re.IGNORECASE):
         return {**result, "ok": False, "issues": ["测试命令未执行任何测试，缺少有效验收证据"]}
+    # 仅有跳过结果或脚本明确宣布未执行，不能因为返回零就计为验收通过。
+    all_skipped = is_test and re.search(r"\b\d+ skipped\b", output, re.IGNORECASE) and not re.search(r"\b[1-9]\d* (?:passed|failed|errors?)\b", output, re.IGNORECASE)
+    explicitly_skipped = re.search(r"(?im)^\s*(?:跳过[:：]|skipped[:：])", output)
+    if result.get("ok") and (all_skipped or explicitly_skipped):
+        reason = "验收入口声明跳过或全部测试被跳过，检查未实际完成，不能计为通过"
+        return {**result, "ok": False, "skipped": True, "issues": [reason],
+                "err": str(result.get("err") or "") + "\n" + reason}
     return result
 
 

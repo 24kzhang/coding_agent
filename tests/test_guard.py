@@ -1155,6 +1155,44 @@ def test_module_verification_entrypoints_are_not_confused_with_servers():
     assert _is_verification_command("uv run --project service python -m package.build")
     assert _is_verification_command("uv run --project service python -m package.smoke")
     assert not _is_verification_command("uv run --project service python -m package.server")
+    assert _is_verification_command("uv run --directory service python tests/view.py")
+    assert _is_verification_command("node e2e/flow.mjs")
+    assert _is_verification_command("uv run python -m tests.live")
+    assert not _is_verification_command("python scripts/serve.py")
+
+
+def test_different_verification_entries_are_reviewed_at_same_source_revision(tmp_path, monkeypatch):
+    from backend.agents import coder as module
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("tests/view.py", "print('界面检查')\n")
+    fs.write("tests/live.py", "print('集成检查')\n")
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = True\n"}]},
+        {"actions": [{"tool": "run_command", "cmd": "python tests/view.py"}]},
+        {"actions": [{"tool": "run_command", "cmd": "python tests/live.py"}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="TEST_ONLY_KEY", model="generic", capabilities=[]))
+    client.chat_json = lambda *_args, **_kwargs: next(replies)
+    graph._client = lambda *_args: client
+    reviews = []
+    monkeypatch.setattr(module, "review_before_verification", lambda _graph, _state, _fs, _files, command: reviews.append(command) or [])
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda command, **_kwargs: {"cmd": command, "ok": True, "code": 0, "out": "通过", "err": ""})
+    state = coder(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "实现并验证", "task_type": "code_gen"})
+    assert state["coding_ok"]
+    assert reviews == ["python tests/view.py", "python tests/live.py"]
+    assert state["verification_commands"] == reviews
+
+
+def test_skipped_check_cannot_be_counted_as_successful_tool_result(tmp_path):
+    graph = make_graph(tmp_path)
+    fs = FsTool(str(tmp_path / "work"))
+    shell = SimpleNamespace(run=lambda command, **_kwargs: {"cmd": command, "ok": True, "code": 0,
+        "out": "跳过：运行时不可用，检查未执行", "err": ""})
+    result = graph._do_action({"tool": "run_command", "cmd": "python tests/view.py"}, fs, shell, GitTool(str(fs.root)))
+    assert not result["ok"] and result["result"]["skipped"]
+    assert result["result"]["code"] == 0
+    assert "不能计为通过" in result["text"]
 
 
 @pytest.mark.parametrize("project", ["service", "portal"])

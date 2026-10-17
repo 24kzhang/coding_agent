@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 
 from api.schema import AgentEvent, ModelConfig, SkillContext, TaskResult
 from backend.agents.answer import answer
-from backend.agents.coder import coder
+from backend.agents.coder import _is_verification_command, coder
 from backend.agents.doc import doc
 from backend.agents.final import final
 from backend.agents.manager import manager
@@ -23,7 +23,7 @@ from backend.agents.planner import planner
 from backend.agents.prompts import MANAGER_PROMPT
 from backend.agents.repo import repo
 from backend.agents.types import AgentState
-from backend.agents.verifier import verifier
+from backend.agents.verifier import _reject_critical_warnings, _reject_empty_tests, verifier
 from backend.agents.web import dialog_style_issues
 from backend.capabilities import McpClient, McpServerConfig
 from backend.clock import utc_stamp
@@ -242,6 +242,8 @@ class AgentGraph:
             result = shell.run(actual, timeout=timeout, cwd=cwd)
         if actual != command:
             result["requested_cmd"] = command
+        if _is_verification_command(command):
+            result = _reject_empty_tests(_reject_critical_warnings(result))
         return result
 
     def _run_node(

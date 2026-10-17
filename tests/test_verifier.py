@@ -9,12 +9,24 @@ from backend.agents.prompts import CODER_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
 from backend.agents.verifier import (
     _private_model_config_facts,
     _reject_critical_warnings,
+    _reject_empty_tests,
     _typescript_project_checks,
     verifier,
 )
 from backend.memory import MemoryStore
 from backend.tools import FsTool
 from llm import LlmBalanceError, ModelStore
+
+
+@pytest.mark.parametrize("output,passed", [
+    ("2 skipped in 0.1s", False),
+    ("3 passed, 1 skipped in 0.1s", True),
+    ("跳过：浏览器未安装，检查未执行", False),
+    ("通过：界面控件已实际操作", True),
+])
+def test_skipped_only_verification_is_not_completion(output, passed):
+    result = _reject_empty_tests({"cmd": "python -m pytest", "ok": True, "out": output, "err": ""})
+    assert result["ok"] is passed
 
 
 def test_agent_prompts_allow_different_state_architectures() -> None:
