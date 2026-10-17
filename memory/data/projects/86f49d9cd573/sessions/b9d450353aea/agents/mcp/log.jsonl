@@ -1,0 +1,9 @@
+{"id":12,"ts":"2026-10-17T13:58:32Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「GitHub（只读）」已连接，发现 26 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:58:32Z"}}
+{"id":13,"ts":"2026-10-17T13:58:39Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「网络搜索（常驻）」已连接，发现 2 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:58:39Z"}}
+{"id":15,"ts":"2026-10-17T13:58:41Z","ag":"mcp","tl":"event","k":"tool","out":"已调用 mcp__github__get_me：成功","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:58:41Z"}}
+{"id":27,"ts":"2026-10-17T13:59:08Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「GitHub（只读）」已连接，发现 26 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:59:08Z"}}
+{"id":28,"ts":"2026-10-17T13:59:11Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「网络搜索（常驻）」已连接，发现 2 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:59:11Z"}}
+{"id":38,"ts":"2026-10-17T13:59:14Z","ag":"mcp","tl":"event","k":"tool","out":"已调用 mcp__github__search_repositories：成功","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:59:14Z"}}
+{"id":50,"ts":"2026-10-17T13:59:59Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「GitHub（只读）」已连接，发现 26 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T13:59:59Z"}}
+{"id":51,"ts":"2026-10-17T14:00:03Z","ag":"mcp","tl":"event","k":"ready","out":"MCP「网络搜索（常驻）」已连接，发现 2 个工具","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T14:00:03Z"}}
+{"id":61,"ts":"2026-10-17T14:00:06Z","ag":"mcp","tl":"event","k":"tool","out":"已调用 mcp__github__get_file_contents：成功","m":{"tokens":0,"data":{},"event_ts":"2026-10-17T14:00:06Z"}}
