@@ -59,3 +59,20 @@ bootstrap()
 main()
 ''')
     assert not command_issues(fs, {'text': '项目输出到 portal'}, 'python probe.py')
+
+
+def test_later_logging_cannot_create_input_for_earlier_module_read(tmp_path):
+    fs = FsTool(str(tmp_path / 'work'))
+    fs.write('inputs/data.json', '[]')
+    source = '''import json
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'inputs' / 'data.json'
+rows = json.loads(DATA.read_text())
+print('数量', len(rows))
+'''
+    fs.write('portal/tools/probe.py', source)
+    state = {'text': '项目输出到 portal'}
+    assert command_issues(fs, state, 'python tools/probe.py')
+    fs.write('portal/tools/probe.py', source.replace('.parent.parent', '.parents[2]'))
+    assert not command_issues(fs, state, 'python tools/probe.py')

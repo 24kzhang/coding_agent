@@ -330,7 +330,7 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
     for target, node, derived, chain in reads:
         # 参数先于外层调用求值；外层 json.loads 等不能替内层读取创建文件。
         previous = [call for call in opaque_calls if call not in chain and (call.lineno, call.col_offset) < (node.lineno, node.col_offset)]
-        if previous or (derived and any(owner(call) is None and call not in chain for call in opaque_calls)):
+        if previous or (derived and owner(node) is not None and any(owner(call) is None and call not in chain for call in opaque_calls)):
             continue
         if target not in writes and not target.is_file():
             return [f"脚本尚未执行：{script.relative_to(fs.root)}:{node.lineno} 的静态只读输入 {target} 不存在。请按实际脚本位置逐级解析父目录，交付目录不等于输入工作区；动态路径与异常回退仍由实际运行验证。"]
