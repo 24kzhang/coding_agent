@@ -72,11 +72,11 @@ type PendingImage = {
 
 // API 是后端地址，启动脚本会通过 VITE_API_URL 注入动态端口。
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8710";
-// agents 是左侧“智能体模型”和右侧状态条共享的智能体展示列表。
+// agents 是设置页面和运行状态共享的智能体展示列表。
 const agents: Array<{ id: AgentName; name: string }> = [
   { id: "manager", name: "管理者" },
-  { id: "planner", name: "Plan" },
-  { id: "coder", name: "Coding" },
+  { id: "planner", name: "规划" },
+  { id: "coder", name: "编程" },
   { id: "verifier", name: "验证测试" },
   { id: "answer", name: "答疑" },
   { id: "doc", name: "文档" },
@@ -120,7 +120,7 @@ function App() {
   const runLockRef = useRef(false);
   // guidanceLockRef 防止同一段指导被快速重复提交；瞬时互斥无需触发界面重渲染。
   const guidanceLockRef = useRef(false);
-  // events 是右侧事件流数据。
+  // events 是左侧事件流数据。
   const [events, setEvents] = useState<AgentEvent[]>([]);
   // result 保存最近一次任务最终结果。
   const [result, setResult] = useState<TaskResult | null>(null);
@@ -128,7 +128,14 @@ function App() {
   const [notice, setNotice] = useState("等待会话启动");
   // messages 是中间对话窗口展示的用户消息和 agent 最终回复。
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  // modelModalOpen 控制新增/编辑模型弹窗是否显示。
+  // 设置使用原生模态窗口，自动管理焦点、键盘关闭和背景隔离。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRef = useRef<HTMLDialogElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelError, setModelError] = useState("");
+  // modelModalOpen 控制设置窗口是否进入模型编辑页。
   const [modelModalOpen, setModelModalOpen] = useState(false);
   // editingModelId 非空表示正在编辑已有模型，此时唯一 id 不允许改名。
   const [editingModelId, setEditingModelId] = useState("");
@@ -159,6 +166,18 @@ function App() {
   // eventRef 指向事件流滚动容器，新事件到达后自动滚到底部。
   const eventRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (settingsOpen && !settingsRef.current?.open) settingsRef.current?.showModal();
+  }, [settingsOpen]);
+
+  function closeSettings() {
+    // 先关闭原生窗口再卸载，确保背景恢复可交互并将焦点还给设置入口。
+    settingsRef.current?.close();
+    setSettingsOpen(false);
+    setModelModalOpen(false);
+    settingsButtonRef.current?.focus();
+  }
 
   // 组件首次挂载时加载模型配置。
   useEffect(() => {
@@ -346,6 +365,8 @@ function App() {
   async function saveModel(event: FormEvent) {
     // 阻止表单默认刷新页面。
     event.preventDefault();
+    setModelSaving(true);
+    setModelError("");
     try {
       await requestJson<ModelConfig>(`${API}/api/models`, {
         method: "POST",
@@ -357,7 +378,10 @@ function App() {
       setEditingModelId("");
       await loadModels();
     } catch (error) {
+      setModelError(errorMessage(error));
       setNotice(errorMessage(error));
+    } finally {
+      setModelSaving(false);
     }
   }
 
@@ -375,7 +399,7 @@ function App() {
 
   async function testModel(id: string, showInModal = false) {
     // id 是要测试连通性的模型 id。
-    // showInModal 为 true 时同步更新弹窗反馈，左侧快捷测试仍只更新主页面状态。
+    // showInModal 为 true 时同步更新编辑页反馈，列表测试结果显示在设置页底部。
     if (showInModal) {
       setModelTestState({ status: "testing", message: "正在连接模型接口..." });
     }
@@ -399,6 +423,7 @@ function App() {
 
   async function saveProfiles(next: AgentProfileMap) {
     const previous = profiles;
+    setProfileSaving(true);
     setProfiles(next);
     try {
       await requestJson<AgentProfileMap>(`${API}/api/agent-profiles`, {
@@ -406,10 +431,12 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next)
       });
-      setNotice("Agent 模型与思考等级已保存");
+      setNotice("智能体模型与思考等级已保存");
     } catch (error) {
       setProfiles(previous);
       setNotice(errorMessage(error));
+    } finally {
+      setProfileSaving(false);
     }
   }
 
@@ -801,91 +828,35 @@ function App() {
   return (
     <main className="shell">
       <section className="grid">
-        {/* 左侧栏：模型配置和每个智能体的模型选择。 */}
-        <aside className="panel side">
-          <div className="side-section">
-            <SectionTitle icon={<Settings size={18} />} text="模型配置" />
-            <span className="section-count">{models.length}</span>
+        {/* 左侧事件流与设置入口。 */}
+        <aside className="panel log event-panel" aria-label="事件流">
+          <div className="event-head">
+            <SectionTitle icon={<RadioTower size={18} />} text="事件流" />
+            <div className="event-head-actions">
+              <span className="section-count" aria-label="事件数量">{events.length}</span>
+              <button ref={settingsButtonRef} className="ghost settings-button" type="button" onClick={() => setSettingsOpen(true)} aria-haspopup="dialog">
+                <Settings size={15} /> 设置
+              </button>
+            </div>
           </div>
-          <div className="model-list">
-            {models.length === 0 && <p className="muted empty-models">尚未配置模型</p>}
-            {models.map((model) => (
-              <div className="line" key={model.id}>
-                <button
-                  className="ghost text-left model-name-button"
-                  onClick={() => {
-                    setDraft({ ...model, api_key: "" });
-                    setEditingModelId(model.id);
-                    setModelTestState({ status: "idle", message: "" });
-                    setModelModalOpen(true);
-                  }}
-                  title="编辑模型"
-                >
-                  <Cpu size={14} />
-                  <span>{model.name}</span>
-                </button>
-                <button className="icon model-action-button" onClick={() => testModel(model.id)} title="测试连通性" disabled={running}>
-                  <RadioTower size={14} />
-                </button>
-                <button className="icon danger model-action-button" onClick={() => deleteModel(model.id)} title="删除模型" disabled={running}>
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
-            <button
-              className="ghost"
-              onClick={() => {
-                setDraft(emptyModel());
-                setEditingModelId("");
-                setModelTestState({ status: "idle", message: "" });
-                setModelModalOpen(true);
-              }}
-            >
-              <Plus size={16} /> 新增模型
-            </button>
-          </div>
-
-          <div className="side-section agent-map-title">
-            <SectionTitle icon={<Bot size={18} />} text="Agent 配置" />
-            <span className="section-count">{agents.length}</span>
-          </div>
-          <div className="map-list">
-            {agents.map((agent) => (
-              <div className="agent-setting" key={agent.id}>
-                <span>{agent.name}</span>
-                <select
-                  aria-label={`${agent.name}模型`}
-                  value={profiles[agent.id]?.model_id ?? ""}
-                  onChange={(e) => void saveProfiles({
-                    ...profiles,
-                    [agent.id]: { ...profiles[agent.id], model_id: e.target.value }
-                  })}
-                  disabled={models.length === 0 || running}
-                >
-                  <option value="">首个启用模型</option>
-                  {models.map((model) => (
-                    <option value={model.id} key={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label={`${agent.name}思考等级`}
-                  value={profiles[agent.id]?.effort ?? "inherit"}
-                  onChange={(e) => void saveProfiles({
-                    ...profiles,
-                    [agent.id]: {
-                      ...profiles[agent.id],
-                      effort: e.target.value as ReasoningEffort
-                    }
-                  })}
-                  disabled={models.length === 0 || running}
-                >
-                  {effortOptions.filter((item) => item.value === "inherit" || (models.find((model) => model.id === profiles[agent.id]?.model_id) ?? models.find((model) => model.enabled))?.efforts.includes(item.value)).map((item) => (
-                    <option value={item.value} key={item.value}>{item.label}</option>
-                  ))}
-                </select>
-              </div>
+          <div className="events" ref={eventRef}>
+            {events.length === 0 && <p className="muted empty-events">执行任务后，事件将在这里按时间展示</p>}
+            {events.map((event) => (
+              <article key={`${event.id}-${event.ts}`} className="event">
+                <div>
+                  <span className="event-index">{String(event.id).padStart(2, "0")}</span>
+                  <span className="tag">{agentName(event.agent)}</span>
+                  <span className="kind">{event.kind}</span>
+                  <time>{formatEventTime(event.ts)}</time>
+                </div>
+                <p className="event-message" tabIndex={0}>{event.msg}</p>
+                {event.data && Object.keys(event.data).length > 0 && (
+                  <details className="event-detail">
+                    <summary>查看详细信息</summary>
+                    <pre>{JSON.stringify(event.data, null, 2)}</pre>
+                  </details>
+                )}
+              </article>
             ))}
           </div>
         </aside>
@@ -896,13 +867,13 @@ function App() {
             {messages.length === 0 && (
               <div className="empty-chat">
                 <FileText size={28} />
-                <p>这里会展示你和 agent 的多轮对话。</p>
+                <p>选择项目，开始与智能体协作。</p>
               </div>
             )}
             {messages.map((msg) => (
               <div className={`message-row ${msg.role}`} key={msg.id}>
                 <article className={`bubble ${msg.role}`}>
-                  <span className="message-role">{msg.role === "user" ? "用户" : "Agent"}</span>
+                  <span className="message-role">{msg.role === "user" ? "用户" : "智能体"}</span>
                   {!!msg.attachments?.length && (
                     <div className="message-images">
                       {msg.attachments.map((attachment) => (
@@ -929,14 +900,14 @@ function App() {
           </div>
         </section>
 
-        {/* 右侧栏：运行状态和事件流。 */}
+        {/* 右侧运行状态独立滚动，内容较多时保持完整可读。 */}
         <aside className="right-col">
-          <section className="panel status">
+          <section className="panel status" aria-label="运行状态" tabIndex={0}>
             <div className="status-title">
               <SectionTitle icon={<Activity size={18} />} text="运行状态" />
               <div className="health">
                 {running ? <Loader2 className="spin" size={15} /> : <Circle className="status-dot" size={10} fill="currentColor" />}
-                <span>{notice}</span>
+                <ScrollText text={notice} className="notice-text" />
               </div>
             </div>
             <div className="metrics">
@@ -945,9 +916,9 @@ function App() {
               <Metric label={usage.estimated ? "Token 用量（含估算）" : "Token 用量"} value={String(tokenTotal || result?.tokens || 0)} />
               <button className="metric clickable" type="button" disabled={!sessionId} onClick={() => void renameCurrentSession()} title={sessionId ? `会话 ID：${sessionId}` : "未创建会话"}>
                 <span>会话</span>
-                <strong>{sessionId ? sessionTitle || sessionId : "未创建"}</strong>
+                <strong><ScrollText text={sessionId ? sessionTitle || sessionId : "未创建"} focusable={false} /></strong>
               </button>
-              <Metric label="项目" value={workdir ? shortPath(workdir) : "未选择"} />
+              <Metric label="项目" value={workdir || "未选择"} />
               <Metric label={result?.metrics_estimated ? "耗时（估算）" : "耗时"} value={result ? formatDuration(result.duration_ms) : "--"} />
             </div>
             <div className="usage-breakdown" aria-label="模型用量明细">
@@ -958,42 +929,18 @@ function App() {
             </div>
             <div className="agent-board">
               {agents.map((agent) => (
-                <article className={agent.id === activeAgent ? "agent-card active" : "agent-card"} key={agent.id}>
+                <article className={agent.id === activeAgent ? "agent-card active" : "agent-card"} data-agent={agent.id} key={agent.id}>
                   <div>
                     <span className="agent-mark"><Bot size={14} /></span>
                     <strong>{agent.name}</strong>
                     <span className={`agent-state ${agentStats[agent.id].state}`}>{agentStats[agent.id].state}</span>
                   </div>
-                  <p>{agentStats[agent.id].task}</p>
+                  <p className="agent-task" tabIndex={0} aria-label={`${agent.name}当前任务`}>{agentStats[agent.id].task}</p>
                   <footer>
-                    <span>{models.find((model) => model.id === (agentStats[agent.id].modelId || profiles[agent.id]?.model_id))?.name ?? "自动选择"}{agentStats[agent.id].modelId ? "" : "（默认）"}</span>
+                    <ScrollText text={`${models.find((model) => model.id === (agentStats[agent.id].modelId || profiles[agent.id]?.model_id))?.name ?? "自动选择"}${agentStats[agent.id].modelId ? "" : "（默认）"}`} />
                     <span><Brain size={12} /> {effortLabel(agentStats[agent.id].effort || profiles[agent.id]?.effort || "inherit")}{agentStats[agent.id].effort ? "" : "（默认）"}</span>
                     <span>{agentStats[agent.id].tokens} tok</span>
                   </footer>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel log">
-            <SectionTitle icon={<RadioTower size={18} />} text="事件流" />
-            <div className="events" ref={eventRef}>
-              {events.length === 0 && <p className="muted empty-events">任务事件将在这里按时间出现</p>}
-              {events.map((event) => (
-                <article key={`${event.id}-${event.ts}`} className="event">
-                  <div>
-                    <span className="event-index">{String(event.id).padStart(2, "0")}</span>
-                    <span className="tag">{agentName(event.agent)}</span>
-                    <span className="kind">{event.kind}</span>
-                    <time>{formatEventTime(event.ts)}</time>
-                  </div>
-                  <p>{event.msg}</p>
-                  {event.data && Object.keys(event.data).length > 0 && (
-                    <details className="event-detail">
-                      <summary>查看详细信息</summary>
-                      <pre>{JSON.stringify(event.data, null, 2)}</pre>
-                    </details>
-                  )}
                 </article>
               ))}
             </div>
@@ -1106,123 +1053,255 @@ function App() {
           </div>
         </section>
 
-        {/* 模型新增/编辑弹窗。 */}
-        {modelModalOpen && (
-          <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="模型配置表单">
-            <form className="modal" onSubmit={saveModel}>
-              <div className="modal-head">
-                <h2>
-                  <Settings size={18} />
-                  模型配置
-                </h2>
-                <button className="icon" type="button" onClick={() => setModelModalOpen(false)} title="关闭">
-                  <XCircle size={18} />
-                </button>
-              </div>
-              <label>
-                <span>配置 ID</span>
-                <input value={draft.id} onChange={(e) => setDraft({ ...draft, id: e.target.value })} placeholder="例如 longcat" disabled={Boolean(editingModelId)} />
-              </label>
-              <label>
-                <span>显示名称</span>
-                <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="模型显示名称" />
-              </label>
-              <label>
-                <span>接口地址</span>
-                <input value={draft.base_url} onChange={(e) => setDraft({ ...draft, base_url: e.target.value })} placeholder="https://..." />
-              </label>
-              <label>
-                <span>模型名称</span>
-                <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} placeholder="供应商模型名称" />
-              </label>
-              <label>
-                <span>API Key</span>
-                <input value={draft.api_key ?? ""} onChange={(e) => setDraft({ ...draft, api_key: e.target.value })} placeholder={draft.has_key ? `${draft.key_hint ?? "已配置"}（留空保持不变）` : "API Key"} type="password" />
-              </label>
-              <div className="row">
-                <label>
-                  <span>上下文窗口</span>
-                  <input value={draft.ctx} onChange={(e) => setDraft({ ...draft, ctx: Number(e.target.value) })} type="number" />
-                </label>
-                <label>
-                  <span>超时秒数</span>
-                  <input value={draft.timeout} onChange={(e) => setDraft({ ...draft, timeout: Number(e.target.value) })} type="number" />
-                </label>
-              </div>
-              <div className="row">
-                <label>
-                  <span>调用协议</span>
-                  <select value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ModelConfig["protocol"] })}>
-                    <option value="auto">自动探测</option>
-                    <option value="responses">Responses API</option>
-                    <option value="chat_completions">Chat Completions</option>
-                  </select>
-                </label>
-                <label>
-                  <span>默认思考等级</span>
-                  <select value={draft.default_effort} onChange={(e) => setDraft({ ...draft, default_effort: e.target.value as ReasoningEffort })}>
-                    {effortOptions.filter((item) => item.value !== "inherit").map((item) => (
-                      <option value={item.value} key={item.value}>{item.label}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <label>
-                <span>最大输出 Token</span>
-                <input value={draft.max_output_tokens} onChange={(e) => setDraft({ ...draft, max_output_tokens: Number(e.target.value) })} type="number" />
-              </label>
-              <fieldset className="capability-flags">
-                <legend>模型能力</legend>
-                {(["text", "vision", "tools", "reasoning"] as const).map((capability) => (
-                  <label key={capability}>
-                    <input
-                      type="checkbox"
-                      checked={draft.capabilities.includes(capability)}
-                      onChange={() => setDraft({
-                        ...draft,
-                        capabilities: draft.capabilities.includes(capability)
-                          ? draft.capabilities.filter((item) => item !== capability)
-                          : [...draft.capabilities, capability]
-                      })}
-                    />
-                    <span>{{ text: "文本", vision: "视觉", tools: "工具", reasoning: "推理" }[capability]}</span>
-                  </label>
-                ))}
-              </fieldset>
-              <label className="toggle model-enabled">
-                <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
-                <span>启用此模型</span>
-              </label>
-              {modelTestState.status !== "idle" && (
-                <div
-                  className={`model-test-result ${modelTestState.status}`}
-                  role="status"
-                  aria-live="polite"
-                >
-                  {modelTestState.status === "testing" && <Loader2 className="spin" size={16} />}
-                  {modelTestState.status === "success" && <Check size={16} />}
-                  {modelTestState.status === "error" && <XCircle size={16} />}
-                  <span>{modelTestState.message}</span>
-                </div>
-              )}
-              <div className="modal-actions">
-                {draft.id && (
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={() => void testModel(draft.id, true)}
-                    disabled={modelTestState.status === "testing"}
-                  >
-                    {modelTestState.status === "testing" ? <Loader2 className="spin" size={16} /> : <RadioTower size={16} />}
-                    测试连通性
+        {/* 模型与智能体配置集中在设置页，模型编辑后返回配置总览。 */}
+        {settingsOpen && (
+          <dialog
+            ref={settingsRef}
+            className={`modal settings-modal${modelModalOpen ? " editing" : ""}`}
+            aria-label="设置"
+            onCancel={(event) => {
+              event.preventDefault();
+              if (modelModalOpen) setModelModalOpen(false);
+              else closeSettings();
+            }}
+            onClose={() => setSettingsOpen(false)}
+            onClick={(event) => {
+              if (event.target === event.currentTarget) {
+                const bounds = event.currentTarget.getBoundingClientRect();
+                if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
+                  closeSettings();
+                }
+              }
+            }}
+          >
+            {modelModalOpen ? (
+              <form className="settings-editor" onSubmit={saveModel}>
+                <div className="modal-head">
+                  <h2>
+                    <Settings size={18} />
+                    模型配置
+                  </h2>
+                  <button className="icon" type="button" onClick={() => setModelModalOpen(false)} title="返回设置">
+                    <X size={18} />
                   </button>
+                </div>
+                <label>
+                  <span>配置 ID</span>
+                  <input value={draft.id} onChange={(e) => setDraft({ ...draft, id: e.target.value })} placeholder="例如 longcat" disabled={Boolean(editingModelId)} />
+                </label>
+                <label>
+                  <span>显示名称</span>
+                  <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="模型显示名称" autoFocus />
+                </label>
+                <label>
+                  <span>接口地址</span>
+                  <input value={draft.base_url} onChange={(e) => setDraft({ ...draft, base_url: e.target.value })} placeholder="https://..." />
+                </label>
+                <label>
+                  <span>模型名称</span>
+                  <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} placeholder="供应商模型名称" />
+                </label>
+                <label>
+                  <span>接口密钥</span>
+                  <input value={draft.api_key ?? ""} onChange={(e) => setDraft({ ...draft, api_key: e.target.value })} placeholder={draft.has_key ? `${draft.key_hint ?? "已配置"}（留空保持不变）` : "请输入接口密钥"} type="password" />
+                </label>
+                <div className="row">
+                  <label>
+                    <span>上下文窗口</span>
+                    <input value={draft.ctx} onChange={(e) => setDraft({ ...draft, ctx: Number(e.target.value) })} type="number" />
+                  </label>
+                  <label>
+                    <span>超时秒数</span>
+                    <input value={draft.timeout} onChange={(e) => setDraft({ ...draft, timeout: Number(e.target.value) })} type="number" />
+                  </label>
+                </div>
+                <div className="row">
+                  <label>
+                    <span>调用协议</span>
+                    <select value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ModelConfig["protocol"] })}>
+                      <option value="auto">自动探测</option>
+                      <option value="responses">Responses API</option>
+                      <option value="chat_completions">Chat Completions</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>默认思考等级</span>
+                    <select value={draft.default_effort} onChange={(e) => setDraft({ ...draft, default_effort: e.target.value as ReasoningEffort })}>
+                      {effortOptions.filter((item) => item.value !== "inherit").map((item) => (
+                        <option value={item.value} key={item.value}>{item.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  <span>最大输出词元数</span>
+                  <input value={draft.max_output_tokens} onChange={(e) => setDraft({ ...draft, max_output_tokens: Number(e.target.value) })} type="number" />
+                </label>
+                <fieldset className="capability-flags">
+                  <legend>模型能力</legend>
+                  {(["text", "vision", "tools", "reasoning"] as const).map((capability) => (
+                    <label key={capability}>
+                      <input
+                        type="checkbox"
+                        checked={draft.capabilities.includes(capability)}
+                        onChange={() => setDraft({
+                          ...draft,
+                          capabilities: draft.capabilities.includes(capability)
+                            ? draft.capabilities.filter((item) => item !== capability)
+                            : [...draft.capabilities, capability]
+                        })}
+                      />
+                      <span>{{ text: "文本", vision: "视觉", tools: "工具", reasoning: "推理" }[capability]}</span>
+                    </label>
+                  ))}
+                </fieldset>
+                <label className="toggle model-enabled">
+                  <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
+                  <span>启用此模型</span>
+                </label>
+                {modelTestState.status !== "idle" && (
+                  <div
+                    className={`model-test-result ${modelTestState.status}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {modelTestState.status === "testing" && <Loader2 className="spin" size={16} />}
+                    {modelTestState.status === "success" && <Check size={16} />}
+                    {modelTestState.status === "error" && <XCircle size={16} />}
+                    <span>{modelTestState.message}</span>
+                  </div>
                 )}
-                <button className="primary" type="submit">
-                  <Save size={16} /> 保存模型
-                </button>
-              </div>
-            </form>
-          </div>
+                {modelError && <p className="model-error" role="alert">{modelError}</p>}
+                <div className="modal-actions">
+                  <button className="ghost" type="button" onClick={() => setModelModalOpen(false)}>返回设置</button>
+                  {editingModelId && (
+                    <button
+                      className="secondary"
+                      type="button"
+                      onClick={() => void testModel(draft.id, true)}
+                      disabled={modelTestState.status === "testing"}
+                    >
+                      {modelTestState.status === "testing" ? <Loader2 className="spin" size={16} /> : <RadioTower size={16} />}
+                      测试连通性
+                    </button>
+                  )}
+                  <button className="primary" type="submit" disabled={modelSaving}>
+                    {modelSaving ? <Loader2 className="spin" size={16} /> : <Save size={16} />} {modelSaving ? "正在保存…" : "保存模型"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="modal-head settings-head">
+                  <div>
+                    <h2><Settings size={19} /> 设置</h2>
+                    <p className="muted">统一管理模型连接与智能体分工</p>
+                  </div>
+                  <button className="icon ghost" type="button" onClick={closeSettings} title="关闭设置" autoFocus>
+                    <X size={18} />
+                  </button>
+                </div>
+                <div className="settings-grid">
+                  <section className="settings-section" aria-label="模型配置">
+                    <div className="side-section">
+                      <SectionTitle icon={<Settings size={18} />} text="模型配置" />
+                      <span className="section-count">{models.length}</span>
+                    </div>
+                    <div className="model-list">
+                      {models.length === 0 && <p className="muted empty-models">尚未配置模型</p>}
+                      {models.map((model) => (
+                        <div className="line" key={model.id}>
+                          <button
+                            className="ghost text-left model-name-button"
+                            onClick={() => {
+                              setDraft({ ...model, api_key: "" });
+                              setEditingModelId(model.id);
+                              setModelTestState({ status: "idle", message: "" });
+                              setModelError("");
+                              setModelModalOpen(true);
+                            }}
+                            disabled={running || profileSaving}
+                            title="编辑模型"
+                          >
+                            <Cpu size={14} />
+                            <span>{model.name}</span>
+                          </button>
+                          <button className="icon model-action-button" onClick={() => testModel(model.id)} title="测试连通性" disabled={running || profileSaving}>
+                            <RadioTower size={14} />
+                          </button>
+                          <button className="icon danger model-action-button" onClick={() => deleteModel(model.id)} title="删除模型" disabled={running || profileSaving}>
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        className="ghost"
+                        disabled={running || profileSaving}
+                        onClick={() => {
+                          setDraft(emptyModel());
+                          setEditingModelId("");
+                          setModelTestState({ status: "idle", message: "" });
+                          setModelError("");
+                          setModelModalOpen(true);
+                        }}
+                      >
+                        <Plus size={16} /> 新增模型
+                      </button>
+                    </div>
+                  </section>
+                  <section className="settings-section" aria-label="智能体配置">
+                    <div className="side-section agent-map-title">
+                      <SectionTitle icon={<Bot size={18} />} text="智能体配置" />
+                      <span className="section-count">{agents.length}</span>
+                    </div>
+                    <div className="map-list">
+                      {agents.map((agent) => (
+                        <div className="agent-setting" key={agent.id}>
+                          <span>{agent.name}</span>
+                          <select
+                            aria-label={`${agent.name}模型`}
+                            value={profiles[agent.id]?.model_id ?? ""}
+                            onChange={(e) => void saveProfiles({
+                              ...profiles,
+                              [agent.id]: { ...profiles[agent.id], model_id: e.target.value }
+                            })}
+                            disabled={models.length === 0 || running || profileSaving}
+                          >
+                            <option value="">首个启用模型</option>
+                            {models.map((model) => (
+                              <option value={model.id} key={model.id}>
+                                {model.name}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            aria-label={`${agent.name}思考等级`}
+                            value={profiles[agent.id]?.effort ?? "inherit"}
+                            onChange={(e) => void saveProfiles({
+                              ...profiles,
+                              [agent.id]: {
+                                ...profiles[agent.id],
+                                effort: e.target.value as ReasoningEffort
+                              }
+                            })}
+                            disabled={models.length === 0 || running || profileSaving}
+                          >
+                            {effortOptions.filter((item) => item.value === "inherit" || (models.find((model) => model.id === profiles[agent.id]?.model_id) ?? models.find((model) => model.enabled))?.efforts.includes(item.value)).map((item) => (
+                              <option value={item.value} key={item.value}>{item.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+                <div className="settings-footer">
+                  <p role="status">{running ? "任务执行中，配置暂不可修改。" : profileSaving ? "正在保存智能体配置…" : notice}</p>
+                  <button className="primary" type="button" onClick={closeSettings}>完成</button>
+                </div>
+              </>
+            )}
+          </dialog>
         )}
 
         {/* 能力弹窗：手动多选本轮使用的 Skills 和 MCP 服务。 */}
@@ -1469,8 +1548,38 @@ function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong><ScrollText text={value} /></strong>
     </div>
+  );
+}
+
+function ScrollText({ text, className = "", focusable = true }: { text: string; className?: string; focusable?: boolean }) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [distance, setDistance] = useState(0);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = textRef.current;
+    if (!viewport || !content) return;
+    const measure = () => setDistance(Math.max(0, content.scrollWidth - viewport.clientWidth));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [text]);
+
+  return (
+    <span
+      ref={viewportRef}
+      className={`scroll-text ${distance > 0 ? "is-overflowing" : ""} ${className}`}
+      title={text}
+      tabIndex={distance > 0 && focusable ? 0 : undefined}
+      style={{ "--scroll-distance": `${-distance}px`, "--scroll-duration": `${Math.max(6, distance / 26)}s` } as React.CSSProperties}
+    >
+      <span className="scroll-text-content" ref={textRef}>{text}</span>
+    </span>
   );
 }
 
@@ -1524,12 +1633,6 @@ function eventOwner(event: AgentEvent | undefined): string | undefined {
 function agentName(id: string) {
   // agentName 把后端事件中的 agent id 转成中文显示名。
   return agents.find((agent) => agent.id === id)?.name ?? id;
-}
-
-function shortPath(path: string) {
-  // shortPath 只展示路径最后两段，避免状态卡片被长路径撑开。
-  const parts = path.split("/");
-  return parts.slice(-2).join("/") || path;
 }
 
 function formatTime(value: string) {
