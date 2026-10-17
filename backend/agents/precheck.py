@@ -337,6 +337,84 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
     return []
 
 
+def imported_inputs(fs: FsTool, state: dict, files: list[str], command: str) -> list[str]:
+    """沿实际 Python 入口的无条件本地导入检查输入，不执行模块或猜测动态导入。"""
+
+    cwd, actual = command_scope(fs, state, command)
+    try:
+        argv = shlex.split(actual)
+    except ValueError:
+        return []
+    cwd = process_cwd(cwd, argv)
+    root = delivery_root(fs, state)
+    seeds = []
+    is_pytest = any(Path(arg).name == "pytest" for arg in argv)
+    if is_pytest:
+        start = next(index for index, arg in enumerate(argv) if Path(arg).name == "pytest") + 1
+        selected = [cwd / arg.split("::", 1)[0] for arg in argv[start:] if not arg.startswith("-") and (cwd / arg.split("::", 1)[0]).exists()] or [cwd]
+        for rel in files:
+            path = fs.safe(rel)
+            in_selection = any(path == target or target in path.parents or path.name == "conftest.py" and path.parent in target.parents for target in selected)
+            if in_selection and path.suffix == ".py" and (path.name == "conftest.py" or path.name.startswith("test_") or path.name.endswith("_test.py")) and (root == fs.root or root in path.parents):
+                seeds.append(path)
+    else:
+        for index, arg in enumerate(argv[:-1]):
+            if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(arg).name) and argv[index + 1].endswith(".py"):
+                seeds.append(cwd / argv[index + 1])
+    search_roots = [cwd, root, root / "src"]
+    visited = set()
+    while seeds:
+        path = seeds.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        try:
+            path = fs.safe(path.relative_to(fs.root).as_posix())
+            if fs.is_sensitive(path) or path.stat().st_size > 100_000:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, SyntaxError, UnicodeError):
+            continue
+        issues = script_inputs(fs, path, cwd)
+        if issues:
+            return issues
+        for node in tree.body:
+            # 条件/异常回退/函数内部导入不保证运行，留给实际验证。
+            if isinstance(node, ast.Import):
+                imports = [(alias.name, 0) for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imports = [(node.module or "", node.level)]
+                if not node.module:
+                    imports = [(alias.name, node.level) for alias in node.names if alias.name != "*"]
+            else:
+                continue
+            for name, level in imports:
+                if level:
+                    base = path.parent
+                    for _ in range(level - 1):
+                        base = base.parent
+                    bases = [base]
+                else:
+                    bases = [path.parent, *search_roots]
+                for base in bases:
+                    parts = name.split(".")
+                    located = False
+                    for count in range(1, len(parts) + 1):
+                        candidate = base.joinpath(*parts[:count])
+                        module = candidate.with_suffix(".py")
+                        package = candidate / "__init__.py"
+                        if package.is_file():
+                            seeds.append(package)
+                            located = True
+                        if module.is_file():
+                            seeds.append(module)
+                            located = True
+                            break
+                    if located:
+                        break
+    return []
+
+
 def assertion_issues(state: dict, action: dict) -> list[str]:
     """源码局部标识不能代替行为断言，用户明确要求的文字禁用约束仍可验证。"""
 

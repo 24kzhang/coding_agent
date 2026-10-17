@@ -11,6 +11,38 @@ from llm.client import LlmClient, LlmError, LlmOutputLimitError, LlmUsage
 from llm.store import ModelStore
 
 
+def test_unconfigured_cost_limits_do_not_interrupt_useful_work(tmp_path, monkeypatch):
+    """累计用量再大也只是统计，不能悄悄启用未配置的成本上限。"""
+    from backend.agents import graph as module
+    for name in ("MAX_MODEL_CALLS", "MAX_UNCACHED_INPUT_TOKENS", "MAX_OUTPUT_TOKENS"):
+        monkeypatch.setattr(module, name, 0)
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    state = {"session_id": "s1", "workdir": str(tmp_path), "model_calls": 100,
+             "uncached_input_tokens": 2_000_000, "output_tokens": 200_000}
+    assert graph._check_model_budget(state, 12_000) == 12_000
+    graph._add_tokens(state, LlmUsage(prompt=80_000, completion=2_000, cache_miss=80_000))
+    assert state["uncached_input_tokens"] == 2_080_000
+    assert state["output_tokens"] == 202_000
+
+
+@pytest.mark.parametrize("value,expected", [(None, 0), ("0", 0), ("1200", 1200)])
+def test_cost_limit_requires_explicit_configuration(monkeypatch, value, expected):
+    from backend.agents.graph import _cost_limit
+    name = "CODING_AGENT_TEST_LIMIT"
+    monkeypatch.delenv(name, raising=False)
+    if value is not None:
+        monkeypatch.setenv(name, value)
+    assert _cost_limit(name) == expected
+
+
+@pytest.mark.parametrize("value", ["invalid", "-1"])
+def test_invalid_cost_limit_is_not_silently_enabled(monkeypatch, value):
+    from backend.agents.graph import _cost_limit
+    monkeypatch.setenv("CODING_AGENT_TEST_LIMIT", value)
+    with pytest.raises(ValueError, match="非负整数"):
+        _cost_limit("CODING_AGENT_TEST_LIMIT")
+
+
 def mapped_config():
     return ModelConfig(id="mapped", name="预算模型", model="generic", base_url="https://example.test/v1", api_key="TEST_ONLY_KEY", protocol="chat_completions", efforts=["low", "medium", "high"], default_effort="low", reasoning_style="effort", effort_map={"low": "light", "medium": "balanced", "high": "deep"}, effort_budgets={"low": 4096, "medium": 16384, "high": 65536})
 

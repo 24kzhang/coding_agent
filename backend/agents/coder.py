@@ -13,6 +13,7 @@ from backend.agents.precheck import (
     assertion_issues,
     command_issues,
     import_issues,
+    imported_inputs,
     inline_issues,
     manifest_issues,
     middleware_issues,
@@ -435,6 +436,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_kind = ""
     pending_native_command = ""
     completed_checks: list[dict] = []
+    # 真正失败的命令保留完整诊断到对应命令通过，不被后续写入观察挤出窗口。
+    failed_checks: dict[str, dict] = {}
     action_protocol_failures = 0
     edit_protocol_failures = 0
     assertion_protocol_failures = 0
@@ -613,6 +616,9 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             )
             + finish_instruction
             + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
+            + ("\n\n本轮仍未通过的真实检查（修改文件不会自动消除失败；先按断言和调用链定位）：\n"
+               + "\n\n".join(f"命令：{command}\n{item['output']}" for command, item in list(failed_checks.items())[-3:])
+               if failed_checks else "")
             + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
             + "\n\n最近工具观察：\n"
             + "\n".join(recent_observations)
@@ -1107,7 +1113,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         break
                     if preflight_kind == "names":
                         preflight_issues, preflight_kind = [], ""
-                    structural_issues = import_issues(fs, state, current_files) + router_issues(fs, state, current_files)
+                    structural_issues = (imported_inputs(fs, state, current_files, str(action["cmd"]))
+                                         + import_issues(fs, state, current_files) + router_issues(fs, state, current_files))
                     if structural_issues:
                         diagnostic_progress = diagnostic_progress or structural_issues != preflight_issues
                         preflight_issues = structural_issues
@@ -1120,7 +1127,7 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         preflight_kind = ""
                     fresh_review = preflight_revision != file_revision
                     if fresh_review:
-                        preflight_issues = middleware_issues(fs, state, current_files) + review_before_verification(graph, {**state, "completed_checks": completed_checks}, fs, current_files, str(action["cmd"]))
+                        preflight_issues = middleware_issues(fs, state, current_files) + review_before_verification(graph, {**state, "completed_checks": completed_checks, "failed_checks": list(failed_checks.values())}, fs, current_files, str(action["cmd"]))
                         preflight_kind = "review" if preflight_issues else ""
                         preflight_revision = file_revision
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
@@ -1135,6 +1142,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
+            if tool == "run_command" and not observation.get("cached") and observation.get("result"):
+                command = str(action.get("cmd") or "")
+                if observation.get("ok"):
+                    failed_checks.pop(command, None)
+                elif (observation.get("result") or {}).get("code") != 126:
+                    failed_checks[command] = {"command": command, "output": _middle_trim(str(observation["text"]), 12_000)}
             if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _is_dependency_mutation_command(str(action.get("cmd", ""))):
                 version_cache.clear()
             if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _version_query(str(action.get("cmd", ""))):

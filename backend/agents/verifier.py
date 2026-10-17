@@ -208,10 +208,12 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
                          "通过后已变更或删除文件": [rel for rel, version in old.items() if current_versions.get(rel) != version],
                          "通过后新增文件": [rel for rel in current_versions if rel not in old]})
     result = graph._model_json(state, "verifier", client, [
-        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。检查每个调用有外部副作用的单元测试是否实际依赖替身 fixture（直接依赖、客户端 fixture 依赖或 autouse），不能因为同文件另一个用例用了替身就认为全部用例被隔离。明确标记的集成测试可以调用真实服务。检查下一轮发送的消息时，以第一轮实际请求快照和返回值重建时序：第一轮请求尚不包含其未来回复；正常历史先追加上一轮回复，再追加本轮输入，不能把本轮输入插到旧回复之前。不要猜测固定角色总数。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
+        {"role": "system", "content": VERIFIER_PROMPT + "\n这是执行前建议审查，命令尚未运行，不得宣称测试通过。逐个对照测试的断言、调用参数与实际实现，尤其核对状态创建、身份切换、异常时写入顺序和完整性边界。检查每个调用有外部副作用的单元测试是否实际依赖替身 fixture（直接依赖、客户端 fixture 依赖或 autouse），不能因为同文件另一个用例用了替身就认为全部用例被隔离。明确标记的集成测试可以调用真实服务。检查下一轮发送的消息时，以第一轮实际请求快照和返回值重建时序：第一轮请求尚不包含其未来回复；正常历史先追加上一轮回复，再追加本轮输入，不能把本轮输入插到旧回复之前。不要猜测固定角色总数。异常回滚须沿调用链逐步计算容器、标记和暂存值；清除暂存输入不代表已经撤销本轮创建的其他状态，非空容器不会进入 if not container 分支。已发生的失败断言优先于假设风险，先解释该断言在修改后的分支是否成立。此次仅审查即将执行的命令；后续才需创建的文档、脚本或最终交付物不应阻止当前阶段检查。uv run 已选择项目解释器，其中 sys.executable 启动子进程会继承该解释器，不能假设改用系统 Python。issues 只列具体源码与断言冲突，引用实际分支条件并指出当前运行会违反哪条断言；正确项、已修复项、假设输入文件缺失和无关增强不得进入 issues。建议只提供一次，随后交由真实测试裁定。"},
         {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
          + "\n磁盘文件清单：\n" + "\n".join(files)
          + "\n\n实际执行证据（由程序记录版本，不是模型声称通过）：\n" + json.dumps(evidence, ensure_ascii=False)
+         + "\n\n尚未通过的真实命令与完整诊断（不能用猜测替代错误中的直接证据）：\n" + json.dumps(state.get("failed_checks", []), ensure_ascii=False)
+         + "\n\n执行器解析出的实际目录与命令：\n" + json.dumps(dict(zip(("工作目录", "命令"), map(str, command_scope(fs, state, command)))), ensure_ascii=False)
          + "\n已通过且未变更的测试不能被猜测为会失败；仍可报告未覆盖的需求缺口，但不要改坏已验证路径。"
          + "\n\n测试与 fixture 声明事实（按各文件作用域对照依赖，不代表已经执行）：\n" + json.dumps(fixture_contracts(fs, targets), ensure_ascii=False)
          + "\n\n被替换函数的可见状态副作用（不能仅模拟回复而跳过后续流程所依赖的状态登记）：\n" + json.dumps(patch_contracts, ensure_ascii=False)

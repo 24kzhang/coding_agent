@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.agents.precheck import command_issues
+from backend.agents.precheck import command_issues, imported_inputs
 from backend.tools import FsTool
 
 
@@ -76,3 +76,49 @@ print('数量', len(rows))
     assert command_issues(fs, state, 'python tools/probe.py')
     fs.write('portal/tools/probe.py', source.replace('.parent.parent', '.parents[2]'))
     assert not command_issues(fs, state, 'python tools/probe.py')
+
+
+def test_imported_module_input_is_checked_before_pytest_collection(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("inputs/rows.json", "[]")
+    fs.write("portal/tests/conftest.py", "import entry\n")
+    fs.write("portal/entry.py", "import loader\n")
+    source = '''import json
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / 'inputs' / 'rows.json'
+def load():
+    return json.loads(DATA.read_text())
+ROWS = load()
+'''
+    fs.write("portal/loader.py", source)
+    files = ["portal/tests/conftest.py", "portal/entry.py", "portal/loader.py"]
+    issues = imported_inputs(fs, {"text": "项目输出到 portal"}, files, "uv run --directory portal python -m pytest tests -q")
+    assert len(issues) == 1 and "portal/loader.py" in issues[0]
+    fs.write("portal/loader.py", source.replace("ROOT / 'inputs'", "ROOT.parent / 'inputs'"))
+    assert not imported_inputs(fs, {"text": "项目输出到 portal"}, files, "uv run --directory portal python -m pytest tests -q")
+
+
+@pytest.mark.parametrize("statement", ["if False:\n    import optional", "try:\n    import optional\nexcept OSError:\n    pass", "def later():\n    import optional"])
+def test_conditional_or_unused_modules_are_not_treated_as_required_inputs(tmp_path, statement):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("portal/test_main.py", statement)
+    fs.write("portal/optional.py", "open('absent.json').read()")
+    assert not imported_inputs(fs, {"text": "项目输出到 portal"}, ["portal/test_main.py", "portal/optional.py"], "python -m pytest")
+
+
+def test_relative_package_import_input_is_checked_without_executing_code(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("portal/test_main.py", "import pkg\n")
+    fs.write("portal/pkg/__init__.py", "from . import loader\n")
+    fs.write("portal/pkg/loader.py", "from pathlib import Path\nPath('absent.json').read_text()\n")
+    issues = imported_inputs(fs, {"text": "项目输出到 portal"}, fs.list(), "python -m pytest")
+    assert len(issues) == 1 and "pkg/loader.py" in issues[0]
+
+
+def test_pytest_selection_does_not_import_unselected_tests(tmp_path):
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("portal/tests/test_unit.py", "def test_ok():\n    assert True\n")
+    fs.write("portal/integration/test_remote.py", "import absent\n")
+    fs.write("portal/absent.py", "open('not_configured.json').read()")
+    assert not imported_inputs(fs, {"text": "项目输出到 portal"}, fs.list(), "python -m pytest tests/test_unit.py::test_ok -q")

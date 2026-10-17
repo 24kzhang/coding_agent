@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -36,12 +37,24 @@ from llm.client import LlmOutputLimitError, unavailable_error
 
 # MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 4
-# 运行级预算防止错误工具循环持续消耗 API。命中缓存的输入不计入未缓存预算。
-# 完整桌面应用的真实验收显示 60 次会在测试和构建通过后截断最后的视觉/烟测修复；
-# 72 次仍显著低于旧版失控的 99 次，同时保留未缓存输入与输出 token 双重硬闸门。
-MAX_MODEL_CALLS = 72
-MAX_UNCACHED_INPUT_TOKENS = 800_000
-MAX_OUTPUT_TOKENS = 160_000
+def _cost_limit(name: str) -> int:
+    """只有操作者显式配置的正整数才启用累计成本上限，零表示不限。"""
+
+    value = os.environ.get(name, "0")
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须为非负整数，0 表示不限") from exc
+    if limit < 0:
+        raise ValueError(f"{name} 必须为非负整数，0 表示不限")
+    return limit
+
+
+# 累计用量用于统计，默认不能截断正在推进的任务。重复动作、无进展和协议恢复
+# 仍各自有界；单次请求仍遵循模型的输出限制。需要成本闸门时由操作者显式配置。
+MAX_MODEL_CALLS = _cost_limit("CODING_AGENT_MAX_MODEL_CALLS")
+MAX_UNCACHED_INPUT_TOKENS = _cost_limit("CODING_AGENT_MAX_UNCACHED_INPUT_TOKENS")
+MAX_OUTPUT_TOKENS = _cost_limit("CODING_AGENT_MAX_OUTPUT_TOKENS")
 # 模型恢复独立于真正的只读工具往返；两种循环仍各自有界。
 MODEL_RECOVERY_ATTEMPTS = 12
 MCP_MAX_ROUNDS = 4
@@ -2200,11 +2213,11 @@ class AgentGraph:
 
         calls = max(int(state.get("model_requests", 0)), int(state.get("model_calls", 0)))
         reason = ""
-        if calls >= MAX_MODEL_CALLS:
+        if MAX_MODEL_CALLS and calls >= MAX_MODEL_CALLS:
             reason = f"模型调用次数达到 {MAX_MODEL_CALLS}"
-        elif int(state.get("uncached_input_tokens", 0)) >= MAX_UNCACHED_INPUT_TOKENS:
+        elif MAX_UNCACHED_INPUT_TOKENS and int(state.get("uncached_input_tokens", 0)) >= MAX_UNCACHED_INPUT_TOKENS:
             reason = f"未缓存输入达到 {MAX_UNCACHED_INPUT_TOKENS} token"
-        remaining = MAX_OUTPUT_TOKENS - int(state.get("output_tokens", 0))
+        remaining = MAX_OUTPUT_TOKENS - int(state.get("output_tokens", 0)) if MAX_OUTPUT_TOKENS else max(1, output_limit)
         if remaining <= 0:
             reason = f"输出达到 {MAX_OUTPUT_TOKENS} token"
         if reason:
@@ -2267,11 +2280,11 @@ class AgentGraph:
             },
         )
         exceeded = ""
-        if state["model_calls"] > MAX_MODEL_CALLS:
+        if MAX_MODEL_CALLS and state["model_calls"] > MAX_MODEL_CALLS:
             exceeded = f"模型调用次数超过 {MAX_MODEL_CALLS}"
-        elif state["uncached_input_tokens"] > MAX_UNCACHED_INPUT_TOKENS:
+        elif MAX_UNCACHED_INPUT_TOKENS and state["uncached_input_tokens"] > MAX_UNCACHED_INPUT_TOKENS:
             exceeded = f"未缓存输入超过 {MAX_UNCACHED_INPUT_TOKENS} token"
-        elif state["output_tokens"] > MAX_OUTPUT_TOKENS:
+        elif MAX_OUTPUT_TOKENS and state["output_tokens"] > MAX_OUTPUT_TOKENS:
             exceeded = f"输出超过 {MAX_OUTPUT_TOKENS} token"
         if exceeded:
             self._emit(

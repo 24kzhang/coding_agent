@@ -669,7 +669,9 @@ def test_invalid_actions_are_observable_and_do_not_finish_a_batch(tmp_path):
     assert (tmp_path / "work/app.py").exists()
 
 
-def test_budget_stops_before_call_and_caps_remaining_output(tmp_path):
+def test_budget_stops_before_call_and_caps_remaining_output(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.agents.graph.MAX_MODEL_CALLS", 72)
+    monkeypatch.setattr("backend.agents.graph.MAX_OUTPUT_TOKENS", 160_000)
     graph = make_graph(tmp_path)
     state = {"model_calls": 72, "workdir": str(tmp_path / "work"), "session_id": "s1"}
     called = []
@@ -678,6 +680,40 @@ def test_budget_stops_before_call_and_caps_remaining_output(tmp_path):
         graph._model_json(state, "planner", client, [])
     assert called == []
     assert graph._check_model_budget({"output_tokens": 159_900}, 6_000) == 100
+
+
+def test_actual_failure_survives_later_edits_and_reaches_next_review(tmp_path, monkeypatch):
+    """连续编辑不能把真实断言挤出修复上下文；审查也必须取得同一证据。"""
+    from backend.agents import coder as module
+    graph = make_graph(tmp_path)
+    command = "python -m pytest"
+    replies = iter([
+        {"actions": [{"tool": "write_file", "path": "main.py", "content": "ready = False\n"},
+                     {"tool": "run_command", "cmd": command}]},
+        *({"actions": [{"tool": "write_file", "path": f"note{index}.md", "content": "记录"}]} for index in range(7)),
+        {"actions": [{"tool": "replace_file", "path": "main.py", "old": "False", "new": "True"},
+                     {"tool": "run_command", "cmd": command}], "done": True},
+    ])
+    client = LlmClient(ModelConfig(id="test", name="测试", base_url="https://example.test", api_key="假密钥", model="generic", capabilities=[]))
+    prompts = []
+    def respond(messages, **_kwargs):
+        prompts.append(str(messages))
+        return next(replies)
+    client.chat_json = respond
+    graph._client = lambda *_args: client
+    reviewed = []
+    def review(_graph, state, *_args):
+        reviewed.append(state["failed_checks"])
+        return []
+    monkeypatch.setattr(module, "review_before_verification", review)
+    outcomes = iter([{"ok": False, "code": 1, "out": "断言失败：回滚后容器仍有数据", "err": ""},
+                     {"ok": True, "code": 0, "out": "1 passed", "err": ""}])
+    graph._shell = lambda *_args: SimpleNamespace(run=lambda cmd, **_kwargs: {"cmd": cmd, **next(outcomes)})
+    result = coder(graph, {"session_id": "s1", "workdir": str(tmp_path / "work"), "text": "实现并验证", "task_type": "code_gen"})
+    assert result["coding_ok"]
+    assert "断言失败：回滚后容器仍有数据" in prompts[-1]
+    assert reviewed[0] == []
+    assert "断言失败：回滚后容器仍有数据" in reviewed[-1][0]["output"]
 
 
 def test_failed_parse_records_paid_usage_once(tmp_path):
