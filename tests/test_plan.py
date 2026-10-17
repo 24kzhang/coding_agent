@@ -44,7 +44,7 @@ def test_state_handoff_cannot_be_approved_when_required_value_is_missing(tmp_pat
     monkeypatch.setattr(graph, '_client', lambda *_: object())
     monkeypatch.setattr(graph, '_model_json', lambda *_args, **_kwargs: {
         'ok': True, 'issues': [], 'handoffs': [{
-            'required': ['任务标识', '上次结果'], 'available_next': ['上次结果'],
+            'state': '任务标识', 'persisted_as': '', 'next_input': '', 'preserved': True,
             'evidence': '首轮临时生成任务标识，但返回与保存时只留下结果。',
         }],
     })
@@ -68,3 +68,18 @@ def test_semantic_review_receives_actual_scope_resolution(tmp_path, monkeypatch)
     assert str(work / 'portal') in content
     assert 'uv run --directory portal python -m pytest' in content
     assert '显式交付前缀不会再次拼接' in content
+
+
+def test_handoff_accepts_different_names_for_same_persisted_value(tmp_path, monkeypatch):
+    from backend.agents.planner import _semantic_plan_issues
+
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    monkeypatch.setattr(graph, '_client', lambda *_: object())
+    monkeypatch.setattr(graph, '_model_json', lambda *_args, **_kwargs: {
+        'ok': True, 'issues': [], 'handoffs': [{
+            'state': '任务标识', 'persisted_as': '浏览器记录中的 job_id',
+            'next_input': '下一次请求携带 job_id', 'preserved': True,
+            'evidence': '首轮返回 job_id，客户端保存后随下一轮请求发送。',
+        }],
+    })
+    assert _semantic_plan_issues(graph, {'text': '继续原任务'}, '原始合同', '状态交接计划') == []

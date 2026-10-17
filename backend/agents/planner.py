@@ -66,12 +66,12 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
                 "仅报告已存在的明确矛盾：不能因安装或网络将来可能失败就判定计划失败，不能要求计划提供不可能保证的故障豁免。"
                 "用户未要求的额外持久化、并发幂等、服务端会话和冗余机制不是必需项；应区分单次请求历史重复与失败请求重试。"
                 "以实际工具路径解析结果为准；不能把明确受支持的两种路径写法假想为重复前缀错误。"
-                "对每个跨步骤或跨请求交互，必须做状态交接表：required 列出下一轮仍然需要的所有状态标识，"
-                "available_next 只列按计划的实际返回与保存方式能到达下一轮的状态标识，同一状态使用完全相同的标识。"
+                "对每个跨步骤或跨请求交互，必须逐项做状态交接表：state 是下一轮仍然需要的状态，persisted_as 引用保存位置与形式，"
+                "next_input 引用下一步实际取得它的方式，preserved 表示这条交接是否成立。不要只比较自然语言标签是否相同，必须检查实际数据流。"
                 "不能把模型上次回复当作上次输入原文的可靠副本；不能假定未声明的隐藏会话、隐式缓存或状态自动传递。"
                 "首轮临时加入、但返回与保存时未包含的必要状态，会在后续无状态请求中消失，必须报告。"
-                "handoffs 的 evidence 引用生产、保存与下一轮消费的具体句子；无跨步骤状态时返回空数组。只返回 JSON："
-                '{"ok":true,"issues":[],"handoffs":[{"required":[],"available_next":[],"evidence":"中文证据"}],"summary":"中文结论"}'
+                "handoffs 的 evidence 引用生产、保存与下一轮消费的具体句子；状态在文件、客户端或服务端明确保存且可读取即成立，不要求额外复制；无跨步骤状态时返回空数组。只返回 JSON："
+                '{"ok":true,"issues":[],"handoffs":[{"state":"必要状态","persisted_as":"保存形式","next_input":"下一步读取方式","preserved":true,"evidence":"中文证据"}],"summary":"中文结论"}'
             )},
             {"role": "user", "content": graph._multimodal_content(
                 context, state, "\n\n待审查的完整执行合同：\n" + markdown
@@ -86,11 +86,13 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
     for handoff in result.get("handoffs") or []:
         if not isinstance(handoff, dict):
             continue
-        required = {str(value).strip() for value in handoff.get("required", []) if str(value).strip()}
-        available = {str(value).strip() for value in handoff.get("available_next", []) if str(value).strip()}
-        missing = sorted(required - available)
-        if missing:
-            normalized.append("跨步骤必要状态未交接：" + "、".join(missing) + "；" + str(handoff.get("evidence") or "计划未声明保存与传递方式"))
+        name = str(handoff.get("state") or "").strip()
+        if not name:
+            continue
+        saved = str(handoff.get("persisted_as") or "").strip()
+        next_input = str(handoff.get("next_input") or "").strip()
+        if handoff.get("preserved") is not True or not saved or not next_input:
+            normalized.append("跨步骤必要状态未交接：" + name + "；" + str(handoff.get("evidence") or "计划未声明保存与传递方式"))
     if result.get("ok") is not True and not normalized:
         return ["一致性审查未确认计划可执行：" + str(result.get("summary") or "缺少结论")]
     return normalized
