@@ -623,8 +623,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             )
             + finish_instruction
             + ("\n\n必须解决的验证失败：\n" + failed_tests if failed_tests else "")
-            + ("\n\n本轮仍未通过的真实检查（修改文件不会自动消除失败；先按断言和调用链定位）：\n"
-               + "\n\n".join(f"命令：{command}\n{item['output']}" for command, item in list(failed_checks.items())[-3:])
+            + ("\n\n本轮仍未通过的真实检查（修改文件不会自动消除失败；旧版本诊断不能证明当前版本仍有同一缺陷，需重新执行裁定）：\n"
+               + "\n\n".join(f"命令：{command}；失败时文件修订：{item.get('revision', '未知')}；当前修订：{file_revision}\n{item['output']}" for command, item in list(failed_checks.items())[-3:])
                if failed_checks else "")
             + ("\n\n最近读取的当前文件：\n" + "\n\n".join(current_snapshots) if current_snapshots else "")
             + "\n\n最近工具观察：\n"
@@ -1141,7 +1141,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
                     if preflight_issues and fresh_review:
                         # 尚未执行命令，保留审查建议为实施待办；不伪造命令结果或测试通过。
-                        observations.append("执行前需先修正以下源码/断言合同：" + "；".join(preflight_issues))
+                        observations.append(
+                            "执行前审查候选（模型意见，不是实际执行结果）：" + "；".join(preflight_issues)
+                            + "。证据充分时精确修复；若候选引用旧版本错误、与当前源码或标准接口不符，"
+                            "保持文件不变，再次选择完全相同的命令即可直接实际执行，以本版本结果裁定，不能只为迎合候选反复改写。"
+                        )
                         diagnostic_progress = True
                         break
                     # 模型已收到当前版本的建议，再次选择执行时以真实测试裁定；不得重复阻挡。
@@ -1155,7 +1159,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if observation.get("ok"):
                     failed_checks.pop(command, None)
                 elif (observation.get("result") or {}).get("code") != 126:
-                    failed_checks[command] = {"command": command, "output": _middle_trim(str(observation["text"]), 12_000)}
+                    failed_checks[command] = {
+                        "command": command, "output": _middle_trim(str(observation["text"]), 12_000),
+                        "revision": file_revision, "versions": source_versions(fs, state, current_files),
+                    }
             if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _is_dependency_mutation_command(str(action.get("cmd", ""))):
                 version_cache.clear()
             if tool == "run_command" and observation.get("ok") and not observation.get("cached") and _version_query(str(action.get("cmd", ""))):

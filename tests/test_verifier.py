@@ -500,3 +500,41 @@ def test_verifier_balance_failure_stops_without_repair(tmp_path, monkeypatch) ->
     monkeypatch.setattr(graph, "_model_json", fail)
     with pytest.raises(LlmBalanceError, match="余额不足"):
         verifier(graph, {"session_id": "s1", "workdir": str(workdir), "task_type": "code_gen", "changes": ["main.py"]})
+
+
+def test_preflight_distinguishes_failure_versions_without_losing_diagnostics(tmp_path):
+    """旧错误完整保留，同时明确标注已修改、删除、新增和未知的版本证据。"""
+    from backend.agents.precheck import source_versions
+    from backend.agents.verifier import review_before_verification
+
+    graph = AgentGraph(ModelStore(tmp_path / "models.json"), MemoryStore(tmp_path / "mem"))
+    fs = FsTool(str(tmp_path / "work"))
+    for name in ("main.py", "keep.py", "gone.py"):
+        fs.write(name, "ready = False\n")
+    state = {"session_id": "s1", "workdir": str(fs.root), "text": "修复并验证"}
+    versions = source_versions(fs, state, fs.list())
+    fs.write("main.py", "ready = True\n")
+    fs.safe("gone.py").unlink()
+    fs.write("new.py", "ready = True\n")
+    state["failed_checks"] = [
+        {"command": "python -m pytest", "output": "旧版本异常全文", "versions": versions},
+        {"command": "python check.py", "output": "缺少版本信息的历史诊断"},
+    ]
+    prompts = []
+    graph._client = lambda *_args: object()
+    def respond(_state, _role, _client, messages, **_kwargs):
+        prompts.append(messages)
+        return {"ok": True, "issues": []}
+    graph._model_json = respond
+    assert review_before_verification(graph, state, fs, fs.list(), "python -m pytest") == []
+    content = prompts[0][1]["content"]
+    evidence = json.loads(content.split("尚未通过的真实命令与诊断版本（旧版本错误不能充当当前版本的实测结果）：\n", 1)[1].split("\n\n执行器", 1)[0])
+    known, unknown = evidence
+    assert known["实际输出"] == "旧版本异常全文"
+    assert known["失败时版本已记录"] is True
+    assert known["失败后未变更文件"] == ["keep.py"]
+    assert set(known["失败后已变更或删除文件"]) == {"main.py", "gone.py"}
+    assert known["失败后新增文件"] == ["new.py"]
+    assert unknown["实际输出"] == "缺少版本信息的历史诊断"
+    assert unknown["失败时版本已记录"] is False
+    assert unknown["失败后新增文件"] == []

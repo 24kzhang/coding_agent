@@ -714,6 +714,10 @@ def test_actual_failure_survives_later_edits_and_reaches_next_review(tmp_path, m
     assert "断言失败：回滚后容器仍有数据" in prompts[-1]
     assert reviewed[0] == []
     assert "断言失败：回滚后容器仍有数据" in reviewed[-1][0]["output"]
+    failure = reviewed[-1][0]
+    assert failure["revision"] == 1
+    assert failure["versions"]["main.py"] != FsTool(str(tmp_path / "work")).version("main.py")
+    assert "失败时文件修订：1；当前修订：" in prompts[-1]
 
 
 def test_failed_parse_records_paid_usage_once(tmp_path):

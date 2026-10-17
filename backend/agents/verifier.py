@@ -35,6 +35,7 @@ issues 只包含当前命令会实际执行的确定缺陷，每项必须有源�
 根据执行器提供的目录、解释器、模块输入及真实配置检查接口合同，不能按模型印象猜测协议或运行环境。
 自动计划不能弱化原始要求，但后续才需创建的文档、烟测脚本不能阻止当前单元测试。
 已通过且未变更的路径不能凭猜测判为失败；真实失败诊断必须沿修改后的代码重新计算。
+失败时的文件版本与当前版本不同时，旧异常只证明旧版本失败；必须给出当前代码仍触发异常的直接证据，不能把历史堆栈当成当前实测。
 第三方框架的异常转换和生命周期必须按实际调用位置判断。
 检查验收脚本能否实际观察要求的行为；资源加载看 DOM 属性与请求，不能用展示文本里的路径替代。
 必需验收的失败分支不能通过跳过或返回零伪装成完成；环境与依赖问题应按真实诊断处理。
@@ -231,12 +232,22 @@ def review_before_verification(graph: AgentGraph, state: AgentState, fs: FsTool,
                          "通过后未变更文件": [rel for rel, version in old.items() if current_versions.get(rel) == version],
                          "通过后已变更或删除文件": [rel for rel, version in old.items() if current_versions.get(rel) != version],
                          "通过后新增文件": [rel for rel in current_versions if rel not in old]})
+    failures = []
+    for check in state.get("failed_checks", []):
+        old = check.get("versions")
+        failures.append({
+            "实际失败命令": check["command"], "实际输出": check["output"],
+            "失败时版本已记录": isinstance(old, dict),
+            "失败后未变更文件": [rel for rel, version in (old or {}).items() if current_versions.get(rel) == version],
+            "失败后已变更或删除文件": [rel for rel, version in (old or {}).items() if current_versions.get(rel) != version],
+            "失败后新增文件": [rel for rel in current_versions if rel not in old] if isinstance(old, dict) else [],
+        })
     messages = [
         {"role": "system", "content": PREFLIGHT_PROMPT},
         {"role": "user", "content": graph._ctx_text(state) + "\n\n即将运行：" + command
          + "\n磁盘文件清单：\n" + "\n".join(files)
          + "\n\n实际执行证据（由程序记录版本，不是模型声称通过）：\n" + json.dumps(evidence, ensure_ascii=False)
-         + "\n\n尚未通过的真实命令与完整诊断（不能用猜测替代错误中的直接证据）：\n" + json.dumps(state.get("failed_checks", []), ensure_ascii=False)
+         + "\n\n尚未通过的真实命令与诊断版本（旧版本错误不能充当当前版本的实测结果）：\n" + json.dumps(failures, ensure_ascii=False)
          + "\n\n执行器解析出的实际目录与命令：\n" + json.dumps(dict(zip(("工作目录", "命令"), map(str, command_scope(fs, state, command)))), ensure_ascii=False)
          + "\n\n私密配置的安全运行元信息（真实枚举值，不是供应商品牌名）：\n" + "\n".join(_private_model_config_facts(fs, files))
          + "\n已通过且未变更的测试不能被猜测为会失败；需求完整性留待最终验收，当前只检查本命令的确定缺陷。"
