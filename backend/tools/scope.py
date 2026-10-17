@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import re
@@ -31,7 +35,6 @@ def delivery_root(fs: FsTool, state: dict[str, Any]) -> Path:
         match = pattern.search(text)
         if match:
             selected = match.group(1)
-        # 直接理解用户声明的交付目录，不要求用户使用内部约定的「目录/...」句式。
         path = r'(?:`([^`]+)`|“([^”]+)”|"([^"]+)"|([^\s，。；;]+))'
         declared = re.search(r'(?:项目输出到\s*|(?:交付目录|输出目录|项目根目录)(?:为|是|[:：])\s*)' + path, text)
         if declared:
@@ -51,7 +54,6 @@ def tool_path(fs: FsTool, state: dict[str, Any], rel: str, *, write: bool) -> st
     prefix = output.relative_to(fs.root).as_posix()
     workspace_prefix = fs.root.name + "/"
     if rel.startswith(workspace_prefix + prefix + "/") or rel == workspace_prefix + prefix:
-        # 接受带工作区名称的交付路径，避免把工作区/交付前缀再次嵌套到交付目录。
         rel = rel[len(workspace_prefix):]
     if rel == prefix or rel.startswith(prefix + "/"):
         return rel

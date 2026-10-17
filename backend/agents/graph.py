@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import json
@@ -35,7 +39,6 @@ from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError, ModelStore
 from llm.client import LlmOutputLimitError, unavailable_error
 
-# MAX_CODER_ATTEMPTS 是一次用户执行请求允许的 Coding 总轮数，包含首次实现和验证后的修复轮。
 MAX_CODER_ATTEMPTS = 4
 def _cost_limit(name: str) -> int:
     """只有操作者显式配置的正整数才启用累计成本上限，零表示不限。"""
@@ -50,12 +53,9 @@ def _cost_limit(name: str) -> int:
     return limit
 
 
-# 累计用量用于统计，默认不能截断正在推进的任务。重复动作、无进展和协议恢复
-# 仍各自有界；单次请求仍遵循模型的输出限制。需要成本闸门时由操作者显式配置。
 MAX_MODEL_CALLS = _cost_limit("CODING_AGENT_MAX_MODEL_CALLS")
 MAX_UNCACHED_INPUT_TOKENS = _cost_limit("CODING_AGENT_MAX_UNCACHED_INPUT_TOKENS")
 MAX_OUTPUT_TOKENS = _cost_limit("CODING_AGENT_MAX_OUTPUT_TOKENS")
-# 模型恢复独立于真正的只读工具往返；两种循环仍各自有界。
 MODEL_RECOVERY_ATTEMPTS = 12
 MCP_MAX_ROUNDS = 4
 
@@ -63,17 +63,15 @@ MCP_MAX_ROUNDS = 4
 class RunBudgetError(RuntimeError):
     """模型调用达到运行级成本上限，必须停止当前运行。"""
 
-# Emit 是事件回调类型，AgentGraph 通过它把 AgentEvent 推给 FastAPI 流式接口。
 Emit = Callable[[AgentEvent], None]
-# GuidanceSource 非阻塞返回当前运行中尚未应用的用户指导。
 GuidanceSource = Callable[[], list[dict[str, str]]]
 
-"""
-多智能体编排图。
-每次任务创建一个实例，这样事件回调、token 统计和重试次数不会串到别的会话。
-"""
 class AgentGraph:
 
+    """
+    多智能体编排图。
+    每次任务创建一个实例，这样事件回调、token 统计和重试次数不会串到别的会话。
+    """
     def __init__(
         self,
         model_store: ModelStore,
@@ -82,26 +80,17 @@ class AgentGraph:
         mcp_client: McpClient | None = None,
         guidance_source: GuidanceSource | None = None,
     ):
-        # model_store 负责根据智能体名称找到对应模型配置。
+        """初始化当前对象及其运行状态。"""
         self.model_store = model_store
-        # memory 负责读写会话记忆、项目长期记忆和全局长期记忆。
         self.memory = memory
-        # emit_cb 是外部传入的事件回调；CLI 和 Web 流式接口都会用它实时显示事件。
         self.emit_cb = emit
-        # mcp_client 只在用户选择 MCP 且任务进入答疑或 Coding 节点时连接外部服务。
         self.mcp_client = mcp_client or McpClient()
-        # guidance_source 连接 HTTP 活动运行队列；CLI 和普通测试不传时保持原行为。
         self.guidance_source = guidance_source
         self.repo_map = RepoMap()
-        # event_id 是本次任务内递增事件编号，每个 AgentGraph 实例独立计数。
         self.event_id = 0
-        # 同一次运行中已经不可用的模型不再被下一个节点反复选中。
         self.unavailable_models: set[str] = set()
-        # 只读分析节点学到的 JSON 正文兼容模式，不影响 Coding 原生动作协议。
         self.json_mode_models: set[str] = set()
-        # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
         self.shell_tool: ShellTool | ContainerShellTool | None = None
-        # agent 是编译后的 LangGraph 状态机。
         self.graph = self._build()
 
     def run(
@@ -122,64 +111,36 @@ class AgentGraph:
     ) -> TaskResult:
         """运行一次用户任务，并返回最终 TaskResult。"""
 
-        # state 是 LangGraph 节点间传递的共享状态，所有节点都通过它读写任务上下文。
         state: AgentState = {
-            # 当前会话 id，用于 memory jsonl 文件定位。
             "session_id": session_id,
-            # 当前项目目录，文件和命令工具都受它限制。
             "workdir": workdir,
-            # 用户本轮输入，Plan 流程中可能被 manager 改写。
             "text": text,
-            # original_text 不随 Plan 或运行中指导改写。
             "original_text": text,
-            # guidance 只保存本次运行中已经应用的追加指导。
             "guidance": [],
-            # guidance_revision 用于识别模型生成动作后是否又收到新要求。
             "guidance_revision": 0,
-            # coded_guidance_revision 在 Coder 完成时刷新。
             "coded_guidance_revision": 0,
-            # 是否开启 Plan 模式。
             "plan_mode": plan_mode,
-            # 是否直接执行已保存计划。
             "execute_plan": execute_plan,
-            # 本次请求是否覆盖默认模型选择。
             "model_id": model_id,
             "effort": effort,
             "attachments": list(attachments or []),
-            # resuming 由 HTTP 层在写入本轮 run/start 前计算，避免把当前任务误判成旧中断。
             "resuming": resuming,
-            # skills 只包含用户本轮手动选择的 SKILL.md，不会默认加载整个目录。
             "skills": list(skills or []),
-            # mcp_servers 已在 HTTP 层按配置白名单校验，工具发现仍会再次绑定服务 id。
             "mcp_servers": list(mcp_servers or []),
             "required_mcps": list(required_mcps) if required_mcps is not None else [str(item.get("id")) for item in (mcp_servers or []) if not item.get("always_on")],
-            # mcp_tools 在 Coding 首次执行时通过 tools/list 懒加载。
             "mcp_tools": [],
-            # mcp_errors 保存初始化失败摘要，使模型不会反复尝试不存在的动态工具。
             "mcp_errors": [],
-            # 智能节点先发现 shared MCP，Coder/Answer 再补齐本轮手动选择的其他服务。
             "mcp_discovered_servers": [],
-            # container_shell 只控制 Coder/Verifier 的命令执行器；False 完整保留原生行为。
             "container_shell": bool(container_shell),
-            # started_at 使用单调时钟，只用于计算耗时，不受系统时间调整影响。
             "started_at": time.monotonic(),
-            # changes 保存本轮修改过的文件。
             "changes": [],
-            # commands 保存本轮执行过的命令。
             "commands": [],
-            # tests 保存验证智能体产生的测试结果。
             "tests": [],
-            # tests_ok 表示验证是否整体通过。
             "tests_ok": True,
-            # retry 是 Coding 修复重试次数。
             "retry": 0,
-            # coding_ok 初始为 True，使非 Coding 路径不被误判失败；coder 会主动重置。
             "coding_ok": True,
-            # coding_summary 在 Coding 明确结束后写入。
             "coding_summary": "",
-            # error 保存跨节点传播的失败原因。
             "error": "",
-            # tokens 是本轮模型调用累计 token 估算。
             "tokens": 0,
             "model_calls": 0,
             "cached_input_tokens": 0,
@@ -187,12 +148,10 @@ class AgentGraph:
             "output_tokens": 0,
             "reasoning_tokens": 0,
         }
-        # final 是 LangGraph 执行完后返回的最终状态；无论成功失败都清理本轮容器。
         try:
             final = self.graph.invoke(state)
         finally:
             self._close_shell()
-        # result 优先使用 final 节点写入的结构化结果；兜底用于异常情况下仍能返回。
         result = final.get("result") or {
             "ok": bool(final.get("tests_ok", True)),
             "summary": final.get("final", "任务已结束"),
@@ -213,7 +172,6 @@ class AgentGraph:
             return self.shell_tool
         if state.get("container_shell"):
             tool = ContainerShellTool(state["workdir"])
-            # 在进入 ReAct 前完成基础设施检查，失败时直接结束，不让模型反复尝试宿主命令。
             tool.ensure_ready()
             self.shell_tool = tool
         else:
@@ -305,40 +263,27 @@ class AgentGraph:
     def _build(self) -> Any:
         """构建 LangGraph 节点和条件路由。"""
 
-        # agent 是以 AgentState 为状态类型的 LangGraph 状态图。
         graph = StateGraph(AgentState)
-        # manager 是入口节点，负责分类、构造 Context Package 和决定第一跳。
         graph.add_node("manager", partial(self._run_node, manager, "manager"))
-        # planner 负责 Plan 模式下的选择题和计划文件生成。
         graph.add_node("planner", partial(self._run_node, planner, "planner"))
-        # repo 负责读取仓库结构和关键文件片段。
         graph.add_node("repo", partial(self._run_node, repo, "repo"))
-        # answer 负责解释和普通答疑，不写磁盘。
         graph.add_node("answer", partial(self._run_node, answer, "answer"))
-        # coder 负责 ReAct 写代码和执行工具动作。
         graph.add_node("coder", partial(self._run_node, coder, "coder"))
-        # verifier 负责选择并运行测试。
         graph.add_node("verifier", partial(self._run_node, verifier, "verifier"))
-        # doc 负责生成或更新中文文档。
         graph.add_node("doc", partial(self._run_node, doc, "doc"))
-        # final 负责整理 TaskResult、写最终 memory、输出最终事件。
         graph.add_node("final", partial(final, self))
 
-        # 所有任务都从 manager 进入。
         graph.add_edge(START, "manager")
-        # manager 根据 route 字段决定下一跳，避免所有任务都走固定流水线。
         graph.add_conditional_edges(
             "manager",
             self.route_after_manager,
             {"planner": "planner", "repo": "repo", "answer": "answer", "final": "final"},
         )
-        # planner 生成问题时直接 final，确认执行计划时可以进入 repo。
         graph.add_conditional_edges(
             "planner",
             self.route_after_planner,
             {"repo": "repo", "final": "final"},
         )
-        # repo 读取仓库后根据任务类型去 coder、doc、answer 或 final。
         graph.add_conditional_edges(
             "repo",
             self.route_after_repo,
@@ -351,61 +296,48 @@ class AgentGraph:
                 "final": "final",
             },
         )
-        # answer 是只读答疑节点，结束后直接 final。
         graph.add_edge("answer", "final")
-        # coder 写完代码后必须进入 verifier。
         graph.add_edge("coder", "verifier")
-        # verifier 失败可回 coder 修复，成功后可去 doc 或 final。
         graph.add_conditional_edges(
             "verifier",
             self.route_after_verifier,
             {"manager": "manager", "coder": "coder", "doc": "doc", "final": "final"},
         )
-        # doc 期间若收到更新指导则回到 coder，否则进入 final。
         graph.add_conditional_edges(
             "doc",
             self.route_after_doc,
             {"coder": "coder", "final": "final"},
         )
-        # final 是终点。
         graph.add_edge("final", END)
         return graph.compile()
 
-    """返回 manager 后的下一跳节点。"""
     def route_after_manager(self, state: AgentState) -> str:
+        """返回 manager 后的下一跳节点。"""
         return state.get("route", "repo")
 
-    """返回 planner 后的下一跳，只允许 repo 或 final。"""
     def route_after_planner(self, state: AgentState) -> str:
-        # route 是 planner 节点写入的下一跳。
+        """返回 planner 后的下一跳，只允许 repo 或 final。"""
         route = state.get("route", "final")
         return route if route in {"repo", "final"} else "final"
 
-    """把模型返回的 Plan 问题清洗成稳定格式。"""
     def _normalize_plan_questions(self, raw: Any) -> list[dict[str, Any]]:
-        # questions 是模型返回的原始问题列表；不是列表就按空列表处理。
+        """把模型返回的 Plan 问题清洗成稳定格式。"""
         questions = raw if isinstance(raw, list) else []
-        # normalized 保存清洗后的问题，每个问题都包含 question/options/recommended/reason/allow_custom。
         normalized: list[dict[str, Any]] = []
         for item in questions[:3]:
             if not isinstance(item, dict):
                 continue
-            # question 是问题正文，异常时使用兜底问题。
             question = self._clean_plan_text(item.get("question"), "需要确认哪一项执行策略？")
-            # options_raw 是模型返回的原始选项列表。
             options_raw = item.get("options")
-            # options 是清洗后的选项，最多保留 4 个。
             options = [re.sub(r"^[A-Da-d]\s*[.、)）:：]\s*", "", self._clean_plan_text(option, "")) for option in options_raw] if isinstance(options_raw, list) else []
             options = [option for option in options if option][:4]
             if len(options) < 2:
                 options = ["按推荐方案执行", "继续补充细节"]
-            # recommended 是推荐选项；如果不在选项列表里，就强制使用第一个选项。
             recommended = re.sub(r"^[A-Da-d]\s*[.、)）:：]\s*", "", self._clean_plan_text(item.get("recommended"), options[0]))
             if re.fullmatch(r"[A-Da-d]", recommended) and ord(recommended.upper()) - ord("A") < len(options):
                 recommended = options[ord(recommended.upper()) - ord("A")]
             if recommended not in options:
                 recommended = options[0]
-            # reason 是推荐理由，异常时给出通用理由。
             reason = self._clean_plan_text(item.get("reason"), "该选项能减少来回确认，便于先形成可执行计划。")
             normalized.append(
                 {
@@ -418,7 +350,6 @@ class AgentGraph:
             )
         if normalized:
             return normalized
-        # 模型没有返回任何有效问题时，返回一个默认问题。
         return [
             {
                 "question": "是否直接按默认工程架构执行？",
@@ -429,22 +360,17 @@ class AgentGraph:
             }
         ]
 
-    """把结构化 Plan 问题格式化成用户可读文本。"""
     def _format_plan_questions(self, questions: list[dict[str, Any]]) -> str:
-        # lines 保存最终输出的每一行。
+        """把结构化 Plan 问题格式化成用户可读文本。"""
         lines = [
             "Plan 模式需要你先做几个选择：",
             "",
             "你可以直接回复选项编号，例如：1A，2B；也可以写自定义回答。",
         ]
-        # letters 用于把选项编号转换成 A/B/C/D。
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        # idx 是第几个问题，item 是问题结构。
         for idx, item in enumerate(questions, start=1):
             lines.extend(["", f"{idx}. {item['question']}"])
-            # option_idx 是选项下标，option 是选项文本。
             for option_idx, option in enumerate(item["options"]):
-                # mark 标记推荐选项。
                 mark = "（推荐）" if option == item["recommended"] else ""
                 lines.append(f"   {letters[option_idx]}. {option}{mark}")
             lines.append(f"   推荐理由：{item['reason']}")
@@ -452,165 +378,130 @@ class AgentGraph:
                 lines.append("   允许自定义回答。")
         return "\n".join(lines)
 
-    """清洗 Plan 问题中的单个文本字段。"""
     def _clean_plan_text(self, value: Any, fallback: str) -> str:
-        # text 是模型返回字段转成字符串后的内容。
+        """清洗 Plan 问题中的单个文本字段。"""
         text = str(value or "").strip()
-        # bad_markers 是不应该展示给用户的错误或 JSON 残片特征。
         bad_markers = ["Expecting", "JSONDecodeError", "模型没有返回合法 JSON"]
         if not text or any(marker in text for marker in bad_markers):
             text = fallback
-        # 合并多余空白，避免选项展示很乱。
         text = re.sub(r"\s+", " ", text)
         return text
 
-    """从会话记忆中查找最近仍未完成的 pending_plan。"""
     def _latest_pending_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
-        # Plan 是控制状态，不能随执行事件增长或上下文压缩而消失。
+        """从会话记忆中查找最近仍未完成的 pending_plan。"""
         for rec in reversed(self.memory.state_records(workdir, session_id, "planner")):
-            # 如果已经有 plan_done 或 plan_cancelled，说明旧 pending_plan 不再有效。
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") in {"plan_done", "plan_cancelled"}:
                 return None
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") == "pending_plan":
-                # meta 是 pending_plan 的元数据副本，避免直接修改原记录。
                 meta = dict(rec.get("m") or {})
-                # memory_id 记录 pending_plan 来自哪条 memory，便于调试。
                 meta["memory_id"] = rec.get("id")
                 return meta
         return None
 
-    """从会话记忆中查找最近生成的计划。"""
     def _latest_saved_plan(self, workdir: str, session_id: str) -> dict[str, Any] | None:
+        """从会话记忆中查找最近生成的计划。"""
         for rec in reversed(self.memory.state_records(workdir, session_id, "planner")):
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") in {"plan_executed", "plan_cancelled"}:
                 return None
             if rec.get("ag") == "planner" and rec.get("tl") == "state" and rec.get("k") == "plan_done":
-                # meta 是计划元数据，包含 path、markdown、goal。
                 meta = dict(rec.get("m") or {})
                 meta["status"] = "plan"
                 return meta
         return None
 
-    """判断用户是否想取消当前 Plan 流程。"""
     def _is_plan_cancel(self, text: str) -> bool:
-        # cleaned 去掉空白并转小写，兼容“取消 plan”等写法。
+        """判断用户是否想取消当前 Plan 流程。"""
         cleaned = re.sub(r"\s+", "", text).lower()
         return any(word in cleaned for word in ["取消plan", "取消计划", "退出plan", "退出计划", "不做了", "重新开始"])
 
-    """判断用户是否在用自然语言确认执行计划。"""
     def _is_execute_plan_text(self, text: str) -> bool:
-        # cleaned 去掉空白并转小写，兼容中文和英文触发词。
+        """判断用户是否在用自然语言确认执行计划。"""
         cleaned = re.sub(r"\s+", "", text).lower()
         return cleaned in {"执行计划", "开始执行", "按计划执行", "execute plan", "run plan"}
 
-    """判断用户输入是否应该视为上一轮 Plan 问题的回答。"""
     def _should_treat_as_plan_reply(self, text: str, pending: dict[str, Any], state: AgentState) -> bool:
-        # Plan 模式仍开启或显式执行计划时，优先认为它属于 Plan 流程。
+        """判断用户输入是否应该视为上一轮 Plan 问题的回答。"""
         if state.get("plan_mode") or state.get("execute_plan"):
             return True
-        # 输入看起来像 1A/2B 或包含选项文本时，认为是 Plan 回答。
         if self._looks_like_plan_answer(text, pending):
             return True
-        # 普通问候和感谢属于新对话，不应被旧 Plan 状态解释成自定义选项。
         if self._direct_reply(text):
             return False
-        # 输入明显像新任务时，不要误当成 Plan 回答。
         if self._looks_like_new_task(text):
             return False
-        # 短输入一般更可能是回答上一轮选择题。
         return len(text.strip()) <= 500
 
-    """用规则判断文本是否像 Plan 选择题回答。"""
     def _looks_like_plan_answer(self, text: str, pending: dict[str, Any]) -> bool:
-        # cleaned 是去除两端空白后的原始输入。
+        """用规则判断文本是否像 Plan 选择题回答。"""
         cleaned = text.strip()
         if re.search(r"(?<!\d)\d+\s*[\.\-:：]?\s*[A-Za-z]", cleaned):
             return True
         if re.search(r"(都|全部|全都).*(推荐|默认)", cleaned):
             return True
-        # questions 是 pending_plan 中保存的上一轮问题。
         questions = pending.get("questions") or []
-        # options 展平所有选项文本，用于判断用户是否直接复制了选项内容。
         options = [str(option) for item in questions if isinstance(item, dict) for option in item.get("options", [])]
         return any(option and option in cleaned for option in options)
 
-    """判断输入是否更像一个新任务，而不是 Plan 选项回答。"""
     def _looks_like_new_task(self, text: str) -> bool:
-        # lower 是小写文本，兼容英文关键词。
+        """判断输入是否更像一个新任务，而不是 Plan 选项回答。"""
         lower = text.lower()
-        # keywords 是创建、修改、解释等新任务常见动词。
         keywords = ["创建", "实现", "开发", "新建", "编写", "修改", "修复", "解释", "生成文档", "重构", "build", "create", "fix"]
         return len(text.strip()) > 8 and any(word in lower for word in keywords)
 
-    """把用户 Plan 回复解析成结构化答案。"""
     def _build_plan_reply(self, text: str, pending: dict[str, Any]) -> dict[str, Any]:
-        # questions 是上一轮保存的 Plan 问题列表。
+        """把用户 Plan 回复解析成结构化答案。"""
         questions = pending.get("questions") or []
-        # answers 保存每个问题解析出的答案。
         answers: list[dict[str, str]] = []
-        # use_recommended 表示用户是否说“都选推荐/默认”。
         use_recommended = bool(re.search(r"(都|全部|全都).*(推荐|默认)", text))
         for idx, item in enumerate(questions, start=1):
             if not isinstance(item, dict):
                 continue
-            # options 是当前问题的选项文本列表。
             options = [str(option) for option in item.get("options", [])]
-            # selected 保存最终选中的选项文本。
             selected = ""
-            # source 记录答案来源，便于调试是 option、recommended、default 还是 custom。
             source = "custom"
             if use_recommended:
                 selected = str(item.get("recommended") or (options[0] if options else ""))
                 source = "recommended"
             else:
-                # match 识别类似 1A、1.A、1：A 的回答。
                 match = re.search(rf"(?<!\d){idx}\s*[\.\-:：]?\s*([A-Za-z])", text)
                 if match:
-                    # option_idx 是 A/B/C/D 转成的选项下标。
                     option_idx = ord(match.group(1).upper()) - ord("A")
                     if 0 <= option_idx < len(options):
                         selected = options[option_idx]
                         source = "option"
                 if not selected:
-                    # 如果没有编号，就尝试直接匹配选项文本。
                     selected = next((option for option in options if option and option in text), "")
             if not selected:
-                # 仍未识别时使用推荐项或第一个选项兜底。
                 selected = str(item.get("recommended") or (options[0] if options else text.strip()))
                 source = "default"
             answers.append({"question": str(item.get("question", "")), "answer": selected, "source": source})
         if not answers:
-            # 没有可解析的问题时，把整段输入作为自定义补充。
             answers.append({"question": "自定义补充", "answer": text.strip(), "source": "custom"})
         return {"raw": text, "answers": answers}
 
-    """把原始需求、上一轮问题和用户答案合成新的 Plan 输入。"""
     def _compose_pending_plan_text(self, pending: dict[str, Any], reply: dict[str, Any]) -> str:
-        # lines 保存最终拼接给 Plan 模型的多行文本。
+        """把原始需求、上一轮问题和用户答案合成新的 Plan 输入。"""
         lines = [
             "原始需求：",
             str(pending.get("goal") or ""),
             "",
             "Plan 问题与用户回答：",
         ]
-        # previous_answers 是更早轮次已经确认的选择。
         previous_answers = pending.get("answers") or []
         for idx, item in enumerate(previous_answers, start=1):
             lines.append(f"{idx}. 问题：{item.get('question', '')}")
             lines.append(f"   用户回答：{item.get('answer', '')}")
-        # idx 是回答序号，item 是单个问题的结构化回答。
         for idx, item in enumerate(reply.get("answers", []), start=len(previous_answers) + 1):
             lines.append(f"{idx}. 问题：{item.get('question', '')}")
             lines.append(f"   用户回答：{item.get('answer', '')}")
         if reply.get("raw"):
-            # raw 保留用户原始回复，避免解析过程丢失自定义信息。
             lines.extend(["", f"用户原始回复：{reply['raw']}"])
         lines.append("")
         lines.append("请基于原始需求和用户回答继续 Plan 流程；信息足够时生成可执行计划。")
         return "\n".join(lines)
 
-    """把已保存计划和用户确认输入合并成 Coding 可执行任务文本。"""
     def _compose_saved_plan_text(self, saved_plan: dict[str, Any], text: str) -> str:
+        """把已保存计划和用户确认输入合并成 Coding 可执行任务文本。"""
         return "\n".join(
             [
                 "用户确认执行已保存计划。自动计划是执行参考，原始任务目标是验收标准；两者冲突时以原始目标为准，必须统一实现，不能沿用计划中的互斥规则。",
@@ -625,23 +516,19 @@ class AgentGraph:
             ]
         )
 
-    """获取当前 Plan 流程的原始目标。"""
     def _plan_goal(self, state: AgentState) -> str:
-        # pending 是当前状态里的 pending_plan，优先使用它保存的原始 goal。
+        """获取当前 Plan 流程的原始目标。"""
         pending = state.get("pending_plan") or {}
         if pending.get("goal"):
             return str(pending["goal"])
-        # ctx 是管理者构造的上下文包，其 goal 通常是当前任务目标。
         ctx = state.get("context")
         if ctx:
             return ctx.goal
         return state["text"]
 
-    """生成模型异常时使用的兜底 Markdown 计划。"""
     def _fallback_plan_markdown(self, state: AgentState) -> str:
-        # answers 是用户已确认的 Plan 选项。
+        """生成模型异常时使用的兜底 Markdown 计划。"""
         answers = state.get("plan_answers", [])
-        # answer_lines 是写入计划中的“已确认选择”列表。
         answer_lines = "\n".join(f"- {item.get('question', '')}：{item.get('answer', '')}" for item in answers) or "- 暂无补充选择"
         goal = self._redact_plan_secrets(self._plan_goal(state))
         return f"""# 执行计划
@@ -664,11 +551,9 @@ class AgentGraph:
 6. 生成或更新中文文档，说明启动方式、主要功能和验证结果。
 """
 
-    """隐藏计划文档中的凭据值；原始 goal 仍单独保存在会话元数据供执行时使用。"""
     def _redact_plan_secrets(self, text: str) -> str:
-        # quoted_or_plain 覆盖中文/英文引号包裹值和普通无空格值，但保留字段名与分隔符。
+        """隐藏计划文档中的凭据值；原始 goal 仍单独保存在会话元数据供执行时使用。"""
         quoted_or_plain = r'("[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'|[^\s,，\n]+)'
-        # field_pattern 同时识别自然语言 `apikey：...` 和 JSON `"api_key": "..."`。
         field_pattern = re.compile(
             rf"""(?ix)
             (
@@ -681,48 +566,38 @@ class AgentGraph:
             """
         )
         redacted = field_pattern.sub(r'\1"[已脱敏，执行时使用原始需求中的用户凭据]"', str(text))
-        # token_pattern 兜底处理模型脱离字段标签、在正文或代码块中单独复制的常见密钥格式。
         token_pattern = re.compile(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b")
         return token_pattern.sub("[已脱敏，执行时使用原始需求中的用户凭据]", redacted)
 
-    """返回 repo 节点之后的下一跳。"""
     def route_after_repo(self, state: AgentState) -> str:
+        """返回 repo 节点之后的下一跳。"""
         return state.get("after_repo", "coder")
 
-    """返回 verifier 节点之后的下一跳。"""
     def route_after_verifier(self, state: AgentState) -> str:
-        # verify 是用户明确要求的只读验收任务。即使发现代码问题，也只能报告结果，不能越权进入 Coding 修改项目。
+        """返回 verifier 节点之后的下一跳。"""
         if state.get("task_type") == "verify":
             return "final"
-        # 验证期间到达的指导尚未经过 Coding，必须回到 Coder 重新规划。
         if self._guidance_requires_coding(state):
             return "coder"
-        # 只有代码或测试本身的失败才交回主管决策；模型超时等基础设施失败无法靠改项目代码解决。
         actionable_failures = [
             item for item in state.get("tests", []) if not item.get("ok") and not item.get("infra")
         ]
-        # retry 在每次 Coding 结束后递增。成本治理保留四次“实现 → 验证 → 精确修复”机会，
-        # 达到上限后必须停止并报告，不能继续放大协议错误或无进展循环。
         if actionable_failures and int(state.get("retry", 0)) < MAX_CODER_ATTEMPTS:
             return "manager"
-        # 测试通过且任务需要文档时进入 doc。
         if state.get("tests_ok", True) and state.get("after_verify") == "doc":
             return "doc"
         return "final"
 
-    """返回 doc 节点之后的下一跳。"""
     def route_after_doc(self, state: AgentState) -> str:
+        """返回 doc 节点之后的下一跳。"""
         return "coder" if self._guidance_requires_coding(state) else "final"
 
-    """对用户输入进行任务分类；安全特例用规则，其余优先由模型选择语义路由。"""
     def _classify(self, state: AgentState) -> dict[str, Any]:
-        # text 是当前任务文本。
+        """对用户输入进行任务分类；安全特例用规则，其余优先由模型选择语义路由。"""
         text = state["text"]
-        # lower 是小写文本，便于英文关键词匹配。
         lower = text.lower()
         if state.get("plan_mode"):
             return {"task_type": "plan_gen", "need_repo": True, "need_clarify": False, "reason": "Plan 模式已开启"}
-        # direct_reply 处理问候、感谢等无需读仓库的输入。
         direct_reply = self._direct_reply(text)
         if direct_reply:
             return {
@@ -734,7 +609,6 @@ class AgentGraph:
                 "reason": "普通对话，不需要调用仓库、Coding、验证或文档智能体",
                 "direct_reply": direct_reply,
             }
-        # selected_mcp_terms 用于识别“检查 GitHub MCP”“这个 MCP 能用吗”等能力任务。
         selected_mcp_terms = {"mcp"}
         for item in state.get("mcp_servers", []):
             if not isinstance(item, dict):
@@ -744,7 +618,6 @@ class AgentGraph:
                 for field in ("id", "name")
                 if str(item.get(field) or "").strip()
             )
-        # explicit_code_task 防止“使用 GitHub MCP 修复项目代码”被答疑路由吞掉。
         explicit_code_task = any(
             phrase in lower
             for phrase in [
@@ -823,16 +696,10 @@ class AgentGraph:
                 "fallback",
                 f"主管模型路由不可用，使用确定性规则：{self._trim(str(exc), 120)}",
             )
-        # code_intent 表示用户有从零创建或实现可交付物的倾向。
         code_intent = any(word in lower for word in ["创建", "实现", "开发", "新建", "编写", "做一个", "搭建", "build", "create"])
-        # product_intent 表示用户目标是代码、系统、页面、接口或其他工程交付物。
         product_intent = any(word in lower for word in ["代码", "项目", "系统", "应用", "app", "网页", "页面", "接口", "功能", "模块", "工具", "agent"])
-        # doc_intent 表示用户明确要求文档。
         doc_intent = any(word in lower for word in ["文档", "readme", "说明文档", "教程", "部署说明", "接口说明"])
-        # doc_only 捕获“恢复/更新 README”这类以文档本身为目标的任务，避免被项目背景词误判成代码生成。
         doc_only = doc_intent and bool(re.search(r"(?:生成|更新|修改|恢复|完善).{0,24}(?:readme|文档)", lower))
-        # verify_only 由“验证意图”和“明确只读限制”组合判定，覆盖自然表达但不把
-        # “修改 README，不要修改其他文件”这类限定写入范围的任务误判为只读。
         verify_intent = any(word in lower for word in ["验收", "验证", "运行测试", "重新测试", "检查测试"])
         read_only_intent = any(
             word in lower
@@ -870,12 +737,10 @@ class AgentGraph:
                 "need_clarify": False,
                 "reason": "用户要求直接生成或更新项目文档",
             }
-        # modify_intent 覆盖真实迭代中常见的完善、优化、添加和更新表达。
         modify_intent = any(
             word in lower
             for word in ["修改", "修复", "完善", "优化", "调整", "增加", "添加", "升级", "删除", "更新", "改成", "改为", "bug", "fix", "refactor"]
         )
-        # code_subject 表示修改对象明显属于代码仓库，而不是纯文档措辞。
         code_subject = product_intent or any(word in lower for word in ["函数", "类", "变量", "样式", "前端", "后端", "数据库", "配置", "依赖"])
         if modify_intent and code_subject:
             return {
@@ -900,10 +765,7 @@ class AgentGraph:
         if doc_intent:
             return {"task_type": "doc_gen", "need_repo": True, "need_code": False, "need_doc": True, "need_clarify": False, "reason": "用户需要生成文档"}
         try:
-            # client 是管理者模型，用于规则无法覆盖的模糊输入。
             client = self._client("manager", state)
-            # data 是模型返回的分类 JSON。
-            # classify_context 同时包含本轮输入和最近真实对话，支持“继续改”“还是不行”等追问。
             classify_context = {
                 "current": text,
                 "recent": self.memory.conversation_context(
@@ -925,22 +787,16 @@ class AgentGraph:
             )
             return data
         except Exception:
-            # 管理者模型异常时降级为普通回答，避免误触发仓库读取和写代码。
             return {"task_type": "general_answer", "need_repo": False, "need_code": False, "need_doc": False, "need_clarify": False, "reason": "我在，可以继续告诉我你要处理的代码任务或问题。"}
 
-    """把规则或模型分类规范化为受控路由字段。"""
     def _normalize_classification(self, raw: dict[str, Any]) -> dict[str, Any]:
-        # allowed 是 LangGraph 已实现的全部任务类型，未知值不能直接参与路由。
+        """把规则或模型分类规范化为受控路由字段。"""
         allowed = {"direct", "general_answer", "code_gen", "code_mod", "code_explain", "doc_gen", "verify", "plan_gen"}
-        # data 是输入副本，避免修改模型响应原对象。
         data = dict(raw) if isinstance(raw, dict) else {}
-        # task_type 无效时回退到只读回答，避免误写代码或无声结束。
         task_type = str(data.get("task_type") or "general_answer")
         if task_type not in allowed:
             task_type = "general_answer"
-        # reason 始终是短中文说明，异常长模型文本不会进入最终回复。
         reason = self._clean_summary(data.get("reason"), "管理者已完成任务分类。")
-        # normalized 显式转换所有布尔字段，字符串 "false" 不会被 bool() 误判为 True。
         normalized = {
             **data,
             "task_type": task_type,
@@ -953,15 +809,13 @@ class AgentGraph:
             "reason": reason,
         }
         if normalized["need_clarify"]:
-            # clarification 是模型可选的具体问题；缺失时使用 reason，确保用户知道要补什么。
             normalized["direct_reply"] = self._clean_summary(data.get("clarification"), reason)
         if task_type == "direct" and not data.get("direct_reply"):
-            # 规则未命中的普通对话仍交给 answer 模型，不能把内部分类理由直接回复用户。
             normalized["task_type"] = "general_answer"
         return normalized
 
-    """安全解析模型返回的布尔值。"""
     def _as_bool(self, value: Any, fallback: bool) -> bool:
+        """安全解析模型返回的布尔值。"""
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -972,31 +826,25 @@ class AgentGraph:
                 return False
         return fallback
 
-    """识别用户明确要求长期记住的偏好，并判断作用域。"""
     def _memory_request(self, text: str) -> tuple[str, bool] | None:
-        # clean 是合并空白后的原始指令，便于提取“记住”之后的正文。
+        """识别用户明确要求长期记住的偏好，并判断作用域。"""
         clean = re.sub(r"\s+", " ", text).strip()
-        # explicit_markers 只包含明确长期意图，并按更具体的短语优先匹配。
         explicit_markers = ["请记住我", "请记住", "记住我", "以后都", "今后都"]
         marker = next((item for item in explicit_markers if item in clean), "")
         if not marker:
             return None
-        # content 只取触发词之后的正文，避免把“请记住我”等控制语句写进记忆。
         content = clean.split(marker, 1)[1].strip(" ：:，,")
-        # 用户常说“请记住我以后都……”，第二个长期语气词也不属于偏好正文。
         for prefix in ["以后都", "今后都"]:
             if content.startswith(prefix):
                 content = content[len(prefix) :].strip(" ：:，,")
                 break
         if not content:
             return None
-        # global_scope 只有明确提到全局、所有项目或跨项目时才为 True。
         global_scope = any(word in clean for word in ["全局", "所有项目", "跨项目"])
         return self._trim(content, 500), global_scope
 
-    """清洗模型生成的短摘要，移除多余空白并限制长度。"""
     def _clean_summary(self, value: Any, fallback: str) -> str:
-        # text 保留摘要中的正常换行，但压缩连续空格和三个以上空行。
+        """清洗模型生成的短摘要，移除多余空白并限制长度。"""
         text = str(value or "").strip()
         if not text:
             return fallback
@@ -1004,12 +852,10 @@ class AgentGraph:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return self._trim(text, 1200)
 
-    """把分类结果转换成 LangGraph 三段路由。"""
     def _flow_for(self, state: AgentState, classification: dict[str, Any]) -> tuple[str, str, str]:
-        # task_type 是管理者分类出的任务类型。
+        """把分类结果转换成 LangGraph 三段路由。"""
         task_type = classification.get("task_type", "general_answer")
         if task_type == "plan_gen":
-            # Plan 先经过 Repo 获取用户指定的 schema、清单和现有目录事实，再交给 Planner。
             return "repo", "planner", "final"
         if state.get("plan_mode") and not state.get("execute_plan"):
             return "repo", "planner", "final"
@@ -1026,20 +872,16 @@ class AgentGraph:
         if task_type == "code_explain":
             return ("repo", "answer", "final") if classification.get("need_repo", True) else ("answer", "final", "final")
         if task_type in {"code_gen", "code_mod"}:
-            # after_verify 决定验证通过后是否进入文档智能体。
             after_verify = "doc" if bool(classification.get("need_doc")) else "final"
             return "repo", "coder", after_verify
         return "final", "final", "final"
 
-    """处理不需要调用模型、不需要读仓库的直接回复。"""
     def _direct_reply(self, text: str) -> str | None:
-        # cleaned 去掉空白并转小写，方便匹配简短口语输入。
+        """处理不需要调用模型、不需要读仓库的直接回复。"""
         cleaned = re.sub(r"\s+", "", text).lower()
         if not cleaned:
             return "我在。你可以直接告诉我要创建、修改、解释还是生成文档。"
-        # greetings 是普通问候集合。
         greetings = {"你好", "您好", "hi", "hello", "在吗", "在不在", "嗨", "hey"}
-        # thanks 是感谢类输入集合。
         thanks = {"谢谢", "谢了", "感谢", "多谢", "thanks", "thankyou"}
         if cleaned in greetings:
             return "你好，我在。你可以直接描述要创建、修改、解释或生成文档的任务；普通问候不会触发仓库读取或写文件。"
@@ -1049,9 +891,8 @@ class AgentGraph:
             return "我是这个本地编程 agent 的管理入口。简单聊天我会直接回复；涉及代码、文档、计划或排错时，我会按需调用对应智能体。"
         return None
 
-    """根据文件列表粗略识别项目技术栈。"""
     def _detect_stack(self, files: list[str]) -> list[str]:
-        # stack 保存识别出的技术栈标签。
+        """根据文件列表粗略识别项目技术栈。"""
         stack: list[str] = []
         if "pyproject.toml" in files:
             stack.append("Python/uv")
@@ -1065,9 +906,8 @@ class AgentGraph:
             stack.append("静态 Web")
         return stack
 
-    """根据任务和工程惯例选择值得放入初始上下文的文件。"""
     def _repo_candidates(self, fs: FsTool, files: list[str], goal: str) -> list[str]:
-        # priority_names 是依赖清单、入口、协作规则和项目说明的常见文件名。
+        """根据任务和工程惯例选择值得放入初始上下文的文件。"""
         priority_names = {
             "AGENTS.md",
             "README.md",
@@ -1080,17 +920,12 @@ class AgentGraph:
             "tsconfig.json",
             "uv.lock",
         }
-        # entry_names 是跨技术栈常见入口文件。
         entry_names = {"app.py", "main.py", "main.ts", "main.tsx", "index.html", "index.js", "index.ts", "server.py"}
-        # tokens 提取用户明确写出的英文路径片段和标识符，用于文件名与内容检索。
         tokens = [token.lower() for token in re.findall(r"[A-Za-z][A-Za-z0-9_.-]{2,}", goal)]
-        # scores 保存每个候选文件的相关性分数。
         scores: dict[str, int] = {}
         for rel in files:
-            # path 和 name 分别用于完整路径与 basename 评分。
             path = Path(rel)
             name = path.name
-            # docs/plans 是 Planner 自己生成的历史产物，不能反过来作为下一次 Repo 事实污染新计划。
             if len(path.parts) >= 2 and path.parts[:2] == ("docs", "plans"):
                 continue
             if fs.is_sensitive(fs.safe(rel)):
@@ -1104,7 +939,6 @@ class AgentGraph:
                 score += 25
             if path.parts and path.parts[0] in {"src", "app", "backend", "frontend", "server", "api"}:
                 score += 20
-            # tests 文件对修改后的验证有价值，但优先级低于生产入口和目标文件。
             if "test" in name.lower() or "tests" in path.parts:
                 score += 8
             for token in tokens:
@@ -1113,7 +947,6 @@ class AgentGraph:
             if score:
                 scores[rel] = score
 
-        # 对最多 5 个用户标识符做内容检索，把定义或引用文件纳入候选集合。
         for token in list(dict.fromkeys(tokens))[:5]:
             try:
                 hits = fs.search(token, max_results=12)
@@ -1122,26 +955,22 @@ class AgentGraph:
             for hit in hits:
                 rel = str(hit["path"])
                 hit_path = Path(rel)
-                # 内容检索同样排除 docs/plans 生成物，与上方评分阶段保持一致。
                 if len(hit_path.parts) >= 2 and hit_path.parts[:2] == ("docs", "plans"):
                     continue
                 scores[rel] = scores.get(rel, 0) + 90
 
-        # 空项目直接返回空列表；有文件但没有得分时选择少量根级代码文件兜底。
         if not scores:
             fallback = [rel for rel in files if len(Path(rel).parts) <= 2 and Path(rel).suffix.lower() in FsTool.text_suffixes]
             return fallback[:30]
-        # ordered 先按分数倒序，再按路径排序，结果稳定且最相关文件在前。
         ordered = sorted(scores, key=lambda rel: (-scores[rel], rel))
         return ordered[:50]
     
-    """过滤并限制 Coding 模型返回的工具动作。"""
     def _normalize_actions(
         self,
         raw: Any,
         mcp_tools: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        # allowed 是 Coding 智能体当前真实实现的工具协议。
+        """过滤并限制 Coding 模型返回的工具动作。"""
         allowed = {
             "append_file",
             "assert_text_absent",
@@ -1157,7 +986,6 @@ class AgentGraph:
             "search_files",
             "write_file",
         }
-        # dynamic_allowed 来自本轮已选择服务的 tools/list 结果，模型不能自行拼接 MCP 工具名。
         dynamic_allowed = {
             str(item.get("action"))
             for item in (mcp_tools or [])
@@ -1165,7 +993,6 @@ class AgentGraph:
         }
         allowed.update(dynamic_allowed)
         schemas = {item["name"]: item["parameters"] for item in tool_specs()}
-        # 协议错误不能转换成空动作并被 done 掩盖；批次执行上限由 Coder 明确处理。
         if raw is not None and not isinstance(raw, list):
             return [{"tool": "invalid_action", "_error": "actions 必须是列表"}]
         actions = raw if isinstance(raw, list) else []
@@ -1174,7 +1001,6 @@ class AgentGraph:
             if not isinstance(item, dict):
                 normalized.append({"tool": "invalid_action", "_error": "工具动作必须是对象"})
                 continue
-            # tool 必须命中白名单，未知工具会作为无效动作被忽略。
             tool = str(item.get("tool") or "")
             if tool not in allowed:
                 normalized.append({"tool": "invalid_action", "_error": f"未知工具：{tool or '未指定'}"})
@@ -1201,48 +1027,35 @@ class AgentGraph:
                 normalized.append(action)
                 continue
             if tool == "read_file" and action.get("start", 0) == 0:
-                # Coding prompt 的普通源码快照上限是 24K。部分模型仍会沿用较小的读取值，
-                # 在首段读取时统一抬高，避免 13K~24K 的常见前端文件被截断后反复重读。
                 action["max_chars"] = max(action.get("max_chars", 0), 24_000)
             normalized.append(action)
         return normalized
 
-    """读取项目配置，选择已有且适合非交互执行的验证命令。"""
     def _verification_commands(self, fs: FsTool, files: list[str]) -> list[str]:
-        # commands 按轻量检查、测试、构建的顺序保存，并在返回前去重。
+        """读取项目配置，选择已有且适合非交互执行的验证命令。"""
         commands: list[str] = []
-        # python_manifests/node_manifests 同时识别根项目与常见的 backend/frontend 子项目。
-        # 过去只判断根目录清单，会在嵌套项目上错误调用系统 pytest，并完全漏掉前端构建。
         python_manifests = sorted(rel for rel in files if Path(rel).name == "pyproject.toml")
         node_manifests = sorted(rel for rel in files if Path(rel).name == "package.json")
-        # 没有 package.json 的静态 JavaScript 项目通常没有 npm 脚本，仍应对主入口执行原生语法检查。
         javascript_files = [rel for rel in files if rel.endswith((".js", ".mjs"))]
         if javascript_files and not node_manifests:
             commands.extend(f"node --check {shlex.quote(rel)}" for rel in sorted(javascript_files))
-        # python_files 用于判断是否存在 Python 代码和测试目录。
         python_files = [rel for rel in files if rel.endswith(".py")]
         if python_files:
-            # compile_targets 优先选择顶层代码目录，避免 compileall 扫描依赖环境。
             top_dirs = sorted({Path(rel).parts[0] for rel in python_files if len(Path(rel).parts) > 1})
             root_files = [rel for rel in python_files if len(Path(rel).parts) == 1]
             compile_targets = top_dirs[:8] + root_files[:12]
             if compile_targets:
-                # 语法编译不需要安装目标项目，--no-project 避免坏打包配置掩盖真实语法结果。
                 prefix = "uv run --no-project " if python_manifests else ""
                 commands.append(prefix + "python -m compileall -q " + " ".join(map(shlex.quote, compile_targets)))
             for manifest in python_manifests:
                 project_dir = Path(manifest).parent
                 project_arg = "" if project_dir == Path(".") else f" --project {shlex.quote(project_dir.as_posix())}"
-                # dry-run 单独验证依赖解析和项目打包配置，不修改目标项目环境。
                 commands.append(f"uv sync{project_arg} --dry-run")
-                # 测试必须限定到该 Python 项目，避免父目录或其他子项目的测试串入。
                 project_python = [
                     rel
                     for rel in python_files
                     if project_dir == Path(".") or project_dir in Path(rel).parents
                 ]
-                # FastAPI/Flask 入口即使能 compileall，也可能在真实导入时因模块遮蔽或错误
-                # import 失败。对不含自启动调用的常见 app.py/main.py 直接执行一次导入烟测。
                 entry_candidates = sorted(
                     (
                         rel
@@ -1286,13 +1099,11 @@ class AgentGraph:
                 if test_targets:
                     target_text = " ".join(map(shlex.quote, test_targets))
                     commands.append(f"uv run{project_arg} python -m pytest -q {target_text}")
-                # 常规 build/smoke 脚本属于项目显式交付的验收入口，Verifier 必须独立重跑。
                 scripts_dir = project_dir / "scripts"
                 for script_name in ("build.py", "smoke.py", "smoke_test.py"):
                     script_path = (scripts_dir / script_name).as_posix()
                     if script_path in files:
                         commands.append(f"uv run{project_arg} python {shlex.quote(script_path)}")
-            # 没有 pyproject.toml 的 Python 脚本仓库，仅在确实存在测试时调用系统 pytest。
             if not python_manifests:
                 test_targets = sorted(
                     {
@@ -1312,7 +1123,6 @@ class AgentGraph:
         for manifest in node_manifests:
             project_dir = Path(manifest).parent
             try:
-                # package_data 用结构化 JSON 读取 scripts，不猜测项目使用哪个 Node 测试框架。
                 package_data = json.loads(fs.read(manifest, 80_000))
                 scripts = package_data.get("scripts") if isinstance(package_data, dict) else {}
             except (json.JSONDecodeError, OSError, ValueError):
@@ -1324,7 +1134,6 @@ class AgentGraph:
                         commands.append(f"{prefix} run {script}")
         return list(dict.fromkeys(commands))
 
-    """执行 Coding 智能体返回的单个工具动作。"""
     def _do_action(
         self,
         action: dict[str, Any],
@@ -1333,15 +1142,13 @@ class AgentGraph:
         git: GitTool,
         state: AgentState | None = None,
     ) -> dict[str, Any]:
-        # tool 是模型请求调用的工具名称。
+        """执行 Coding 智能体返回的单个工具动作。"""
         tool = action.get("tool")
         try:
             if action.get("path") and tool in {"read_file", "write_file", "append_file", "replace_file", "replace_block"}:
                 action = {**action, "path": tool_path(fs, state or {}, str(action["path"]), write=tool != "read_file")}
             if isinstance(tool, str) and tool.startswith("mcp__"):
                 return self._call_mcp_action(action, state or {})
-            # required 保存每种工具不可缺少的参数。先做协议校验，避免把 KeyError('path')
-            # 这类无语义异常反馈给模型，导致它无法判断应该补哪个字段。
             required = {
                 "append_file": ("path", "content"),
                 "read_file": ("path",),
@@ -1359,7 +1166,6 @@ class AgentGraph:
             if tool in {"write_file", "append_file", "replace_file", "replace_block"}:
                 require_delivery_path(fs, output_root, str(action["path"]))
             if tool == "write_file":
-                # rel 是实际写入文件的项目相对路径。
                 rel = fs.write(str(action["path"]), str(action.get("content", "")))
                 return {"ok": True, "text": f"写入文件：{rel}", "file": rel}
             if tool == "model_copy":
@@ -1378,7 +1184,6 @@ class AgentGraph:
                     target,
                 )
                 copied = json.loads(path.read_text(encoding="utf-8"))
-                # 集成方需要真实协议与参数合同；只暴露白名单运行元信息，不暴露地址和凭据。
                 metadata = self.model_store.redact({key: copied.get(key) for key in (
                     "id", "model", "protocol", "timeout", "default_effort", "max_output_tokens",
                     "request_options", "output_token_field",
@@ -1399,11 +1204,9 @@ class AgentGraph:
                     **metadata,
                 }
             if tool == "append_file":
-                # rel 是实际追加文件的项目相对路径。
                 rel = fs.append(str(action["path"]), str(action.get("content", "")))
                 return {"ok": True, "text": f"追加文件：{rel}", "file": rel}
             if tool == "replace_file":
-                # expected 要求旧文本匹配数量准确，默认只允许唯一匹配。
                 expected = int(action.get("expected", 1))
                 rel = fs.replace(
                     str(action["path"]),
@@ -1413,7 +1216,6 @@ class AgentGraph:
                 )
                 return {"ok": True, "text": f"精确修改文件：{rel}", "file": rel}
             if tool == "replace_block":
-                # start_marker/end_marker 只负责定位边界；content 是替换后的完整代码块。
                 rel = fs.replace_block(
                     str(action["path"]),
                     str(action.get("start_marker", "")),
@@ -1422,14 +1224,11 @@ class AgentGraph:
                 )
                 return {"ok": True, "text": f"按锚点修改代码块：{rel}", "file": rel}
             if tool == "read_file":
-                # rel 是模型要求读取的项目相对路径。
                 rel = str(action["path"])
-                # start/max_chars 支持读取大文件的后续片段。
                 start = int(action.get("start", 0))
                 max_chars = int(action.get("max_chars", 12000))
                 target = fs.safe(rel)
                 if fs.is_sensitive(target):
-                    # 私密正文始终不可读取；安全元信息是正常分支，不伪装成空文件或读取快照。
                     fields = ["id", "base_url", "model", "api_key", "protocol", "timeout", "default_effort", "max_output_tokens", "request_options", "output_token_field"] if target.name == "model.json" else []
                     return {"ok": True, "exists": target.exists(), "content_available": False,
                             "sensitive": True, "path": rel, "status": "metadata_only",
@@ -1471,11 +1270,9 @@ class AgentGraph:
                     "read": metadata,
                 }
             if tool == "search_files":
-                # results 是结构化内容命中列表，方便模型继续精确读取目标文件。
                 results = fs.search(str(action.get("query", "")), int(action.get("max_results", 50)))
                 return {"ok": True, "text": "搜索结果：\n" + json.dumps(results, ensure_ascii=False, indent=2), "hits": results}
             if tool in {"assert_text_absent", "assert_text_present"}:
-                # paths/texts 是模型明确给出的目标文件和禁用文本，避免用 shell 表达“无匹配即成功”。
                 paths = action.get("paths") if isinstance(action.get("paths"), list) else []
                 texts = action.get("texts") if isinstance(action.get("texts"), list) else []
                 paths = [fs.safe(tool_path(fs, state or {}, str(path), write=False)).relative_to(fs.root).as_posix() for path in paths]
@@ -1491,16 +1288,13 @@ class AgentGraph:
                     }
                 return {"ok": True, "text": "文本不存在断言通过"}
             if tool == "list_files":
-                # 列表只保留开头，项目入口通常位于前部；二进制媒体已由 FsTool 过滤。
                 files = fs.list(max_files=400)
                 listing = "\n".join(files)
                 if len(listing) > 12_000:
                     listing = listing[:12_000] + f"\n... 其余文件已省略，共索引 {len(files)} 个文件"
                 return {"ok": True, "text": "文件列表：\n" + listing}
             if tool == "run_command":
-                # cmd 是模型要求执行的命令字符串，ShellTool 会做危险命令检查。
                 cmd = str(action.get("cmd", ""))
-                # res 是命令执行结果。
                 res = self._run_command(fs, shell, state or {}, cmd, create_cwd=True)
                 return {"ok": res.get("ok"), "text": f"运行命令：{cmd}\n{res.get('out','')}\n{res.get('err','')}", "cmd": cmd, "result": res}
             if tool == "git_status":
@@ -1526,7 +1320,6 @@ class AgentGraph:
             return []
         discovered = set(state.get("mcp_discovered_servers") or [])
 
-        # descriptors 是传给模型的安全工具定义；used_actions 防止规范化名称碰撞。
         descriptors = existing
         errors = list(state.get("mcp_errors") or [])
         used_actions = {
@@ -1537,7 +1330,6 @@ class AgentGraph:
         for raw_config in state.get("mcp_servers", []):
             config: McpServerConfig | None = None
             try:
-                # config 再次经过 Pydantic 校验，防止 LangGraph state 被测试或其他入口直接伪造。
                 config = McpServerConfig.model_validate(raw_config)
                 if shared_only and not config.shared:
                     continue
@@ -1545,7 +1337,6 @@ class AgentGraph:
                     continue
                 tools = self.mcp_client.list_tools(config, state["workdir"])
                 for item in tools:
-                    # base_action 只包含稳定安全字符；原始 MCP 工具名另存用于 tools/call。
                     safe_tool = re.sub(r"[^A-Za-z0-9._-]+", "_", item.name).strip("_") or "tool"
                     base_action = f"mcp__{config.id}__{safe_tool}"
                     action_name = base_action
@@ -1571,7 +1362,6 @@ class AgentGraph:
                     f"MCP「{config.name}」已连接，发现 {len(tools)} 个工具",
                 )
             except Exception as exc:
-                # error 不包含完整配置，避免 env 或 header 随异常文本进入记忆。
                 server_id = str(raw_config.get("id") or "未命名") if isinstance(raw_config, dict) else "未命名"
                 error = f"MCP「{server_id}」连接失败：{self._trim(str(exc), 240)}"
                 errors.append(error)
@@ -1868,7 +1658,6 @@ class AgentGraph:
     def _call_mcp_action(self, action: dict[str, Any], state: AgentState) -> dict[str, Any]:
         """校验动态工具名、服务和参数后执行一次 MCP tools/call。"""
 
-        # descriptor 必须来自当前 state 的 tools/list 结果，未知动态工具直接拒绝。
         descriptor = next(
             (
                 item
@@ -1879,7 +1668,6 @@ class AgentGraph:
         )
         if not descriptor:
             return {"ok": False, "text": f"未授权或不存在的 MCP 工具：{action.get('tool')}"}
-        # raw_config 必须同时来自当前用户选择的 MCP 配置。
         raw_config = next(
             (
                 item
@@ -1891,7 +1679,6 @@ class AgentGraph:
         if not raw_config:
             return {"ok": False, "text": f"MCP 服务未被本轮选择：{descriptor.get('server_id')}"}
 
-        # JSON 协议优先使用 arguments；LongCat 标签协议会把每个字段直接放在 action 顶层。
         raw_arguments = action.get("arguments")
         if isinstance(raw_arguments, str):
             try:
@@ -1902,7 +1689,6 @@ class AgentGraph:
             raw_arguments = {key: value for key, value in action.items() if key != "tool"}
         if not isinstance(raw_arguments, dict):
             return {"ok": False, "text": "MCP arguments 必须是 JSON 对象"}
-        # LongCat 原生标签把参数值解析为字符串；按 MCP inputSchema 恢复基础 JSON 类型。
         arguments = self._coerce_mcp_arguments(
             raw_arguments,
             descriptor.get("input_schema") if isinstance(descriptor.get("input_schema"), dict) else {},
@@ -1927,7 +1713,6 @@ class AgentGraph:
     ) -> dict[str, Any]:
         """按 MCP 输入 Schema 恢复 LongCat 标签协议丢失的基础 JSON 类型。"""
 
-        # properties 是对象每个字段的子 Schema；不存在时保留原参数。
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         converted: dict[str, Any] = {}
         for key, value in arguments.items():
@@ -1945,49 +1730,37 @@ class AgentGraph:
                     converted[key] = value.strip().lower() == "true"
                 elif field_type in {"array", "object"}:
                     parsed = json.loads(value)
-                    # JSON 解析成功但根类型不符合 Schema 时仍保留字符串，让 MCP 返回标准校验错误。
                     expected = list if field_type == "array" else dict
                     converted[key] = parsed if isinstance(parsed, expected) else value
                 else:
                     converted[key] = value
             except (TypeError, ValueError, json.JSONDecodeError):
-                # 无法转换时不猜测，保留原值交给 MCP 服务的 Schema 校验。
                 converted[key] = value
         return converted
 
-    """轻量检查静态 Web 项目中常见的 HTML/JS 接线错误。
-    它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、
-    以及内联 `onclick` 调用未定义函数这类高频错误。
-    """
     def _static_web_check(self, fs: FsTool, files: list[str]) -> dict[str, Any] | None:
 
-        # html_files 同时覆盖静态站点入口、Flask static 目录和常见模板入口。
+        """
+        轻量检查静态 Web 项目中常见的 HTML/JS 接线错误。
+            它不是浏览器测试的替代品，但能抓住 `getElementById` 指向不存在元素、
+            以及内联 `onclick` 调用未定义函数这类高频错误。
+        """
         html_files = [file for file in files if Path(file).name == "index.html"]
         if not html_files:
             return None
-        # html 合并所有可识别入口模板，便于检查前端脚本引用的元素。
         html = "\n".join(fs.read(file, 40000) for file in html_files)
-        # js_text 是所有 JS 文件拼接后的内容，用于静态搜索 DOM 引用和函数定义。
         js_text = "\n".join(fs.read(file, 40000) for file in files if file.endswith(".js"))
-        # ids 收集 HTML 和 JS 动态创建出的元素 id。
         ids = set(re.findall(r'id=["\']([^"\']+)["\']', html))
         ids.update(re.findall(r"\.id\s*=\s*[\"']([^\"']+)[\"']", js_text))
         ids.update(re.findall(r"setAttribute\([\"']id[\"']\s*,\s*[\"']([^\"']+)[\"']\)", js_text))
-        # requested_ids 收集 JS 中 getElementById 访问的 id。
         requested_ids = set(re.findall(r"getElementById\([\"']([^\"']+)[\"']\)", js_text))
-        # missing_ids 是 JS 访问了但 HTML/JS 中没有定义的 id。
         missing_ids = sorted(requested_ids - ids)
 
-        # inline_calls 收集 HTML 内联事件里调用的函数名，例如 onclick="foo()"。
         inline_calls = set(re.findall(r'on\w+=["\']([A-Za-z_$][\w$]*)\s*\(', html))
-        # defined_funcs 收集 JS 中通过 function 定义的函数名。
         defined_funcs = set(re.findall(r"function\s+([A-Za-z_$][\w$]*)\s*\(", js_text))
-        # 同时把挂到 window 上的函数视为可被内联事件调用。
         defined_funcs.update(re.findall(r"window\.([A-Za-z_$][\w$]*)\s*=", js_text))
-        # missing_funcs 是 HTML 调用了但 JS 中没有定义的函数。
         missing_funcs = sorted(inline_calls - defined_funcs)
 
-        # used_classes 收集 HTML 和 JS 静态片段中明确使用的类名。
         class_values = re.findall(r'class=["\']([^"\']+)["\']', html + "\n" + js_text)
         class_values.extend(re.findall(r'className\s*=\s*["\'`]([^"\'`]+)["\'`]', js_text))
         used_classes = {
@@ -1996,23 +1769,18 @@ class AgentGraph:
             for name in re.split(r"\s+", value.strip())
             if name and "${" not in name
         }
-        # styled_classes 提取 CSS 中出现的普通类选择器；状态类可依赖组合选择器，同样会被命中。
         css_text = "\n".join(fs.read(file, 60_000) for file in files if file.endswith(".css"))
         css_text += "\n" + "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL | re.IGNORECASE))
         styled_classes = set(re.findall(r"\.([A-Za-z_-][\w-]*)", css_text))
-        # active 等纯状态类通常只和其他类组合使用；若 CSS 完全不存在则不做类名覆盖检查。
         ignored_classes = {"active", "assistant", "disabled", "hidden", "selected", "streaming", "user"}
         missing_classes = sorted((used_classes - styled_classes) - ignored_classes) if css_text else []
 
-        # issues 保存所有静态检查问题文本。
         issues = []
         if missing_ids:
             issues.append("缺失元素 id：" + "、".join(missing_ids))
         if missing_funcs:
             issues.append("缺失内联事件函数：" + "、".join(missing_funcs))
         issues.extend(dialog_style_issues(html, css_text, js_text))
-        # class 也可能只用于 JS 定位或继承父选择器，未单独声明不能可靠证明功能故障。
-        # missing_classes 作为诊断信息返回，但不参与静态接线成败判定。
         return {
             "cmd": "静态 Web 接线检查",
             "ok": not issues,
@@ -2029,8 +1797,8 @@ class AgentGraph:
         needs_vision = bool(state.get("attachments")) and agent in {"manager", "planner", "coder", "answer", "verifier"}
         return [cfg for cfg in self.model_store.fallbacks(current_id) if cfg.id not in blocked and (not needs_vision or "vision" in cfg.capabilities)]
 
-    """根据智能体名称创建对应模型客户端。"""
     def _client(self, agent: str, state: AgentState) -> LlmClient:
+        """根据智能体名称创建对应模型客户端。"""
         cfg = self.model_store.for_agent(agent, state.get("model_id"))
         if cfg.id in self.unavailable_models:
             candidates = self._fallback_models(agent, state, cfg.id)
@@ -2082,9 +1850,8 @@ class AgentGraph:
             content.append({"type": "input_text", "text": trailing_text})
         return content
 
-    """把当前上下文包序列化成模型输入文本。"""
     def _ctx_text(self, state: AgentState) -> str:
-        # ctx 是管理者构造的 ContextPackage。
+        """把当前上下文包序列化成模型输入文本。"""
         ctx = state.get("context")
         if not ctx:
             text = state["text"]
@@ -2118,11 +1885,9 @@ class AgentGraph:
             > int(state.get("coded_guidance_revision", 0))
         )
 
-    """模型文档生成失败时使用的基础 README 内容。"""
     def _fallback_doc(self, state: AgentState) -> dict[str, str]:
-        # files 是变更文件列表的 Markdown 项。
+        """模型文档生成失败时使用的基础 README 内容。"""
         files = "\n".join(f"- `{file}`" for file in state.get("changes", [])) or "- 暂无文件变更"
-        # tests 是验证结果列表的 Markdown 项。
         tests = "\n".join(f"- `{item.get('cmd', '检查')}`：{'通过' if item.get('ok') else '失败'}" for item in state.get("tests", []))
         return {
             "path": "README.md",
@@ -2150,9 +1915,7 @@ class AgentGraph:
 
         safe_msg = self.model_store.redact_text(msg)
         safe_data = self.model_store.redact(data or {})
-        # event_id 是本次任务内递增编号。
         self.event_id += 1
-        # event 是前端事件流消费的结构化事件。
         event = AgentEvent(
             id=self.event_id,
             ts=utc_stamp(),
@@ -2162,8 +1925,6 @@ class AgentGraph:
             tokens=tokens,
             data=safe_data,
         )
-        # 同步把事件写入会话记忆，便于中断后查看执行到哪一步。
-        # 持久化脱敏后的完整事件数据，历史恢复与实时事件使用同一合同。
         self.memory.append(
             state["workdir"],
             state["session_id"],
@@ -2189,7 +1950,6 @@ class AgentGraph:
         for item in incoming:
             text = str(item.get("text") or "").strip()
             if text:
-                # 单条指导保留足够上下文，同时避免连续超长输入挤掉任务和磁盘事实。
                 applied.append(self._trim(text, 12_000))
         if not applied:
             return state
@@ -2201,7 +1961,6 @@ class AgentGraph:
             ctx.guidance = combined
             state["context"] = ctx
         else:
-            # 极早到达的指导必须参与 manager 分类，不能只进入后续 Coding 提示。
             original = str(state.get("original_text") or state.get("text") or "")
             state["original_text"] = original
             state["text"] = original + "\n\n运行中用户追加指导：\n" + "\n".join(combined)
@@ -2311,5 +2070,4 @@ class AgentGraph:
 
 def new_session_id() -> str:
     """生成短会话 id，便于文件名和前端展示。"""
-    # uuid4().hex[:12] 生成 12 位短 id，足够本地会话使用且比完整 uuid 更易展示。
     return uuid.uuid4().hex[:12]

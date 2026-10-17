@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import os
@@ -52,7 +56,6 @@ def prepare_command(
         argv.insert(2, "--no-workspace")
     if program_name in ShellTool.dangerous_programs:
         return {"ok": False, "code": 126, "out": "", "err": f"高风险命令需要用户确认：{clean}", "cmd": clean, "argv": argv}
-    # 包装器不能把被拒绝的程序变成合法命令，例如 uv run rm、env rm。
     if program_name in {"uv", "env", "timeout", "npx", "npm"} and any(
         Path(arg).name.lower() in ShellTool.dangerous_programs for arg in argv[1:]
     ):
@@ -141,7 +144,6 @@ class ShellTool:
     """
 
     dangerous_programs = {
-        # 下面这些命令可能删除文件、格式化磁盘或破坏仓库状态，当前版本直接拒绝执行。
         "rm",
         "rmdir",
         "del",
@@ -153,11 +155,10 @@ class ShellTool:
         "sudo",
         "su",
     }
-    # dangerous_git 会覆盖、删除或切换工作区内容，必须由用户在 agent 外明确执行。
     dangerous_git = {"checkout", "clean", "reset", "restore", "rm"}
 
     def __init__(self, workdir: str):
-        # root 是命令执行目录，所有命令都在用户选择的项目目录内运行。
+        """初始化当前对象及其运行状态。"""
         self.root = Path(workdir).resolve()
 
     def run(self, cmd: str, timeout: int = 180, cwd: Path | None = None) -> dict[str, Any]:
@@ -170,33 +171,24 @@ class ShellTool:
         if isinstance(prepared, dict):
             return prepared
         clean, argv = prepared
-        # env 复制当前环境，保留用户已有 PATH 等配置。
         env = os.environ.copy()
-        # 项目解释器不能通过 Agent 的搜索路径借用宿主测试包或模块。
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
-        # Agent 自身虚拟环境不应污染另一个所选项目；仅保留位于当前项目内的 VIRTUAL_ENV。
         active_venv = env.get("VIRTUAL_ENV")
         if active_venv:
             venv_path = Path(active_venv).expanduser().resolve()
             if self.root != venv_path and self.root not in venv_path.parents:
                 env.pop("VIRTUAL_ENV", None)
-        # PYTHONUTF8 让 Python 子进程默认使用 UTF-8，减少中文输出乱码。
         env.setdefault("PYTHONUTF8", "1")
-        # CI 避免部分测试运行器进入交互观察模式。
         env.setdefault("CI", "1")
-        # uv/npm 的用户级缓存可能不在 Agent 沙箱写入范围内。为每个所选项目分配 /tmp 下的
-        # 稳定缓存，既避免权限错误，也不把依赖缓存写入用户项目并污染文件扫描。
         cache_key = sha256(str(self.root).encode("utf-8")).hexdigest()[:16]
         cache_root = Path(tempfile.gettempdir()) / "coding-agent-cache" / cache_key
         env["UV_CACHE_DIR"] = str(cache_root / "uv")
-        # Python 安装与浏览器运行时也需要可写目录，不能只隔离下载缓存。
         env["UV_PYTHON_INSTALL_DIR"] = str(cache_root / "python")
         env["UV_PYTHON_BIN_DIR"] = str(cache_root / "bin")
         env["PLAYWRIGHT_BROWSERS_PATH"] = str(cache_root / "browsers")
         env["NPM_CONFIG_CACHE"] = str(cache_root / "npm")
         started = time.monotonic()
-        # 日志写入自动清理的临时文件，输出再大也不会无上限占用 Agent 内存。
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
                 proc = subprocess.Popen(

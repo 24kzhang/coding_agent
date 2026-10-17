@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 """把简单的只读命令请求转为受控文件工具，不执行 shell。"""
 
 from __future__ import annotations
@@ -25,7 +29,6 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
             return {"tool": "read_file", "path": rel, "metadata_only": True, "measure": "path", "_source_command": command}
         except (OSError, ValueError):
             return None
-    # 私密 JSON 格式化也属于内容探查；包装器不能绕过文件工具的隐私边界。
     for index in range(len(argv) - 2):
         if argv[index:index + 2] == ["-m", "json.tool"] and len(argv[index + 2:]) == 1:
             try:
@@ -64,7 +67,6 @@ def inspection_read(fs: FsTool, state: dict, command: str) -> dict | None:
             return {**action, "_empty_range": True}
         if path.stat().st_size > 2_000_000 or path.suffix.lower() not in fs.text_suffixes | {".log", ".out", ".err"}:
             return None
-        # 与 FsTool.read 的原始换行保持一致，否则 CRLF 会使末尾字符偏移错位。
         with path.open("r", encoding="utf-8", errors="replace", newline="") as stream:
             text = stream.read()
         if unit == "lines":

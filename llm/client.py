@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import base64
@@ -47,22 +51,16 @@ def unavailable_error(error: Exception) -> bool:
 class LlmUsage:
     """统一记录 token 用量，并拆分缓存与推理开销。"""
 
-    # 输入侧 token 数，对应 OpenAI usage.prompt_tokens。
     prompt: int = 0
-    # 输出侧 token 数，对应 OpenAI usage.completion_tokens。
     completion: int = 0
-    # cached 是输入中命中供应商前缀缓存的 token 数。
     cached: int = 0
-    # cache_miss 是未命中缓存、需要重新计费或计算的输入 token 数。
     cache_miss: int = 0
-    # reasoning 是 completion 中用于内部推理的 token 数，不与 completion 重复累加。
     reasoning: int = 0
-    # 估算值与供应商返回值分开，缓存和成本结论不能建立在估算命中上。
     estimated: bool = False
-    # 供应商未返回推理明细时，兼容计算用的 0 不能作为已观测的零推理证据。
     reasoning_known: bool | None = None
 
     def __post_init__(self) -> None:
+        """完成实例创建后的字段规范化。"""
         self.prompt = max(0, self.prompt)
         self.completion = max(0, self.completion)
         self.cached = max(0, min(self.cached, self.prompt))
@@ -85,15 +83,12 @@ class LlmClient:
     常见的 chat completions 路径。这样不会把某个供应商的路径细节写死。
     """
 
-    # working_urls 缓存每个模型服务已经成功响应过的接口地址，避免后续请求反复探测路径。
     working_urls: dict[str, str] = {}
 
     def __init__(self, cfg: ModelConfig):
-        # cfg 是当前要调用的模型配置，来自 ModelStore。
+        """初始化当前对象及其运行状态。"""
         self.cfg = cfg
-        # last_usage 保存最近一次模型调用的 token 用量，AgentGraph 会把它累加到事件流。
         self.last_usage = LlmUsage()
-        # default_effort 可由 AgentGraph 按 Agent 配置覆盖。
         self.default_effort = cfg.default_effort
 
     @staticmethod
@@ -101,33 +96,23 @@ class LlmClient:
         """没有分词器时的保守估算：中文约 1.6 字符/token，英文约 4 字符/token。"""
         if not text:
             return 0
-        # chinese 统计中文字符数，中文通常比英文字符/token 比例更高。
         chinese = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-        # other 统计非中文字符数，按英文和符号的大致比例估算。
         other = max(len(text) - chinese, 0)
         return int(chinese / 1.6 + other / 4) + 1
 
     def _urls(self) -> list[str]:
         """根据用户填写的 base_url 生成候选 chat completions 地址。"""
 
-        # base 去掉末尾斜杠，避免拼接路径时出现双斜杠。
         base = self.cfg.base_url.rstrip("/")
-        # urls 按优先级保存候选地址，chat() 会依次尝试。
         urls: list[str] = []
-        # 用户如果已经填到完整 chat completions 地址，就直接使用。
         if base.endswith("/chat/completions"):
             urls.append(base)
-        # 用户如果填到 /v1，就只需要补 /chat/completions。
         if base.endswith("/v1"):
             urls.append(f"{base}/chat/completions")
         else:
-            # 常见 OpenAI-compatible 服务可能需要 /v1/chat/completions。
             urls.append(f"{base}/v1/chat/completions")
-            # 也有供应商直接在 base_url 后接 /chat/completions。
             urls.append(f"{base}/chat/completions")
-        # candidates 去重但保留顺序，便于首次调用探测不同供应商的路径规则。
         candidates = list(dict.fromkeys(urls))
-        # working_url 是此前已经成功调用过的地址；优先复用可显著减少无效路径探测。
         working_url = self.working_urls.get(base)
         if working_url in candidates:
             candidates.remove(working_url)
@@ -176,7 +161,6 @@ class LlmClient:
                     effort=effort,
                 )
             except LlmError as exc:
-                # auto 只在接口不存在且尚未执行任何工具时回退，认证、余额和模型错误不重放。
                 if self.cfg.protocol != "auto" or not any(
                     marker in str(exc) for marker in ("返回 404", "返回 405", "接口不存在")
                 ):
@@ -296,6 +280,7 @@ class LlmClient:
         require_call: bool = False,
         temperature: float = 0.2,
     ) -> dict[str, Any]:
+        """整理响应协议使用的原生工具参数。"""
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "temperature": temperature,
@@ -366,6 +351,7 @@ class LlmClient:
         require_call: bool = False,
         temperature: float = 0.2,
     ) -> dict[str, Any]:
+        """整理聊天协议使用的原生工具参数。"""
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "temperature": temperature,
@@ -505,6 +491,7 @@ class LlmClient:
 
     @staticmethod
     def _tool_result(actions: list[dict[str, Any]], summary: str) -> dict[str, Any]:
+        """规范化模型返回的工具调用结果。"""
         finish = next((item for item in actions if item.get("tool") == "finish"), None)
         executable = [item for item in actions if item.get("tool") != "finish"]
         if finish and not executable:
@@ -532,41 +519,29 @@ class LlmClient:
     ) -> str:
         """调用模型并返回文本内容。"""
 
-        # payload 是 OpenAI-compatible chat completions 请求体。
         payload = {
             "model": self.cfg.model,
             "messages": self._normalize_messages(messages, responses=False),
             "temperature": temperature,
         }
         payload.update(self._chat_reasoning(effort))
-        # max_tokens 是调用方按智能体职责设置的输出硬上限。Coding 工具参数需要比分类回答
-        # 更大，但仍不能允许模型无限生成完整文件并占住会话数分钟。
         payload[self.chat_token_field()] = self._output_limit(max_tokens)
-        # response_format 请求兼容接口强制返回 JSON；普通对话不携带该字段。
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        # headers 放鉴权信息和 JSON 类型声明。
         headers = {
             "Authorization": f"Bearer {self.cfg.api_key}",
             "Content-Type": "application/json",
         }
-        # last_error 保存最后一次失败原因，所有候选 URL 都失败后抛给上层。
         last_error = ""
-        # json_mode_rejected 记录供应商是否明确拒绝结构化输出参数，供 chat_json 降级重试。
         json_mode_rejected = False
-        # LongCat 长工具响应可能持续数分钟。使用 SSE 边生成边读取，读取超时按“相邻分片间隔”
-        # 计算，不会因为等待完整大响应而误判超时；其他兼容模型保留普通 JSON 请求。
         use_stream = "longcat" in self.cfg.model.lower()
         if use_stream:
             payload["stream"] = True
-        # 一个 client 复用连接池；候选 URL 和短重试不需要重复建立 TLS 连接。
         with httpx.Client(timeout=self.cfg.timeout, trust_env=False) as client:
-            # 按 _urls() 给出的候选地址依次尝试，兼容不同供应商 URL 规则。
             for url in self._urls():
                 for attempt in range(2):
                     try:
                         if use_stream:
-                            # stream() 保持连接打开到所有 SSE 分片读取结束。
                             with client.stream("POST", url, headers=headers, json=payload) as resp:
                                 status = resp.status_code
                                 if status in {404, 405}:
@@ -585,7 +560,6 @@ class LlmClient:
                                 self.working_urls[self.cfg.base_url.rstrip("/")] = url
                                 return self._stream_text(resp, messages)
 
-                        # 非流式模型沿用标准 OpenAI-compatible JSON 响应。
                         resp = client.post(url, headers=headers, json=payload)
                         if resp.status_code in {404, 405}:
                             last_error = f"{url} 返回 {resp.status_code}"
@@ -608,10 +582,8 @@ class LlmClient:
                     except LlmError:
                         raise
                     except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
-                        # 读取超时通常表示模型生成卡住，重复提交会浪费额度并把等待时间成倍放大。
                         raise LlmError(f"{url} 模型响应超时：{exc}") from exc
                     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                        # 只有连接建立阶段的短暂失败值得原地址重试；响应阶段错误不应重放模型请求。
                         last_error = f"{url} 调用失败：{exc}"
                         if attempt == 0 and isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
                             time.sleep(0.4)
@@ -774,6 +746,7 @@ class LlmClient:
         return fields
 
     def _effort(self, value: str | None) -> str:
+        """计算本次请求使用的思考等级。"""
         chosen = value or self.default_effort
         if chosen == "inherit":
             chosen = self.cfg.default_effort
@@ -784,7 +757,6 @@ class LlmClient:
             return "none" if chosen == "none" else "high"
         if "glm-5.3" in self.cfg.model.lower():
             return {"none": "low", "minimal": "low", "medium": "high"}.get(chosen, chosen)
-        # 统一界面的等级映射到供应商真正支持的等级，避免未知值被服务端忽略后启用高推理。
         if "deepseek" in self.cfg.model.lower():
             return {"minimal": "low", "medium": "high"}.get(chosen, chosen)
         return chosen
@@ -813,6 +785,7 @@ class LlmClient:
         data: dict[str, Any],
         messages: list[dict[str, Any]],
     ) -> LlmUsage:
+        """解析响应协议返回的用量信息。"""
         usage = data.get("usage") or {}
         prompt = int(usage.get("input_tokens") or 0)
         completion = int(usage.get("output_tokens") or 0)
@@ -857,6 +830,7 @@ class LlmClient:
 
     @staticmethod
     def _messages_text(messages: list[dict[str, Any]]) -> str:
+        """提取消息列表中的可读文本。"""
         parts: list[str] = []
         for message in messages:
             content = message.get("content", "")
@@ -883,7 +857,6 @@ class LlmClient:
     def _stream_text(self, response: httpx.Response, messages: list[dict[str, Any]]) -> str:
         """读取 OpenAI-compatible SSE 分片并拼成普通文本。"""
 
-        # 少数网关会忽略 stream=true 并返回普通 JSON，仍按标准响应兼容处理。
         content_type = response.headers.get("content-type", "").lower()
         if "text/event-stream" not in content_type:
             data = json.loads(response.read())
@@ -892,8 +865,6 @@ class LlmClient:
 
         parts: list[str] = []
         usage_data: dict[str, Any] = {}
-        # 流式读取避免把正常长生成误判为单次读取超时，但仍需要总时长和正文上限，
-        # 防止供应商持续发送心跳或模型失控生成导致会话永远不结束。
         deadline = time.monotonic() + max(self.cfg.timeout * 2, 300)
         text_size = 0
         length_stop = False
@@ -909,7 +880,6 @@ class LlmClient:
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
-                # SSE 允许注释和供应商扩展行；无法解析的非数据行不影响后续内容。
                 continue
             if isinstance(chunk.get("usage"), dict):
                 usage_data = chunk
@@ -948,7 +918,6 @@ class LlmClient:
         """返回结构化对象，并兼容 JSON 代码块与 LongCat 原生工具标签。"""
 
         if structured_tools and "tools" in self.cfg.capabilities:
-            # 分析节点只返回数据，不执行该函数；用原生参数协议避免源码引号污染 JSON 正文。
             spec = {"name": "return_json", "description": "返回调用方要求的完整 JSON 对象，不执行文件或命令操作。",
                     "parameters": {"type": "object", "properties": {"result": {"type": "object", "additionalProperties": True}},
                                    "required": ["result"], "additionalProperties": False}}
@@ -956,8 +925,6 @@ class LlmClient:
             result = self.chat_tools([*messages, instruction], [spec], max_tokens=max_tokens, force_tool="return_json", temperature=temperature)
             actions = result.get("actions") or []
             if not actions:
-                # 一些兼容网关忽略强制工具选择；只读分析可以接受严格的 JSON 正文。
-                # 非空工具列表仍按原生合同校验，不能把意外写入工具包装成数据返回。
                 text = str(result.get("summary") or "").strip()
                 if text.startswith("```"):
                     text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
@@ -976,32 +943,24 @@ class LlmClient:
                 raise LlmError("结构化函数没有返回唯一的 result 对象，未执行任何动作；调用结构：" + json.dumps(facts, ensure_ascii=False))
             return actions[0]["result"]
 
-        # chat_kwargs 只在调用方真的设置预算时携带 max_tokens，保持对旧测试桩和兼容客户端的调用合同。
         chat_kwargs: dict[str, Any] = {"temperature": temperature}
         if max_tokens is not None:
             chat_kwargs["max_tokens"] = max_tokens
         if plain_text:
-            # plain_text 用于供应商在 response_format 下连续返回空对象时的主动降级。
             raw_text = self.chat(messages, **chat_kwargs).strip()
         else:
-            # raw_text 优先请求供应商约束为 JSON；不支持 response_format 时兼容旧接口降级。
             try:
                 raw_text = self.chat(messages, json_mode=True, **chat_kwargs).strip()
             except LlmError as exc:
-                # 少数供应商接受 response_format，却把结果放到非标准字段并省略 content；
-                # 这种情况与明确返回 400 一样，应自动退回普通文本 JSON 请求。
                 error_text = str(exc)
                 unsupported_markers = ("不支持 JSON 输出模式", "'content'", "没有可用的文本 content")
                 if not any(marker in error_text for marker in unsupported_markers):
                     raise
                 raw_text = self.chat(messages, **chat_kwargs).strip()
-        # text 是去除 Markdown 代码围栏后的候选 JSON 文本。
         text = raw_text
-        # 有些模型会返回 ```json 代码块，这里去掉代码围栏。
         if text.startswith("```"):
             lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
-        # 完整 JSON 中的源码、示例标签都只是数据，不能再次按文本工具协议执行。
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -1010,7 +969,6 @@ class LlmClient:
             if not isinstance(parsed, dict):
                 raise LlmError("模型 JSON 顶层必须是对象")
             return parsed
-        # LongCat 偶尔会忽略 JSON 要求，改用其原生工具标签；这里统一转换为现有 ReAct actions。
         qwen_result = self._parse_qwen_tool_calls(text)
         if qwen_result:
             return qwen_result
@@ -1020,7 +978,6 @@ class LlmClient:
         longcat_result = self._parse_longcat_tool_calls(text)
         if longcat_result:
             return longcat_result
-        # 仅提取唯一合法对象；代码中的花括号和多个相互矛盾的对象不能冒充结果。
         candidate = self._extract_json_object(text)
         if candidate:
             text = candidate
@@ -1033,7 +990,6 @@ class LlmClient:
             limit = min(max_tokens or self.cfg.max_output_tokens, self.cfg.max_output_tokens)
             if self.last_usage.completion >= int(limit * 0.95):
                 raise LlmOutputLimitError("模型输出达到预算上限，未返回完整 JSON") from exc
-            # 抛出前带上截断后的模型输出，方便定位 prompt 或模型格式问题。
             raise LlmError(f"模型没有返回合法 JSON：{exc}\n{text[:1000]}") from exc
 
     def _parse_qwen_tool_calls(self, text: str) -> dict[str, Any] | None:
@@ -1061,7 +1017,6 @@ class LlmClient:
                 key, value = parameter.groups()
                 if key in arguments:
                     raise LlmError("XML 工具参数重复")
-                # 模板包裹的一对换行不是正文，正文内部空白和缩进保持不变。
                 value = value.removeprefix("\n").removesuffix("\n")
                 if key in {"expected", "max_chars", "max_results", "start", "arguments", "paths", "texts"}:
                     try:
@@ -1118,12 +1073,10 @@ class LlmClient:
     def _parse_longcat_tool_calls(self, text: str) -> dict[str, Any] | None:
         """把 LongCat 原生工具标签转换为项目统一的 ReAct JSON。"""
 
-        # call_pattern 同时支持一个响应包含多个工具调用；工具名位于开始标签后的首行。
         call_pattern = re.compile(
             r"<longcat_tool_call>\s*([^\r\n<]+)\s*(.*?)</longcat_tool_call>",
             re.DOTALL,
         )
-        # arg_pattern 提取键值标签；值允许包含换行和普通代码字符。
         arg_pattern = re.compile(
             r"<longcat_arg_key>\s*(.*?)\s*</longcat_arg_key>\s*"
             r"<longcat_arg_value>\s*(.*?)\s*</longcat_arg_value>",
@@ -1136,7 +1089,6 @@ class LlmClient:
         actions: list[dict[str, Any]] = []
         done = False
         summary = ""
-        # integer_keys 是 Coding 工具协议中要求整数的参数。
         integer_keys = {"expected", "max_chars", "max_results", "start"}
         for match in matches:
             tool = unescape(match.group(1).strip())
@@ -1150,14 +1102,12 @@ class LlmClient:
                     except ValueError:
                         pass
                 action[key] = value
-            # 某些 LongCat 响应会把完成状态也表示成工具调用。
             if tool in {"done", "finish"}:
                 done = True
                 summary = str(action.get("summary") or action.get("content") or "任务已完成。")
                 continue
             actions.append(action)
 
-        # thought 删除工具标签后只保留模型的自然语言判断；纯工具响应使用稳定说明。
         thought = call_pattern.sub("", text).strip() or "模型返回 LongCat 原生工具调用。"
         return {"thought": thought, "actions": actions, "done": done, "summary": summary}
 
@@ -1167,7 +1117,6 @@ class LlmClient:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            # parts 只提取字符串项或带 text 字段的内容块。
             parts: list[str] = []
             for item in content:
                 if isinstance(item, str):
@@ -1181,10 +1130,8 @@ class LlmClient:
     def _extract_json_object(self, text: str) -> str:
         """提取唯一合法的完整对象，不从截断对象内部抢救出可执行动作。"""
 
-        # start 是当前候选对象起始位置；depth 是花括号嵌套深度。
         start = -1
         depth = 0
-        # in_string 和 escaped 用于忽略 JSON 字符串内部的花括号及转义引号。
         in_string = False
         escaped = False
         candidates: list[str] = []
@@ -1217,12 +1164,10 @@ class LlmClient:
                     if isinstance(parsed, dict):
                         candidates.append(candidate)
                     start = -1
-        # 未闭合的外层对象不能被忽略，否则可能执行残缺批次中的早期动作。
         return candidates[0] if start < 0 and len(candidates) == 1 else ""
 
     def test(self) -> dict[str, Any]:
         """用于前端设置页的连通性测试。"""
-        # text 是模型连通性探测结果，只要求模型回复“连通成功”附近的中文。
         text = self.chat(
             [
                 {"role": "system", "content": "你只回答中文。"},
@@ -1230,17 +1175,13 @@ class LlmClient:
             ],
             temperature=0,
         )
-        # ok 用宽松判断，兼容模型回复“连接成功”“连通成功”等中文变体。
         return {"ok": "连通" in text or "成功" in text, "reply": text, "tokens": self.last_usage.total}
 
     def _usage(self, data: dict[str, Any], messages: list[dict[str, Any]]) -> LlmUsage:
         """从模型响应中读取 usage；没有 usage 时用文本长度估算。"""
 
-        # usage 是 OpenAI-compatible 响应里的标准 token 用量字段。
         usage = data.get("usage") or {}
-        # prompt 是输入 token 数。
         prompt = int(usage.get("prompt_tokens") or 0)
-        # completion 是输出 token 数。
         completion = int(usage.get("completion_tokens") or 0)
         prompt_details = usage.get("prompt_tokens_details") or {}
         completion_details = usage.get("completion_tokens_details") or {}
@@ -1263,9 +1204,7 @@ class LlmClient:
                 reasoning=min(reasoning, completion),
                 reasoning_known=completion_details.get("reasoning_tokens") is not None,
             )
-        # prompt_text 是所有输入消息拼接后的文本，用于估算输入 token。
         prompt_text = self._messages_text(messages)
-        # completion_text 是 choices 的 JSON 字符串，用于估算输出 token。
         completion_text = json.dumps(data.get("choices", []), ensure_ascii=False)
         estimated_prompt = self.estimate_tokens(prompt_text)
         return LlmUsage(

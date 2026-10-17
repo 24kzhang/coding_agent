@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import queue
@@ -95,6 +99,7 @@ class RunRegistry:
     """线程安全地管理当前进程中的活动运行。"""
 
     def __init__(self) -> None:
+        """初始化当前对象及其运行状态。"""
         self.lock = threading.RLock()
         self.by_id: dict[str, ActiveRun] = {}
         self.by_session: dict[str, str] = {}

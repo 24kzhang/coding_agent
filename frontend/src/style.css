@@ -1,4 +1,9 @@
-/* 沉稳明亮的工作台：暖灰底色、蓝灰控制色与克制的语义色。 */
+/*
+ * 作者：张又升
+ * 邮箱：1041586605@qq.com
+ * 单位：西北大学 电子信息学院(人工智能学院)
+ */
+
 :root {
   color: #28343e;
   background: #eeefec;
@@ -23,7 +28,6 @@
   --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
 }
 
-/* border-box 保证固定网格不会被边框和内边距意外撑大。 */
 * {
   box-sizing: border-box;
 }
@@ -64,7 +68,6 @@ select:focus-visible {
   outline-offset: 1px;
 }
 
-/* 浅暖灰背景让白色工作面保留清晰层次。 */
 .shell {
   width: 100%;
   height: 100dvh;
@@ -73,7 +76,6 @@ select:focus-visible {
   background: #eeefec;
 }
 
-/* 主网格保持三栏工作台和中栏底部输入区，不产生页面级上下滚动。 */
 .grid {
   display: grid;
   grid-template-columns: minmax(270px, 310px) minmax(320px, 1fr) minmax(320px, 380px);
@@ -232,7 +234,6 @@ select:disabled {
   color: var(--muted);
 }
 
-/* 设置页沿用配置控件，主页面左侧留给事件流。 */
 .side-section {
   display: flex;
   align-items: center;
@@ -313,7 +314,6 @@ select:disabled {
   white-space: nowrap;
 }
 
-/* 模型名称使用紧凑字号并允许自然换行，窄侧栏中仍能完整阅读供应商模型名。 */
 .model-name-button {
   min-height: 30px;
   gap: 5px;
@@ -333,7 +333,6 @@ select:disabled {
   overflow-wrap: anywhere;
 }
 
-/* 左侧快捷测试和删除只承担图标命令，缩小后为模型名称保留更多横向空间。 */
 .model-action-button {
   width: 28px;
   min-height: 28px;
@@ -346,7 +345,6 @@ select:disabled {
   gap: 8px;
 }
 
-/* 中间对话区不再套装饰卡片，滚动条直接贴住面板右边缘。 */
 .chat-panel {
   grid-column: 2;
   grid-row: 1;
@@ -388,7 +386,6 @@ select:disabled {
   font-size: 13px;
 }
 
-/* 每条消息由矩形消息框和框外紧贴的复制按钮组成。 */
 .message-row {
   flex: 0 0 auto;
   display: grid;
@@ -481,14 +478,12 @@ select:disabled {
 }
 
 .bubble.agent {
-  /* 长计划完整展开，统一使用外层对话窗口滚动。 */
   max-height: none;
   overflow: visible;
   border-color: #c4cfd2;
   background: #fcfdfb;
 }
 
-/* Markdown 使用紧凑技术文档排版，标题不会在消息框里膨胀成 Hero 字号。 */
 .bubble.agent h1,
 .bubble.agent h2,
 .bubble.agent h3,
@@ -593,7 +588,6 @@ select:disabled {
   color: var(--muted);
 }
 
-/* 右侧状态面板有明确高度约束，所有状态内容都可滚动到达。 */
 .right-col {
   grid-column: 3;
   grid-row: 1 / 3;
@@ -890,7 +884,6 @@ select:disabled {
   color: var(--muted);
 }
 
-/* 输入区与对话栏同宽，项目和会话操作在左，Plan 开关固定最右。 */
 .composer {
   grid-column: 2;
   grid-row: 2;
@@ -1090,7 +1083,6 @@ select:disabled {
   padding: 8px 0;
 }
 
-/* 模型和历史弹窗使用清晰的白色工作面，遮罩保持浅透明。 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1130,7 +1122,6 @@ select:disabled {
   padding-top: 5px;
 }
 
-/* 连通性结果紧邻测试按钮展示，同时保留主页面右上角的全局状态提示。 */
 .model-test-result {
   min-width: 0;
   display: grid;
@@ -1477,7 +1468,6 @@ select:disabled {
   flex-basis: 32px;
 }
 
-/* 所有内部滚动区使用窄而清晰的贴边滚动条。 */
 * {
   scrollbar-width: thin;
   scrollbar-color: #a6b2b5 transparent;
@@ -1542,7 +1532,6 @@ select:disabled {
   }
 }
 
-/* 事件流成为左侧贯穿工作台的观察区域。 */
 .event-panel {
   grid-column: 1;
   grid-row: 1 / 3;
@@ -1569,7 +1558,6 @@ select:disabled {
   font-family: var(--mono);
 }
 
-/* 仅溢出的单行状态自动往返滚动；悬停或键盘聚焦时可手动查看。 */
 .scroll-text {
   display: block;
   min-width: 0;
@@ -1607,7 +1595,6 @@ select:disabled {
   to { transform: translateX(var(--scroll-distance)); }
 }
 
-/* 设置窗口采用双栏总览，模型编辑仍在同一窗口完成。 */
 .settings-modal {
   width: min(960px, calc(100% - 40px));
   height: min(740px, calc(100dvh - 48px));
@@ -1685,7 +1672,6 @@ select:disabled {
 .model-error { margin: 0; color: var(--coral); font-size: 12px; overflow-wrap: anywhere; }
 .settings-editor .modal-actions { flex-wrap: wrap; }
 
-/* 中等宽度保留三栏，减少边栏占用。 */
 @media (max-width: 1220px) {
   .grid {
     grid-template-columns: minmax(230px, 270px) minmax(300px, 1fr) minmax(280px, 320px);
@@ -1696,7 +1682,6 @@ select:disabled {
   }
 }
 
-/* 平板把运行状态放在对话下方，事件流仍占据左侧。 */
 @media (max-width: 980px) {
   .grid {
     grid-template-columns: minmax(220px, 0.75fr) minmax(0, 1.5fr);
@@ -1722,7 +1707,6 @@ select:disabled {
 
 }
 
-/* 手机按操作顺序排列，各面板保留独立的滚动区域。 */
 @media (max-width: 600px) {
   html, body, #root {
     height: auto;
@@ -1791,6 +1775,5 @@ select:disabled {
   }
 }
 
-/* 实时与恢复事件共用详情，长工具结果保持可读。 */
 .event-detail summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .event-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: 12px; padding: 8px; }

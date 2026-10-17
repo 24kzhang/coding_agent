@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import ast
@@ -37,14 +41,11 @@ if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
 
 
-# 这些后缀用于从验证反馈中识别真正需要修复的代码和配置文件。
 _CODE_FILE_PATTERN = re.compile(
     r"(?<![\w.-])([\w./-]+\.(?:css|html|js|json|md|py|sh|toml|ts|tsx|yaml|yml))(?![\w.-])"
 )
 
-# FILE_CONTEXT_LIMIT 是单个当前文件快照的最大字符数。常见源码应完整保留，避免首尾压缩恰好丢掉中部待修改代码。
 FILE_CONTEXT_LIMIT = 24_000
-# SNAPSHOT_BUDGET 控制所有当前文件快照的总量；超大文件仍由 read_file 的 start/max_chars 分段读取。
 SNAPSHOT_BUDGET = 48_000
 
 
@@ -74,14 +75,8 @@ def _interface_brief(path: str, content: str) -> str:
         for match in re.finditer(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]{0,500})\)", content):
             signatures.append(f"{match[1]}({match[2]})")
     return "\n".join(signatures[:20])[:2_400]
-# CODER_OUTPUT_TOKENS 限制单轮 ReAct 工具参数。提示词已要求单次写入不超过 6000 字符，
-# 单轮为工具参数与协议留足空间，正文仍分块，总调用与 token 硬预算继续约束成本。
 CODER_OUTPUT_TOKENS = 12_000
-# 分块写入会增加合理执行步数。局部步数给实现和验证留出空间，运行级调用、
-# token 预算与无进展守卫继续约束成本，不能靠提前结束制造不完整交付。
 CODER_MAX_STEPS = 60
-# 429/5xx 与连接超时属于模型服务的瞬时故障，不应和无效 ReAct 协议共用“三次即终止”
-# 的预算。一次请求在 LlmClient 内已有短重试，这里再用较长退避跨过网关抖动窗口。
 CODER_MAX_TRANSIENT_FAILURES = 6
 CODER_TRANSIENT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 12.0)
 
@@ -121,7 +116,6 @@ def _middle_trim(text: str, limit: int) -> str:
 
     if len(text) <= limit:
         return text
-    # head_len 给文件开头更多预算，tail_len 保留测试错误和收尾代码。
     head_len = max(1, int(limit * 0.7))
     tail_len = max(1, limit - head_len)
     return text[:head_len] + "\n... 中间内容已省略 ...\n" + text[-tail_len:]
@@ -140,18 +134,13 @@ def _test_brief(
     for item in tests:
         if item.get("ok"):
             continue
-        # cmd 标明问题来自编译、测试、语义审查还是 Coding 状态。
         cmd = str(item.get("cmd") or "检查")
-        # 同一命令已经在修复后成功执行时，Verifier 的旧失败结果不再是当前事实。
         if cmd in passed:
             continue
         issues = item.get("issues")
         if isinstance(issues, list) and issues:
             for issue in issues[:12]:
                 issue_text = str(issue)
-                # 文件已在本轮成功修改后，旧审查文本只能视为“等待重新验证”，不能继续作为
-                # 当前事实反复驱动同一修复。若修改不完整，下一轮 Verifier 会基于新磁盘状态
-                # 再次给出问题；这比让 Coder 永久追逐过期描述更可靠。
                 if addressed and any(
                     path in issue_text or Path(path).name in issue_text
                     for path in addressed
@@ -159,7 +148,6 @@ def _test_brief(
                     continue
                 lines.append(f"- [{cmd}] {_middle_trim(issue_text, 700)}")
             continue
-        # 普通命令失败只保留首尾，冗长调用栈不会反复污染每一步上下文。
         output = str(item.get("out") or item.get("err") or "失败但没有输出")
         lines.append(f"- [{cmd}] {_middle_trim(output, 1_400)}")
     if not lines and (addressed or passed):
@@ -172,13 +160,11 @@ def _repair_paths(tests: list[dict], changes: list[str], current_files: list[str
 
     current = set(current_files)
     found: list[str] = []
-    # feedback_text 只用于提取文件路径，不直接进入模型上下文。
     feedback_text = json.dumps(tests, ensure_ascii=False)
     for match in _CODE_FILE_PATTERN.findall(feedback_text):
         rel = match.lstrip("./")
         if rel in current and rel not in found:
             found.append(rel)
-    # 若错误文本没有明确文件名，再从本任务变更中补少量核心文件。
     for rel in changes:
         if rel in current and rel not in found:
             found.append(rel)
@@ -199,7 +185,6 @@ def _task_brief(state: AgentState) -> str:
             )
         return _middle_trim(text, 18_000)
     constraints = "\n".join(f"- {item}" for item in ctx.constraints)
-    # skill_sections 只包含用户本轮手动选择的 Skill，不自动加载整个 skills 目录。
     skill_sections = "\n\n".join(
         f"### Skill: {item.name}\n{item.content}"
         for item in ctx.skills
@@ -226,7 +211,6 @@ def _repo_brief(repo: dict, *, include_snippets: bool) -> str:
         "文件清单：" + "、".join(files[:120]) + (f"（共 {len(files)} 个）" if len(files) > 120 else ""),
     ]
     if include_snippets:
-        # fresh_snippets 只保留仓库读取智能体选出的少量入口片段，总量受硬预算限制。
         fresh_snippets: list[str] = []
         budget = 12_000
         for path, content in (repo.get("snippets") or {}).items():
@@ -249,7 +233,6 @@ def _is_discovery_command(command: str) -> bool:
         return False
     if not argv:
         return False
-    # 仓库读取智能体已经提供稳定清单，Coding 不应再用这些命令绕过 list_files 限制。
     program = argv[0].rsplit("/", 1)[-1].lower()
     return program in {"find", "ls", "pwd", "tree"}
 
@@ -312,7 +295,6 @@ def _is_verification_command(command: str) -> bool:
     if any(arg in {"-c", "-e"} for arg in argv):
         return False
     names = [Path(arg).name.lower() for arg in argv]
-    # 测试目录中的入口无须名为 test：集成、界面和其他验收脚本都属于验证。
     if any(Path(arg).suffix in {".py", ".js", ".mjs", ".cjs", ".ts"}
            and any(part.lower() in {"tests", "test", "e2e"} for part in Path(arg).parts[:-1])
            for arg in argv):
@@ -359,14 +341,12 @@ def _native_coder_specs(mcp_tools: list[dict], reads_forbidden: bool, repo_ready
 def _observation_brief(action: dict, observation: dict) -> str:
     """把工具返回值转换为下一轮模型可直接判断的权威结果。"""
 
-    # status 明确写出成功或失败，避免“命令没有 stdout”被模型误认为尚未执行。
     status = "成功" if observation.get("ok") else "失败"
     tool = str(action.get("tool") or "工具")
     target = str(action.get("path") or action.get("cmd") or "").strip()
     prefix = f"工具结果 [{status}] {tool}" + (f"：{target}" if target else "")
     result = observation.get("result")
     if isinstance(result, dict):
-        # code/out/err 是命令验证最关键的三个字段；空输出也要显式说明。
         code = result.get("code")
         output = str(result.get("out") or result.get("err") or "").strip()
         detail = f"退出码={code}；" + (_middle_trim(output, 1_200) if output else "命令无输出，已正常结束")
@@ -378,26 +358,19 @@ def _observation_brief(action: dict, observation: dict) -> str:
 def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     """Coding 智能体：通过 ReAct 循环调用工具，真实修改项目文件。"""
 
-    # retry 是当前 Coding 轮次，验证失败回到 coder 时会递增。
     retry = int(state.get("retry", 0))
     graph._emit(state, "coder", "start", f"Coding 智能体开始 ReAct 执行，第 {retry + 1} 轮")
-    # fs/shell/git 是 Coding 智能体可调用的工具集合。
     fs = FsTool(state["workdir"])
     shell = graph._shell(state)
     git = GitTool(state["workdir"])
-    # client 是 coder 智能体对应的模型客户端。
     client = graph._client("coder", state)
-    # 首选模型仍优先使用，不可用时按配置顺序换模并保留当前任务与磁盘事实。
     current_model_id = str(getattr(getattr(client, "cfg", None), "id", ""))
     fallback_configs = (
         graph._fallback_models("coder", state, current_model_id) if current_model_id else []
     )
     failed_model_ids: set[str] = {current_model_id} if current_model_id else set()
-    # mcp_tools 在 Coding 真正开始时按需发现；答疑节点也有独立的 MCP ReAct 入口。
     mcp_tools = graph._ensure_mcp_tools(state)
-    # mcp_prompt 是动态工具名、用途和输入 Schema 的模型协议说明。
     mcp_prompt = graph._mcp_prompt(state)
-    # model_name 用于选择供应商稳定支持的输出协议，不改变用户配置的模型映射。
     model_name = str(getattr(getattr(client, "cfg", None), "model", "")).lower()
 
     def switch_coder_model(reason: str) -> bool:
@@ -418,24 +391,17 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         )
         graph._emit(state, "coder", "model", f"Coding 模型因{reason}自动切换到 {next_cfg.id}")
         return True
-    # observations 只保存精简后的工具结果，避免把完整文件和 traceback 每一步重复发送。
     observations: list[str] = []
-    # file_observations 保存最近一次读取或写入后自动刷新的当前文件快照。
     file_observations: dict[str, str] = {}
     interface_summaries: dict[str, str] = {}
     seen_search_hits: set[str] = set()
     search_cache: dict[str, dict] = {}
     read_cache: dict[str, dict] = {}
     version_cache: dict[str, dict] = {}
-    # seen_actions 保存已经执行或明确拒绝的动作签名，防止模型无视观察反复消耗相同工具。
     seen_actions: set[str] = set()
-    # progress_items 记录工具、路径或命令，模型每一步都能看到稳定的任务进度账本。
     progress_items: list[str] = []
-    # read_paths 记录本轮已经读取的文件，修改现有文件前必须命中这里。
     read_paths: set[str] = set()
-    # unchecked_rewrites 记录已整体重写但尚未经过命令验证的文件，防止模型反复生成同一完整文件。
     unchecked_rewrites: set[str] = set()
-    # mutation_count 记录真实写入或修改次数，用于识别“已经产出代码却持续只读”的失控循环。
     mutation_count = 0
     file_revision = 0
     preflight_revision: tuple[int, str] | None = None
@@ -443,60 +409,42 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     preflight_kind = ""
     pending_native_command = ""
     completed_checks: list[dict] = []
-    # 真正失败的命令保留完整诊断到对应命令通过，不被后续写入观察挤出窗口。
     failed_checks: dict[str, dict] = {}
     action_protocol_failures = 0
     edit_protocol_failures = 0
     assertion_protocol_failures = 0
-    # idle_after_mutation 统计最近连续多少轮没有新的写入或命令进展。
     idle_after_mutation = 0
-    # repo_files 来自前置仓库读取节点，已有索引时 Coder 无需再次 list_files。
     repo = state.get("repo") or {}
     repo_files = list(repo.get("files") or [])
-    # current_files 是本轮开始时的磁盘事实；修复轮次依靠它避免把已有项目误判为空项目。
     current_files = repo_files
     if state.get("repo") is not None:
         preview = "、".join(repo_files[:20]) or "空项目"
         observations.append(f"仓库读取节点已完成文件扫描：{preview}。不要调用 list_files，直接读取目标文件或开始写入。")
     if retry > 0:
-        # 验证失败后的修复轮次必须以当前磁盘为准，不能沿用最初仓库快照从头覆盖项目。
         current_files = fs.list(max_files=300)
         observations.append(
             "这是验证失败后的修复轮次。项目文件已经存在，只修复失败项，禁止从头重建、重复创建或扫描目录。"
         )
-        # repair_paths 只预读验证反馈明确涉及的文件，最多 6 个；无关变更不会占用模型上下文。
         repair_paths = _repair_paths(state.get("tests", []), state.get("changes", []), current_files)
-        # 最相关的失败文件最后进入缓存，优先保留在下一次模型可见窗口中。
         for rel in reversed(repair_paths):
             try:
                 file_observations[rel] = fs.read(rel, FILE_CONTEXT_LIMIT)
                 read_paths.add(rel)
             except (OSError, ValueError):
                 continue
-    # changes 继承已有变更列表，验证失败重试时不会丢掉前一轮变更记录。
     changes = list(state.get("changes", []))
-    # commands 继承已有命令列表。
     commands = list(state.get("commands", []))
     verification_commands = list(state.get("verification_commands", []))
-    # failed_tests 是每一步都保留的稳定修复清单，不会被后续工具观察挤出上下文。
     failed_tests = ""
-    # addressed_failure_paths 记录本轮已经成功修改的失败相关文件。对应旧反馈在本轮中
-    # 暂停展示，交给下一次 Verifier 重新判断，避免模型继续按照过期文本重复修改。
     addressed_failure_paths: set[str] = set()
-    # passed_failure_commands 记录修复后已经成功的旧失败命令，避免原错误日志继续误导模型。
     passed_failure_commands: set[str] = set()
-    # successful_verification_commands 记录本轮真实通过的测试、构建和烟测。
     successful_verification_commands: set[str] = set()
     if state.get("tests") and not state.get("tests_ok", True):
-        # 如果上一轮验证失败，把测试结果作为观察反馈给模型修复。
         failed_tests = _test_brief(state["tests"])
         if all(item.get("cmd") == "Coding 完成状态" for item in state["tests"] if not item.get("ok")):
             observations.append("上一轮只有 Coding 完成状态失败：当前文件若已满足需求，应直接返回 done=true，不要重新扫描或重建。")
 
-    # task_brief 会在每个规划检查点刷新，以便运行中指导进入下一次模型请求。
     task_brief = _task_brief(state)
-    # Repo 节点每轮都基于当前磁盘重建少量相关片段。修复轮继续携带尚未预读的片段，
-    # 已有权威快照的路径则去重，避免旧摘要与当前磁盘内容同时进入提示。
     repo_context = dict(repo)
     repo_context["snippets"] = {
         path: content
@@ -508,16 +456,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
     def prune_snapshots_after_timeout() -> None:
         """模型超时后只保留任务明确点名的文件，缩小下一轮输入并允许其他文件按需重读。"""
 
-        # named_paths 按当前快照顺序收集任务文字中出现的相对路径；通常就是正在修复的目标文件。
         named_paths = [path for path in file_observations if path in task_brief]
-        # 如果任务没有写出文件名，保留最后读取的一份，避免把全部代码再次发送给模型。
         keep_paths = set(named_paths[-2:] or list(file_observations)[-1:])
         for observed_path in list(file_observations):
             if observed_path in keep_paths:
                 continue
             file_observations.pop(observed_path, None)
             read_paths.discard(observed_path)
-            # 被裁掉的快照后续可以按需重新读取，旧 read_file 签名不能阻止恢复动作。
             stale_signatures = {
                 signature
                 for signature in seen_actions
@@ -528,19 +473,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             "模型超时后已收缩文件上下文，仅保留：" + ("、".join(sorted(keep_paths)) if keep_paths else "无")
         )
 
-    # coding_ok 只有模型明确 done 且最后一批动作都成功时才会变为 True。
     coding_ok = False
-    # coding_summary 保存模型明确给出的完成摘要或循环失败原因。
     coding_summary = ""
-    # parse_failures 统计连续结构化输出失败次数，偶发格式错误不会立刻终止任务。
     parse_failures = 0
-    # transient_failures 单独统计模型网关、限流和连接故障，避免服务抖动被误判为协议失败。
     transient_failures = 0
-    # empty_steps 统计模型返回合法结构但没有动作和完成标记的次数，用于触发 LongCat 普通文本降级。
     empty_steps = 0
-    # duplicate_read_failures 统计模型连续要求读取已在提示快照中的文件，达到阈值后切换模型。
     duplicate_read_failures = 0
-    # 单轮 Coding 最多执行固定次数的模型-工具循环；长项目需要足够的分批写入空间，同时仍有硬上限防失控。
     max_steps = CODER_MAX_STEPS
     loop_guard = LoopGuard()
     native_fallback = False
@@ -550,13 +488,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         native_trace.complete(observations)
         native_mode = isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []) and empty_steps < 2 and not native_fallback
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步规划前")
-        # 当前指导可能刚刚改变目标，必须重新生成任务摘要。
         task_brief = _task_brief(state)
         planned_guidance_revision = int(state.get("guidance_revision", 0))
         reads_forbidden = _guidance_forbids_reads(state)
-        # recent_observations 只保留最近 6 条精简事件；文件内容由 file_observations 单独管理。
         recent_observations = [_middle_trim(item, 1_200) for item in observations[-6:]]
-        # current_snapshots 只携带仍然有效的最近文件快照，总字符数设硬上限。
         current_snapshots: list[str] = []
         visible_complete_paths: set[str] = set()
         visible_cached_paths: set[str] = set()
@@ -575,7 +510,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 visible_cached_paths.add(path)
             current_snapshots.append(f"[{path} 当前内容{segment}]\n{snapshot}")
             snapshot_budget -= len(snapshot)
-        # messages 是本轮发给 Coding 模型的上下文。
         progress = "、".join(progress_items[-30:]) or "尚未执行成功工具"
         manifest = "、".join(current_files[:120]) or "空项目"
         readable = "、".join(sorted(read_paths)) or "无"
@@ -587,8 +521,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             )
             if native_mode:
                 finish_instruction = finish_instruction.replace("返回 actions=[]、done=true", "调用 finish")
-        # stable_text 在同一 Coding 循环中尽量保持不变，并放在图片之前，供 DeepSeek
-        # 从首 token 开始复用前缀缓存。步数、进度和工具观察等变化内容统一追加到末尾。
         stable_text = (
             task_brief
             + "\n\n仓库摘要：\n"
@@ -647,14 +579,10 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         if native_mode and chat_history:
             messages = [messages[0], {"role": "user", "content": graph._multimodal_content(stable_text, state)},
                         *native_trace.messages(), {"role": "user", "content": dynamic_text}]
-        # 任何真实或疑似密钥都不能再次发送给模型。受控 model_copy 不依赖模型看到密钥。
         messages = graph.model_store.redact(messages)
-        # usage_before 用对象身份区分“本次响应已产生用量但解析失败”和“请求前就失败”；
-        # 后一种情况不能重复累计上一轮用量。
         usage_before = getattr(client, "last_usage", None)
         try:
             output_limit = graph._check_model_budget(state, coder_output_limit)
-            # data 是模型返回的 ReAct JSON。
             if native_mode:
                 native_specs = _native_coder_specs(mcp_tools, reads_forbidden, state.get("repo") is not None)
                 data = client.chat_tools(
@@ -664,8 +592,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     require_call=True,
                 )
             elif "longcat" in model_name or empty_steps >= 2 or native_fallback:
-                # LongCat 的普通文本模式会稳定返回原生工具标签；直接使用该协议，避免先用
-                # response_format 连续得到空对象。其他模型只有连续空响应后才进入兼容模式。
                 if isinstance(client, LlmClient):
                     data = client.chat_json(messages, plain_text=True, max_tokens=output_limit)
                 else:
@@ -680,7 +606,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             failed_usage = getattr(client, "last_usage", None)
             if failed_usage is not usage_before:
                 graph._add_tokens(state, failed_usage, agent="coder", model_id=str(getattr(getattr(client, "cfg", None), "id", "")), effort=str(getattr(client, "default_effort", "")), failed=True)
-            # error_text 只保留错误前 240 字符，完整模型残片不会进入前端和记忆。
             error_text = str(exc)[:240]
             if unavailable_error(exc):
                 graph.unavailable_models.add(str(getattr(getattr(client, "cfg", None), "id", "")))
@@ -738,7 +663,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 parse_failures += 1
                 transient_failures = 0
             if "响应超时" in error_text or "超过总时长" in error_text:
-                # 超时通常来自一次生成过多完整文件内容。下一轮明确缩小动作，而不是原样重放。
                 prune_snapshots_after_timeout()
                 observations.append(
                     f"第 {step} 轮模型响应超时：{error_text}。下一轮只返回一个小动作，"
@@ -789,7 +713,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 coding_summary = "Coding 模型连续三次没有返回有效执行指令。"
                 break
             continue
-        # 模型请求期间可能收到新指导；旧响应中的动作还没有执行，此时全部丢弃并重新规划。
         state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步模型返回后")
         if int(state.get("guidance_revision", 0)) != planned_guidance_revision:
             observations.append("模型生成动作期间收到新指导，已丢弃尚未执行的旧动作并重新规划。")
@@ -797,15 +720,12 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
         parse_failures = 0
         transient_failures = 0
         native_trace.start(graph.model_store.redact(data.get("native_message")))
-        # thought 是模型本轮判断，会进入事件流方便用户观察。
         thought = data.get("thought", "")
         if thought:
             graph._emit(state, "coder", "thought", thought)
-        # actions 是模型请求执行的工具动作列表。
         actions = graph._normalize_actions(data.get("actions"), mcp_tools)
         invalid_actions = [str(action["_error"]) for action in actions if action.get("_error")]
         if invalid_actions:
-            # 参数校验失败不是工具执行失败；整批尚未执行，done 不能越过协议修订。
             action_protocol_failures += 1
             observations.append("本批工具尚未执行，必须修正参数：" + "；".join(invalid_actions[:3]))
             terminal = action_protocol_failures >= 3
@@ -818,7 +738,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             continue
         action_protocol_failures = 0
         if len(actions) > 3:
-            # 只执行前 3 个动作，剩余动作留到下一轮，避免一个错误批次破坏多个文件。
             observations.append(f"模型本轮返回 {len(actions)} 个动作，只执行前 3 个；其余动作请下一轮继续。")
             actions = actions[:3]
             data = {**data, "done": False}
@@ -837,9 +756,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     "验证清单仍明确指出交付物缺失，不能只返回完成标记；"
                     "下一步必须直接创建缺失文件或测试。"
                 )
-            # 部分推理模型即使设置为最低思考，仍可能把整个输出预算耗在 reasoning，
-            # 最终只返回一个没有动作的合法空结构。继续在同一模型上重试既不会推进任务，
-            # 还会按完整输出上限重复计费；首次触顶就切备用模型。
             completion = int(getattr(getattr(client, "last_usage", None), "completion", 0) or 0)
             if completion >= int(CODER_OUTPUT_TOKENS * 0.95) and switch_coder_model(
                 "输出预算耗尽但没有工具动作"
@@ -863,20 +779,13 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 break
             continue
         empty_steps = 0
-        # action_failed 表示本批动作至少有一个失败，模型必须观察并修复后才能 done。
         action_failed = False
         step_signatures: list[str] = []
-        # batch_progress 表示本批至少有一个成功且不是纯 Git 状态查询的动作。
         batch_progress = False
         diagnostic_progress = False
-        # switched_this_step 表示本轮因工具策略失败切换了模型，应立即进入下一轮重新规划。
         switched_this_step = False
-        # mutated_paths 收集本批已经改动的文件。一个批次内的多个精确替换共享批次起始快照；
-        # 批次结束后由编排器直接刷新磁盘快照，避免再消耗一次模型调用请求 read_file。
         mutated_paths: set[str] = set()
-        # dependency_mutated 表示安装、添加或同步依赖改变了运行环境，旧测试命令应允许重跑。
         dependency_mutated = False
-        # guidance_replan 表示动作批次中途收到指导，剩余旧动作必须停止。
         guidance_replan = False
         for action_index, action in enumerate(actions):
             state = graph._apply_guidance(state, checkpoint=f"Coding 第 {step} 步工具动作前")
@@ -920,7 +829,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if tool in {"write_file", "append_file", "replace_file", "replace_block"} and edit_path and fs.safe(edit_path).is_file() and not fs.is_sensitive(fs.safe(edit_path)) and (
                 edit_path not in read_paths or (tool == "write_file" and edit_path not in visible_complete_paths)
             ):
-                # 自动创建、同批新建与局部快照都不能冒充模型已经看到的完整旧内容。
                 edit_protocol_failures += 1
                 refreshed = graph.model_store.redact_text(fs.read(edit_path, FILE_CONTEXT_LIMIT))
                 file_observations.pop(edit_path, None)
@@ -970,7 +878,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         coding_summary = "编辑定位连续三次未修正，未写入无效替换。"
                     break
                 edit_protocol_failures = 0
-            # 以规范化后的路径识别重复动作，避免项目路径与工作区路径形成两个身份。
             signature = json.dumps(action, ensure_ascii=False, sort_keys=True)
             step_signatures.append(signature)
             path = str(action.get("path") or (action.get("target") if tool == "model_copy" else "") or "")
@@ -997,8 +904,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 }
             elif reads_forbidden and (tool in {"list_files", "read_file", "search_files"} or inspection_command):
                 duplicate_read_failures += 1
-                # 新指导把后续合法动作收窄为“直接写入或验证”。这次被权限层拒绝的旧式读取
-                # 不应继承并耗尽指导到达前的空转预算，否则模型还没获得下一次改写机会就会退出。
                 idle_after_mutation = 0
                 observation = {
                     "ok": False,
@@ -1051,7 +956,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 tool == "write_file"
                 and path
                 and fs.safe(path).exists()
-                # 单用户本地场景允许在完整读取后整体重写。未读取时仍拒绝，避免模型盲目覆盖用户文件。
                 and path not in read_paths
             ):
                 observation = {
@@ -1140,7 +1044,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         preflight_revision = review_key
                         graph._emit(state, "coder", "review", "执行前合同审查：" + ("；".join(preflight_issues) if preflight_issues else "未发现阻碍，继续实际验证"))
                     if preflight_issues and fresh_review:
-                        # 尚未执行命令，保留审查建议为实施待办；不伪造命令结果或测试通过。
                         observations.append(
                             "执行前审查候选（模型意见，不是实际执行结果）：" + "；".join(preflight_issues)
                             + "。证据充分时精确修复；若候选引用旧版本错误、与当前源码或标准接口不符，"
@@ -1148,10 +1051,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                         )
                         diagnostic_progress = True
                         break
-                    # 模型已收到当前版本的建议，再次选择执行时以真实测试裁定；不得重复阻挡。
                     preflight_issues = []
                     preflight_kind = ""
-                # observation 是工具执行后的结构化观察。
                 observation = graph._do_action(action, fs, shell, git, state)
             observation = graph.model_store.redact(observation)
             if tool == "run_command" and not observation.get("cached") and observation.get("result"):
@@ -1183,7 +1084,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 read_cache[signature] = {**observation, "read": dict(observation.get("read") or {})}
                 if len(read_cache) > 24:
                     read_cache.pop(next(iter(read_cache)))
-            # read_file 的完整内容只进入文件快照，普通观察只保留简短结果。
             if tool == "read_file" and observation.get("ok") and observation.get("content_available") is not False and observation.get("exists") is not False and path:
                 marker = "\n"
                 raw_text = str(observation["text"])
@@ -1204,8 +1104,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                     and fs.safe(path).exists()
                 ):
                     try:
-                        # 定位失败后立即把真实磁盘内容提升为最近观察。部分模型会忽略较早的
-                        # 文件快照并继续猜旧文本，这条短观察能让下一步直接使用现有锚点。
                         refreshed = graph.model_store.redact_text(
                             fs.read(path, FILE_CONTEXT_LIMIT)
                         )
@@ -1222,7 +1120,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             if observation.get("ok"):
                 if tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} or observation.get("files"):
                     file_revision += 1
-                    # 同一批中的后续查询也必须看到刚写入的源码，不能只在批次末失效。
                     search_cache.clear()
                     read_cache.clear()
                     seen_actions = {
@@ -1236,7 +1133,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 if tool == "write_file" and path:
                     unchecked_rewrites.add(path)
                 elif tool == "run_command" and not observation.get("cached"):
-                    # 一次成功验证后允许根据新的客观结果继续整体修复。
                     unchecked_rewrites.clear()
                     command = str(action.get("cmd") or "")
                     dependency_mutated = dependency_mutated or _is_dependency_mutation_command(command)
@@ -1257,11 +1153,8 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 elif tool in {"append_file", "model_copy", "replace_block", "replace_file", "write_file"} and path and not observation.get("cached"):
                     successful_verification_commands.clear()
                     passed_failure_commands.clear()
-                    # 同一批的后续精确修改仍可基于本批起始快照；批次结束后再统一失效。
                     mutated_paths.add(path)
                     if tool == "write_file":
-                        # 本批刚成功写入的内容就是模型提交的当前版本，可继续精确修改或追加。
-                        # 整体重写仍由 unchecked_rewrites 和完整快照守卫独立限制。
                         read_paths.add(path)
                     if path not in current_files:
                         current_files.append(path)
@@ -1303,8 +1196,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             continue
         for mutated_path in mutated_paths:
             try:
-                # 工具成功写入后，以磁盘为唯一事实源重新加载文件。下一轮模型可直接基于这个
-                # 最新快照继续 replace_file，不需要经过“修改 -> 再读 -> 再修改”的空转循环。
                 file_observations.pop(mutated_path, None)
                 file_observations[mutated_path] = graph.model_store.redact_text(
                     fs.read(mutated_path, FILE_CONTEXT_LIMIT)
@@ -1313,8 +1204,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 read_paths.add(mutated_path)
                 observations.append(f"已自动刷新修改后的当前文件：{mutated_path}；下一轮禁止重复读取，可直接继续修改。")
             except (OSError, ValueError):
-                # 极少数情况下文件在工具返回后被外部删除或变得不可读，此时撤销可修改标记，
-                # 后续动作仍会被修改前读取守卫拦截，避免模型基于过期内容继续覆盖。
                 read_paths.discard(mutated_path)
                 file_observations.pop(mutated_path, None)
         if mutated_paths:
@@ -1334,16 +1223,11 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
                 version_cache.clear()
                 successful_verification_commands.clear()
                 passed_failure_commands.clear()
-            # 文件或依赖状态变化后，之前运行过的同一测试已经不再是重复动作，必须允许复验。
             seen_actions = {item for item in seen_actions if '"tool": "run_command"' not in item}
-        # 同一批中只要已有真实写入或验证命令成功，就属于有效推进；
-        # 另一个并行动作失败会反馈给下一轮修复，但不能把已落盘进展误算为空转。
         if batch_progress or diagnostic_progress:
             idle_after_mutation = 0
             duplicate_read_failures = 0
         elif mutation_count:
-            # changes 包含此前轮次的产物，不代表本轮已经完成诊断并开始实现。
-            # 修复轮允许读取不同目标文件；重复/交替读取仍由 LoopGuard 和硬预算约束。
             idle_after_mutation += 1
         if edit_protocol_failures >= 3 or assertion_protocol_failures >= 3:
             break
@@ -1376,7 +1260,6 @@ def coder(graph: AgentGraph, state: AgentState) -> AgentState:
             break
     if not coding_ok and not coding_summary:
         coding_summary = "Coding 在最大 ReAct 步数内没有明确完成任务。"
-    # unique_changes 去重并排序，保证最终结果稳定。
     unique_changes = sorted(dict.fromkeys(changes))
     safe_commands = graph.model_store.redact(commands)
     safe_summary = graph.model_store.redact_text(coding_summary)

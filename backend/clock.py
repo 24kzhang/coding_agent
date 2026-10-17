@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -11,6 +15,5 @@ def utc_stamp() -> str:
     保留秒级精度和明确时区。
     """
 
-    # now 是当前 UTC 时间；只保留到秒，避免每条记忆携带无意义的微秒。
     now = datetime.now(UTC)
     return now.strftime("%Y-%m-%dT%H:%M:%SZ")

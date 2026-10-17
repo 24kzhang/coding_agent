@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 
@@ -5,6 +9,7 @@ class LoopGuard:
     """检测单动作和交替动作空转，进展到达时清空旧窗口。"""
 
     def __init__(self) -> None:
+        """初始化当前对象及其运行状态。"""
         self.history: list[str] = []
 
     def record(self, signature: str, *, progress: bool) -> bool:

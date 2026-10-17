@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import json
@@ -35,11 +39,9 @@ from backend.memory import MemoryStore
 from backend.runs import RunConflictError, RunNotFoundError, RunRegistry
 from llm import LlmClient, LlmError, ModelStore
 
-# app 是 FastAPI 应用实例，所有 HTTP 路由都挂在它上面。
 app = FastAPI(title="多智能体编程系统", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    # 仅允许本机动态端口访问，避免其他网页借助浏览器调用本地文件工具接口。
     allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?",
     allow_credentials=False,
     allow_methods=["*"],
@@ -47,15 +49,10 @@ app.add_middleware(
     expose_headers=["X-Run-ID"],
 )
 
-# model_store 是模型配置仓库，读写 memory/config/models.json。
 model_store = ModelStore()
-# memory_store 是记忆仓库，读写 memory/data 下的会话、项目和全局记忆。
 memory_store = MemoryStore()
-# capability_store 负责发现项目根目录 skills 和读取 MCP/servers.json。
 capability_store = CapabilityStore()
-# mcp_client 通过官方 MCP SDK 测试、发现和调用用户选择的服务。
 mcp_client = McpClient()
-# run_registry 保存当前进程中的活动任务和运行中指导队列。
 run_registry = RunRegistry()
 
 
@@ -101,7 +98,6 @@ def test_model(model_id: str) -> dict[str, Any]:
     """测试指定模型是否能正常返回内容。"""
 
     try:
-        # cfg 是待测试的模型配置。
         cfg = model_store.get(model_id)
         return LlmClient(cfg).test()
     except (KeyError, LlmError) as exc:
@@ -163,15 +159,11 @@ def list_capabilities() -> CapabilitiesResponse:
 def test_mcp(server_id: str, workdir: str) -> dict[str, Any]:
     """测试 MCP 初始化和工具发现，不执行任何 MCP 工具。"""
 
-    # resolved 是占位符 ${workspace} 使用的真实项目目录。
     resolved = _resolve_workdir(workdir)
     try:
-        # config 必须来自已启用配置，不能由接口临时注入命令或 URL。
         config = capability_store.select_mcps([server_id])[0]
         return mcp_client.test(config, resolved)
     except Exception as exc:
-        # 官方 MCP SDK 的异步上下文在子进程失败时可能抛出 ExceptionGroup，
-        # API 统一转成可读 400，避免前端只能看到内部服务器错误。
         raise HTTPException(status_code=400, detail=f"MCP 连接失败：{exc}") from exc
 
 
@@ -203,13 +195,9 @@ def get_mcp_auth(server_id: str, workdir: str) -> McpAuthStatus:
 def create_session(req: SessionCreate) -> SessionInfo:
     """创建新会话，并写入一条 session/start 记忆。"""
 
-    # workdir 是用户选择的真实项目目录，统一解析成绝对路径。
     workdir = _resolve_workdir(req.workdir)
-    # session_id 是短 uuid，用于 jsonl 文件名和前端状态。
     session_id = new_session_id()
-    # title 是会话展示名；没有传标题时默认用 session_id。
     title = " ".join((req.title or "").strip().split())[:60] or session_id
-    # 写入会话开始记录，后续历史会话列表从这里读取初始标题。
     memory_store.append(workdir, session_id, "manager", "session", "start", f"新会话：{title}", {"title": title, "custom": bool(req.title)})
     return SessionInfo(
         id=session_id,
@@ -274,11 +262,8 @@ def delete_session_file(session_id: str, file_id: str) -> dict[str, Any]:
 @app.post("/api/pick-dir")
 def pick_dir() -> dict[str, str]:
     """拉起本机系统目录选择器，返回可供后端访问的绝对路径。"""
-    # selected 是系统原生目录选择器返回的路径。
     selected = _pick_dir_by_system_dialog()
     if not selected:
-        # FastAPI 的同步路由运行在线程池中，不能在这里创建 tkinter 窗口。
-        # macOS 会因此抛出 “NSWindow should only be instantiated on the main thread” 并终止进程。
         raise HTTPException(status_code=400, detail="未选择项目目录或系统目录选择器不可用")
     return {"workdir": str(Path(selected).expanduser().resolve())}
 
@@ -286,17 +271,14 @@ def pick_dir() -> dict[str, str]:
 def _pick_dir_by_system_dialog() -> str:
     """按操作系统选择原生目录选择器命令。"""
 
-    # system 是当前操作系统名称，用于区分 macOS 和 Windows。
     system = platform.system()
     if system == "Darwin":
-        # macOS 使用 osascript 拉起 Finder 目录选择器。
         cmd = [
             "osascript",
             "-e",
             'POSIX path of (choose folder with prompt "选择项目目录")',
         ]
     elif system == "Windows":
-        # Windows 使用 PowerShell 加载 WinForms FolderBrowserDialog。
         cmd = [
             "powershell",
             "-NoProfile",
@@ -312,7 +294,6 @@ def _pick_dir_by_system_dialog() -> str:
     else:
         return ""
     try:
-        # result 保存系统目录选择器命令的输出；stdout 是用户选择的目录。
         result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -330,9 +311,7 @@ def list_history() -> HistoryResponse:
 def delete_project(workdir: str) -> dict[str, Any]:
     """删除某个项目对应的 agent memory，不删除真实项目目录。"""
 
-    # resolved 是规范化后的真实项目路径，用于定位项目 memory。
     resolved = _resolve_workdir(workdir, require_exists=False)
-    # deleted 表示 memory 目录是否实际存在并被删除。
     deleted = memory_store.delete_project(resolved)
     return {"ok": True, "deleted": deleted}
 
@@ -341,9 +320,7 @@ def delete_project(workdir: str) -> dict[str, Any]:
 def get_session(session_id: str, workdir: str) -> SessionInfo:
     """读取当前会话基本信息。"""
 
-    # resolved 是规范化后的项目路径。
     resolved = _resolve_workdir(workdir, require_exists=False)
-    # capabilities 是该会话最近一次请求选择的 Skills 和 MCP 服务。
     capabilities = memory_store.session_capabilities(resolved, session_id)
     return SessionInfo(
         id=session_id,
@@ -358,13 +335,11 @@ def get_session(session_id: str, workdir: str) -> SessionInfo:
 def rename_session(session_id: str, req: SessionUpdate) -> SessionInfo:
     """重命名会话，并返回更新后的会话信息。"""
 
-    # resolved 是规范化后的项目路径。
     resolved = _resolve_workdir(req.workdir, require_exists=False)
     try:
         memory_store.rename_session(resolved, session_id, req.title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # capabilities 在重命名时保持不变，一并返回便于前端合同稳定。
     capabilities = memory_store.session_capabilities(resolved, session_id)
     return SessionInfo(
         id=session_id,
@@ -379,9 +354,7 @@ def rename_session(session_id: str, req: SessionUpdate) -> SessionInfo:
 def delete_session(session_id: str, workdir: str) -> dict[str, Any]:
     """删除指定会话 memory 文件。"""
 
-    # resolved 是规范化后的项目路径。
     resolved = _resolve_workdir(workdir, require_exists=False)
-    # deleted 表示会话 jsonl 是否实际存在并被删除。
     deleted = memory_store.delete_session(resolved, session_id)
     return {"ok": True, "deleted": deleted}
 
@@ -390,7 +363,6 @@ def delete_session(session_id: str, workdir: str) -> dict[str, Any]:
 def read_memory(workdir: str, session_id: str | None = None) -> dict[str, Any]:
     """调试接口：读取全局、项目和可选会话记忆。"""
 
-    # resolved 是规范化后的项目路径。
     resolved = _resolve_workdir(workdir, require_exists=False)
     return {
         "global": memory_store.global_memory(),
@@ -403,9 +375,7 @@ def read_memory(workdir: str, session_id: str | None = None) -> dict[str, Any]:
 def chat_stream(req: ChatRequest) -> StreamingResponse:
     """执行一次 agent 任务，并以 NDJSON 流式返回事件和最终结果。"""
 
-    # event_queue 是后台执行线程和 StreamingResponse 生成器之间的通信队列。
     event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
-    # workdir 通过 session_id 反查，避免前端伪造任意项目路径执行任务。
     workdir = _session_workdir(req.session_id)
     attachments: list[dict[str, Any]] = []
     total_attachment_size = 0
@@ -427,21 +397,16 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             }
         )
     try:
-        # skill_contexts 是受字符预算限制的 SKILL.md 正文。
         skill_contexts = capability_store.load_skills(req.skills)
-        # mcp_configs 仅能来自 MCP/servers.json 中已启用服务。
         mcp_configs = capability_store.select_mcps(req.mcps)
     except (OSError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        # active_run 让后续指导能够定位当前 Agent，并阻止同一会话并发改动项目。
         active_run = run_registry.start(req.session_id, workdir, event_queue)
     except RunConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
-        # resuming 必须在写入本轮记录前判断，否则当前用户输入会被误认为上轮中断。
         resuming = memory_store.interrupted(workdir, req.session_id)
-        # 能力与 Shell 选择独立写入 session memory，恢复历史会话时前端会同步还原。
         memory_store.append(
             workdir,
             req.session_id,
@@ -452,12 +417,10 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             + ("容器 Shell" if req.container_shell else "原生 Shell"),
             {
                 "skills": [item.id for item in skill_contexts],
-                # 会话只恢复用户手动选择；always_on 服务由后端在每轮重新合并。
                 "mcps": list(dict.fromkeys(req.mcps)),
                 "container_shell": req.container_shell,
             },
         )
-        # 先记录用户输入，这样即使任务中途异常，也能在历史会话中看到用户发过什么。
         memory_store.append(
             workdir,
             req.session_id,
@@ -467,7 +430,6 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             model_store.redact_text(req.text),
             {"attachments": [item["id"] for item in attachments]},
         )
-        # run/start 是中断恢复的明确边界；正常、失败两种出口都会写对应终态。
         memory_store.append(workdir, req.session_id, "manager", "run", "start", "本轮任务开始")
     except Exception:
         run_registry.finish(active_run.id)
@@ -482,7 +444,6 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
         """后台线程函数，负责真正运行 AgentGraph。"""
 
         try:
-            # agent 是本次任务的 LangGraph 编排实例，emit 用于实时输出事件。
             graph = AgentGraph(
                 model_store,
                 memory_store,
@@ -490,7 +451,6 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 mcp_client=mcp_client,
                 guidance_source=active_run.drain_guidance,
             )
-            # result 是任务最终结果，会以 type=result 写入队列。
             result = graph.run(
                 session_id=req.session_id,
                 workdir=workdir,
@@ -509,7 +469,6 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             memory_store.append(workdir, req.session_id, "manager", "run", "done", "本轮任务正常结束")
             active_run.publish({"type": "result", "data": result.model_dump()})
         except Exception as exc:
-            # failure 会写入最终会话回复，历史恢复后仍能看到异常，而不是只留半轮对话。
             failure = TaskResult(
                 ok=False,
                 summary=model_store.redact_text(f"任务执行失败：{exc}"),
@@ -524,10 +483,8 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                 failure.model_dump(),
             )
             memory_store.append(workdir, req.session_id, "manager", "run", "error", failure.summary)
-            # 捕获异常并转成流式 error，避免前端一直等待。
             active_run.publish({"type": "error", "data": {"msg": model_store.redact_text(str(exc)), "result": failure.model_dump()}})
         finally:
-            # None 是流结束哨兵，同时让运行进入可恢复的最近完成列表。
             active_run.publish(None)
             run_registry.finish(active_run.id)
 
@@ -560,6 +517,7 @@ def resume_run(run_id: str, cursor: int = 0) -> StreamingResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     def stream() -> Any:
+        """流式发送当前任务的事件与最终结果。"""
         for item in active_run.replay(cursor):
             yield json.dumps(item, ensure_ascii=False) + "\n"
 
@@ -606,7 +564,6 @@ def _session_workdir(session_id: str) -> str:
 
     会话文件分散在项目记忆目录中，因此这里扫描 sessions 文件。数量很大时可换成索引文件。
     """
-    # workdir 是 MemoryStore 根据 session_id 找到的真实项目目录。
     try:
         workdir = memory_store.find_session_workdir(session_id)
     except ValueError as exc:
@@ -619,7 +576,6 @@ def _session_workdir(session_id: str) -> str:
 def _resolve_workdir(value: str, *, require_exists: bool = True) -> str:
     """规范化项目目录，并在需要时验证目录真实存在。"""
 
-    # path 是用户选择目录展开 ``~`` 后的绝对路径。
     path = Path(value).expanduser().resolve()
     if require_exists and not path.is_dir():
         raise HTTPException(status_code=400, detail=f"项目目录不存在或不是文件夹：{path}")

@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import re
@@ -8,10 +12,12 @@ class _Dialogs(HTMLParser):
     """收集非原生模态的定位标识，普通脚本定位类不参与样式验收。"""
 
     def __init__(self) -> None:
+        """初始化当前对象及其运行状态。"""
         super().__init__()
         self.dialogs: list[dict[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        """收集网页起始标签中的相关信息。"""
         values = dict(attrs)
         if tag != "dialog" and values.get("role") == "dialog" and values.get("aria-modal") == "true":
             self.dialogs.append(values)
@@ -22,7 +28,6 @@ def dialog_style_issues(html: str, css: str, js: str) -> list[str]:
 
     parser = _Dialogs()
     parser.feed(html)
-    # 外部样式框架和运行时注入不宜通过静态正则判错，交由实际浏览器验收。
     if re.search(r'<(?:link|script)[^>]+(?:href|src)=["\']https?://', html) or "insertRule(" in js:
         return []
     clean_css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)

@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import hashlib
@@ -10,13 +14,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# ROOT 是 Coding Agent 项目根目录，下载内容只保存在项目自身的忽略目录中。
 ROOT = Path(__file__).resolve().parents[1]
-# VERSION 固定经过验证的 GitHub MCP 官方发行版本，升级时必须同步更新校验值。
 VERSION = "1.7.0"
-# RELEASE_BASE 是 GitHub 官方仓库的版本资产下载根地址。
 RELEASE_BASE = f"https://github.com/github/github-mcp-server/releases/download/v{VERSION}"
-# TARGETS 把运行平台映射到官方资产名和发布页提供的 SHA-256。
 TARGETS = {
     ("Darwin", "arm64"): (
         "github-mcp-server_Darwin_arm64.tar.gz",
@@ -36,10 +36,8 @@ TARGETS = {
 def target() -> tuple[str, str]:
     """返回当前系统对应的官方资产与校验值。"""
 
-    # system 和 machine 使用 Python 标准平台名称，避免依赖 bash/uname。
     system = platform.system()
     machine = platform.machine()
-    # aliases 统一 Windows 和 macOS 常见架构别名。
     aliases = {
         "aarch64": "arm64" if system == "Darwin" else "ARM64",
         "arm64": "arm64" if system == "Darwin" else "ARM64",
@@ -55,18 +53,14 @@ def target() -> tuple[str, str]:
 def ensure_binary() -> Path:
     """下载、校验并解压当前平台的 GitHub MCP 官方二进制。"""
 
-    # asset 和 expected_digest 来自固定版本官方 checksums 文件。
     asset, expected_digest = target()
-    # cache_dir 按版本隔离，升级失败不会覆盖此前可用二进制。
     cache_dir = ROOT / ".cache" / "mcp" / "github" / VERSION
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # binary_name 在 Windows 带 exe 后缀，其他平台使用无后缀可执行文件。
     binary_name = "github-mcp-server.exe" if os.name == "nt" else "github-mcp-server"
     binary = cache_dir / binary_name
     if binary.is_file():
         return binary
 
-    # archive 是固定版本压缩包；part 避免中断下载被误认为完整文件。
     archive = cache_dir / asset
     part = archive.with_suffix(archive.suffix + ".part")
     request = urllib.request.Request(
@@ -82,7 +76,6 @@ def ensure_binary() -> Path:
         raise RuntimeError("GitHub MCP 下载文件校验失败，已拒绝执行")
     part.replace(archive)
 
-    # 只提取名称精确匹配的服务器文件，不使用 extractall，避免压缩包路径穿越。
     if asset.endswith(".zip"):
         with zipfile.ZipFile(archive) as bundle:
             member = next((name for name in bundle.namelist() if Path(name).name == binary_name), None)
@@ -99,7 +92,6 @@ def ensure_binary() -> Path:
                 raise RuntimeError("GitHub MCP 可执行文件读取失败")
             binary.write_bytes(source.read())
 
-    # macOS 需要显式增加当前用户执行位；Windows 忽略该位。
     if os.name != "nt":
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
     return binary
@@ -108,7 +100,6 @@ def ensure_binary() -> Path:
 def main() -> None:
     """启动只读 GitHub MCP stdio 服务，首次运行由官方二进制发起 OAuth。"""
 
-    # args 默认只读，后续若实现高风险工具确认再考虑开放写操作。
     binary = ensure_binary()
     args = [str(binary), "stdio", "--read-only", *sys.argv[1:]]
     os.execv(str(binary), args)

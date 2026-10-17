@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import ast
@@ -12,9 +16,11 @@ class RepoMap:
     """按文件指纹增量缓存符号，并在字符预算内生成仓库地图。"""
 
     def __init__(self) -> None:
+        """初始化当前对象及其运行状态。"""
         self.cache: dict[str, tuple[int, int, list[str], list[str]]] = {}
 
     def build(self, fs: FsTool, files: list[str], goal: str, budget: int = 8_000) -> dict[str, Any]:
+        """按相关性和字符预算构建仓库符号地图。"""
         tokens = {item.lower() for item in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", goal)}
         rows: list[tuple[int, str, list[str], list[str]]] = []
         for rel in files:
@@ -44,6 +50,7 @@ class RepoMap:
         return {"files": selected, "cached": len(self.cache), "budget": budget, "used": used}
 
     def _symbols(self, path: Path) -> tuple[list[str], list[str]]:
+        """读取文件中的符号和引用，并缓存分析结果。"""
         stat = path.stat()
         key = str(path)
         cached = self.cache.get(key)

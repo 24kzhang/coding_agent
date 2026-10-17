@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import json
@@ -18,13 +22,10 @@ class ModelStore:
     """
 
     def __init__(self, path: Path | None = None):
-        # project_root 让默认配置路径不依赖启动命令当时的 cwd。
+        """初始化当前对象及其运行状态。"""
         project_root = Path(__file__).resolve().parents[1]
-        # path 是模型配置文件路径；测试时可传入临时路径。
         self.path = path or project_root / "memory" / "config" / "models.json"
-        # 确保配置目录存在，避免首次启动保存模型时报错。
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # 首次启动时创建空模型列表和默认智能体模型映射。
         if not self.path.exists():
             self._write(
                 {
@@ -37,21 +38,17 @@ class ModelStore:
     def all(self) -> list[ModelConfig]:
         """读取全部模型配置。"""
 
-        # data 是 models.json 的完整内容。
         data = self._read()
-        # 将原始 dict 转成 Pydantic 模型，保证字段类型和默认值一致。
         return [ModelConfig(**item) for item in data.get("models", [])]
 
     def redact_text(self, value: Any) -> str:
         """从任意可展示文本中移除已配置密钥和常见凭据字面量。"""
 
         text = str(value)
-        # 真实配置值优先精确替换。过短测试值不参与，避免把普通字母误删。
         for model in self.all():
             secret = str(model.api_key or "")
             if len(secret) >= 8:
                 text = text.replace(secret, "[密钥已脱敏]")
-        # 即使模型凭空生成了一个未配置的密钥，也不能让它进入源码、事件或记忆。
         token_pattern = re.compile(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b")
         return token_pattern.sub("[密钥已脱敏]", text)
 
@@ -110,9 +107,7 @@ class ModelStore:
     def set_model_map(self, model_map: AgentModelMap) -> AgentModelMap:
         """保存智能体到模型 id 的映射。"""
 
-        # data 是当前配置文件内容，只替换 agent_models 部分。
         data = self._read()
-        # model_ids 是当前真实存在的模型；非空映射不能指向已删除或拼错的 id。
         model_ids = {str(item.get("id")) for item in data.get("models", [])}
         invalid = sorted({model_id for model_id in model_map.model_dump().values() if model_id and model_id not in model_ids})
         if invalid:
@@ -151,30 +146,24 @@ class ModelStore:
     def get(self, model_id: str | None) -> ModelConfig:
         """按模型 id 获取配置；为空时返回第一个启用模型。"""
 
-        # models 是当前已配置模型列表。
         models = self.all()
         if not models:
             raise KeyError("还没有配置任何模型")
         if model_id:
-            # 显式传入 model_id 时必须精确匹配，否则提示配置错误。
             for model in models:
                 if model.id == model_id:
                     return model
             raise KeyError(f"模型不存在：{model_id}")
-        # 没有显式指定模型时，优先选择 enabled=True 的模型。
         for model in models:
             if model.enabled:
                 return model
-        # 如果所有模型都被禁用，仍返回第一个，避免系统完全不可用。
         return models[0]
 
     def for_agent(self, agent: str, override: str | None = None) -> ModelConfig:
         """获取某个智能体应该使用的模型配置。"""
 
-        # override 是本次请求的临时模型覆盖，优先级高于全局 agent_models。
         if override:
             return self.get(override)
-        # model_map 保存每个智能体对应的模型 id。
         profiles = self.profiles()
         profile = getattr(profiles, agent, AgentProfile())
         return self.get(profile.model_id or None)
@@ -212,19 +201,14 @@ class ModelStore:
 
         blocked = set(excluded or set())
         blocked.add(current_id)
-        # 用户配置顺序就是备用优先级，不根据供应商名称隐式改变排序。
         return [model for model in self.all() if model.enabled and model.id not in blocked]
 
     def upsert(self, cfg: ModelConfig) -> ModelConfig:
         """新增或更新一个模型配置。"""
 
-        # data 是当前配置文件内容。
         data = self._read()
-        # models 是原始模型 dict 列表，写回时仍保持 JSON 结构。
         models = data.get("models", [])
-        # replaced 标记当前 id 是否已经存在。
         replaced = False
-        # idx 是当前遍历到的模型下标，item 是模型原始 dict。
         for idx, item in enumerate(models):
             if item.get("id") == cfg.id:
                 value = cfg.model_dump()
@@ -233,7 +217,6 @@ class ModelStore:
                 models[idx] = value
                 replaced = True
                 break
-        # 没有同 id 模型时追加为新配置。
         if not replaced:
             if not cfg.api_key:
                 raise ValueError("新增模型必须填写 API Key")
@@ -258,7 +241,6 @@ class ModelStore:
         ignore = project_root / ".gitignore"
         if ignore.is_symlink():
             raise ValueError("不能通过符号链接修改忽略配置")
-        # 模型工具同时接受配置标识与唯一名称；同名的不同服务配置必须由调用者明确选择。
         configured = self.all()
         cfg = next((item for item in configured if item.id == model_id), None)
         if cfg is None:
@@ -304,18 +286,12 @@ class ModelStore:
     def delete(self, model_id: str) -> None:
         """删除模型，并把引用该模型的智能体映射切换到 fallback。"""
 
-        # data 是当前配置文件内容。
         data = self._read()
-        # 删除指定 id 的模型，保留其他模型。
         data["models"] = [item for item in data.get("models", []) if item.get("id") != model_id]
-        # model_map 是删除前的智能体模型映射。
         model_map = AgentModelMap(**data.get("agent_models", {}))
-        # fallback 是删除后可用的第一个模型 id；没有模型时为空字符串。
         enabled = [item for item in data["models"] if item.get("enabled", True)]
         fallback = (enabled or data["models"])[0]["id"] if data["models"] else ""
-        # mapped 是可修改的映射 dict。
         mapped = model_map.model_dump()
-        # 如果某个智能体原来绑定被删除模型，就切换到 fallback，避免前端下拉框悬空。
         for agent, current in list(mapped.items()):
             if current == model_id:
                 mapped[agent] = fallback
@@ -336,9 +312,7 @@ class ModelStore:
     def _write(self, data: dict[str, Any]) -> None:
         """把配置写回 JSON 文件。"""
 
-        # content 是格式化后的完整配置，便于用户直接检查明文文件。
         content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-        # temp_path 与正式配置同目录，写完后原子替换，避免程序中断留下半个 JSON。
         temp_path = self.path.with_name(f".{self.path.name}.tmp")
         temp_path.write_text(content, encoding="utf-8")
         os.chmod(temp_path, 0o600)

@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 """不执行用户代码的本地 Python 导入合同检查。"""
 
 from __future__ import annotations
@@ -80,6 +84,7 @@ def middleware_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             shadowed.update(arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg))
             candidates = names - shadowed
             def inspect(node, current=fn, aliases=candidates, filename=rel):
+                """检查代码节点及其引用关系。"""
                 if node is not current and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Try, ast.TryStar)):
                     return
                 if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name) and node.exc.func.id in aliases:
@@ -113,7 +118,6 @@ def router_issues(fs: FsTool, state: dict, files: list[str]) -> list[str]:
             returned = {node.value.id for node in fn.body if isinstance(node, ast.Return) and isinstance(node.value, ast.Name)}
             included = {argument.id for node in ast.walk(fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "include_router" and isinstance(node.func.value, ast.Name) and node.func.value.id in returned for argument in node.args[:1] if isinstance(argument, ast.Name)}
             candidates = (shared & (returned | included)) - local
-            # 明确重置路由表属于幂等注册，不把它误当作累积。
             reset = {node.func.value.value.id for node in ast.walk(fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "clear" and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "routes" and isinstance(node.func.value.value, ast.Name)}
             for child in fn.body:
                 if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -230,12 +234,14 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
         return []
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     def ancestors(node):
+        """返回路径的各级父目录。"""
         result = []
         while node in parents:
             node = parents[node]
             result.append(node)
         return result
     def owner(node):
+        """查找目标路径对应的项目归属。"""
         return next((item for item in ancestors(node) if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
     shadowed = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "open" or isinstance(node, ast.Name) and node.id == "open" and isinstance(node.ctx, ast.Store) or isinstance(node, ast.ImportFrom) and any((alias.asname or alias.name) == "open" for alias in node.names) for node in ast.walk(tree))
     path_names = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "pathlib" for alias in node.names if alias.name == "Path"}
@@ -244,6 +250,7 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
     known = {"__file__": script}
     pure_calls = set()
     def path_value(node):
+        """从节点中提取可解析的路径值。"""
         value = None
         if isinstance(node, ast.Name):
             value = known.get(node.id)
@@ -319,7 +326,6 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
             continue
         fn = owner(node)
         if derived and fn is not None:
-            # 未调用或局部遮蔽的函数路径无法证明必然执行，不作阻断。
             local_names = {item.id for item in ast.walk(fn) if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)} | {arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg)}
             used_names = {item.id for item in ast.walk(node.func.value) if isinstance(item, ast.Name)}
             if fn.name not in invoked or invoked - {fn.name} or local_names & used_names:
@@ -328,7 +334,6 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
             reads.append((target, node, derived, chain))
     opaque_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and node not in pure_calls and not (isinstance(node.func, ast.Name) and node.func.id in {"open", *path_names, *local_functions})]
     for target, node, derived, chain in reads:
-        # 参数先于外层调用求值；外层 json.loads 等不能替内层读取创建文件。
         previous = [call for call in opaque_calls if call not in chain and (call.lineno, call.col_offset) < (node.lineno, node.col_offset)]
         if previous or (derived and owner(node) is not None and any(owner(call) is None and call not in chain for call in opaque_calls)):
             continue
@@ -379,7 +384,6 @@ def imported_inputs(fs: FsTool, state: dict, files: list[str], command: str) -> 
         if issues:
             return issues
         for node in tree.body:
-            # 条件/异常回退/函数内部导入不保证运行，留给实际验证。
             if isinstance(node, ast.Import):
                 imports = [(alias.name, 0) for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
@@ -520,7 +524,6 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
             elif option in {"--directory", "-C"}:
                 directory = value
         elif (argument not in {"run", "sync", "build"} and not argument.startswith("-")) or argument == "--":
-            # 程序自己的参数不属于 uv 项目定位参数。
             break
         index += 1
     if directory is not None:
@@ -534,6 +537,7 @@ def manifest_issues(fs: FsTool, state: dict, command: str) -> list[str]:
     except (OSError, ValueError, UnicodeError):
         return []
     def table(*keys):
+        """从项目配置中读取指定配置表。"""
         value = data
         for key in keys:
             value = value.get(key, {}) if isinstance(value, dict) else {}
@@ -579,6 +583,7 @@ def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dic
     modules: dict[Path, ast.Module | None] = {}
 
     def parse(path: Path) -> ast.Module | None:
+        """解析输入内容并返回结构化结果。"""
         if path not in modules:
             try:
                 rel = path.relative_to(fs.root).as_posix()
@@ -591,9 +596,9 @@ def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dic
         return modules[path]
 
     def exports(tree: ast.Module) -> set[str] | None:
+        """收集模块公开导出的名称。"""
         names: set[str] = set()
         for node in tree.body:
-            # 条件导出、星号导入及动态属性不能由这项保守检查判定缺失。
             if isinstance(node, (ast.If, ast.Try, ast.Match)):
                 return None
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -612,6 +617,7 @@ def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dic
 
     issues: list[str] = []
     def locate(candidates: list[Path]) -> Path | None:
+        """定位目标名称对应的源码位置。"""
         return next((candidate.with_suffix(".py") if candidate.with_suffix(".py").is_file()
                      else candidate / "__init__.py" for candidate in candidates
                      if candidate.with_suffix(".py").is_file() or (candidate / "__init__.py").is_file()), None)
@@ -628,6 +634,7 @@ def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dic
         parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
         def owner(node, ancestors=parents, module_tree=tree):
+            """查找目标路径对应的项目归属。"""
             while node in ancestors:
                 node = ancestors[node]
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -693,7 +700,6 @@ def import_issues(fs: FsTool, state: dict, files: list[str], contracts: list[dic
                     names = exports(source) if source else None
                     if names is not None and chain.attr not in names and not (module.name == "__init__.py" and locate([module.parent / chain.attr])):
                         issues.append(f"{rel}:{node.lineno} 的 pytest 补丁目标 `{ast.unparse(target_object)}` 先访问了本地模块 {module.relative_to(fs.root)} 未导出的 `{chain.attr}`；函数内部导入不是模块全局属性。请对照实际查找位置注入替身")
-                # 已导出的对象可能来自外部模块或动态实例，不猜测其后续成员。
                 continue
             if any(keyword.arg == "raising" and isinstance(keyword.value, ast.Constant) and keyword.value.value is False for keyword in node.keywords):
                 continue

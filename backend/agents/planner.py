@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import json
@@ -16,10 +20,8 @@ if TYPE_CHECKING:
     from backend.agents.graph import AgentGraph
 
 
-# Planner 与 Coding 一样会遇到限流、网关 5xx 和短暂连接故障；这些错误不应立刻降级成通用计划。
 _TRANSIENT_MARKERS = ("429", "500", "502", "503", "504", "连接", "Connect", "响应超时", "ReadTimeout")
 _RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
-# 字段/格式校验和独立一致性审查各保留三次修订机会；运行级硬预算仍统一约束成本。
 _MAX_PLAN_REPAIRS = 6
 _MAX_STAGE_REPAIRS = 3
 
@@ -207,7 +209,6 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     plan_lower = markdown.lower()
     issues: list[str] = []
 
-    # 用户明确给出的配置字段名属于 HTTP/配置合同，不允许模型自行改名。
     for field in ("api_key", "base_url", "model_name"):
         if field in goal_lower and field not in plan_lower:
             issues.append(f"配置计划遗漏或改名了用户指定字段 `{field}`")
@@ -216,7 +217,6 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
     if re.search(r"(?i)\b(?:sk-|ak_|agt_)[A-Za-z0-9._-]{12,}\b", markdown):
         issues.append("计划初稿复制了真实凭据，必须改成不含真实值的占位说明")
 
-    # Repo 已读到 schema 时，字段清单必须完整使用真实名称。
     fields = _schema_fields(state.get("repo") or {})
     missing_fields = [field for field in fields if not _mentions_field(markdown, field)]
     if missing_fields:
@@ -251,20 +251,17 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
 
     data_site = "数据集" in goal and ("网站" in goal or "web" in goal_lower)
     if data_site:
-        # 前端不能只写“读取某 JSON”而不说明浏览器如何访问工作区外的数据。
         if not re.search(r"/api/[\w/{.-]+", markdown) and not any(word in markdown for word in ("静态资源", "公开数据 URL", "静态 JSON")):
             issues.append("缺少可执行的数据访问合同：应规划明确的数据接口或公开静态资源地址")
         if not any(word in plan_lower for word in ("pytest", "vitest", "jest", "go test", "cargo test", "自动化测试")):
             issues.append("缺少核心接口和数据逻辑的自动化测试")
 
-    # 一旦计划选择 React + TypeScript，就必须规划独立类型检查和生产构建。
     if "react" in plan_lower and "typescript" in plan_lower:
         if "typecheck" not in plan_lower and "tsc --noemit" not in plan_lower and "tsc --noemit" not in plan_lower.replace(" ", ""):
             issues.append("React + TypeScript 计划缺少独立 `typecheck`/`tsc --noEmit` 检查")
         if "npm run build" not in plan_lower:
             issues.append("前端计划缺少 `npm run build` 生产构建验收")
 
-    # 用户要求完整详情时，计划必须明确逐项渲染原始对象，而非只列基础信息。
     complete_detail_claim = any(phrase in markdown for phrase in ("所有字段", "全部字段", "全部原始字段", "逐字段")) or bool(
         re.search(r"(?:所有|全部|完整)\s*\d*\s*个?\s*(?:原始)?字段", markdown)
     )
@@ -272,7 +269,6 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         issues.append("详情未明确展示数据记录的所有原始字段")
     detail_mentions = list(re.finditer(r"左侧|左栏", markdown))
     if require_complete and fields and detail_mentions:
-        # 图像解读可能先提到左栏；应选择实际字段合同最完整的一处，不能只截首个词。
         detail_sections = [markdown[item.start() : item.start() + 2_500] for item in detail_mentions]
         detail_section = max(detail_sections, key=lambda section: sum(_mentions_field(section, field) for field in fields))
         dynamic_complete = bool(
@@ -300,7 +296,6 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             if next_method:
                 ends.append(start + next_method.start())
             section = markdown[start:min(ends)]
-            # 每个接口各自判断；同一表格的下一个下载接口不能覆盖前一个 JSON 合同。
             if re.search(r"FileResponse|Content-Type.{0,12}(?:image/|video/|audio/|application/octet-stream)", section, re.IGNORECASE):
                 continue
             detail_api_sections.append(section)
@@ -357,7 +352,6 @@ def _should_auto_answer_plan_questions(graph: AgentGraph, state: AgentState) -> 
     """用户要求直接交付时，同轮采用可选工程决策的推荐项。"""
 
     goal = graph._plan_goal(state)
-    # 自动选择只服从用户的一次性交付指令，不依赖项目领域或配置字段。
     return any(phrase in goal for phrase in ("一次性生成", "一次性", "直接生成", "不需要确认", "按推荐选项"))
 
 
@@ -377,9 +371,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     """Plan 智能体：生成澄清问题或可执行 Markdown 计划。"""
 
     graph._emit(state, "planner", "start", "Plan 智能体正在生成问题或可执行计划")
-    # client 是 planner 智能体对应的模型客户端。
     client = graph._client("planner", state)
-    # fallback_configs 只包含 enabled=True 的其他模型；显式 model_id 覆盖时尊重用户选择，不自动切换。
     fallback_configs = (
         graph._fallback_models("planner", state, getattr(getattr(client, "cfg", None), "id", ""))
         if getattr(getattr(client, "cfg", None), "id", "") and not state.get("model_id")
@@ -387,11 +379,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     )
     failed_models: set[str] = set()
     transient_counts: dict[str, int] = {}
-    # messages 是发给模型的系统提示词和上下文包。
-    # context_text 除结构化任务上下文外，还包含前置 Repo 节点筛选出的真实文件片段。
-    # Planner 必须先看 schema/清单等仓库事实，避免按常见项目印象臆造字段和目录。
     context_text = graph._ctx_text(state)
-    # 规划阶段不执行工具，但必须依据执行层同源合同选择路径、格式及参数。
     context_text += "\n\n执行层工具合同（当前阶段只读，供规划后续操作）：\n" + json.dumps(
         [{"name": item["name"], "description": item["description"], "parameters": item["parameters"]} for item in tool_specs()],
         ensure_ascii=False,
@@ -421,7 +409,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     last_error: LlmError | None = None
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
-            # data 应该是模型返回的 JSON，status 为 questions 或 plan。
             data = graph._model_json(state, "planner", client, messages)
             break
         except LlmBalanceError:
@@ -433,7 +420,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 break
             current_id = str(getattr(getattr(client, "cfg", None), "id", ""))
             transient_counts[current_id] = transient_counts.get(current_id, 0) + 1
-            # 读取超时表示本次长生成已经占满整个 timeout，立即故障转移；普通 5xx 连续两次再切换。
             should_failover = "响应超时" in error_text or transient_counts[current_id] >= 2
             if should_failover and fallback_configs:
                 failed_models.add(current_id)
@@ -457,7 +443,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             )
             time.sleep(delay)
     if data is None:
-        # 模型返回非 JSON 时使用兜底问题或兜底计划，避免 Plan 流程卡死。
         graph._emit(
             state,
             "planner",
@@ -465,10 +450,8 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             f"Plan 模型返回异常，已使用默认澄清问题：{str(last_error or '未知错误')[:120]}",
         )
         if state.get("pending_plan"):
-            # 如果已经在回答上一轮问题，模型异常时直接生成默认计划。
             data = {"status": "plan", "title": "默认执行计划", "markdown": graph._fallback_plan_markdown(state)}
         else:
-            # 第一轮 Plan 模型异常时，返回一个默认选择题让用户继续。
             data = {
                 "status": "questions",
                 "questions": [
@@ -482,7 +465,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 ],
             }
     if data.get("status") == "questions":
-        # 清洗模型输出的问题，防止 JSON 错误信息或异常长文本展示给用户。
         data = {**data, "questions": graph._normalize_plan_questions(data.get("questions"))}
         if _should_auto_answer_plan_questions(graph, state):
             graph._emit(state, "planner", "review", "任务信息已足够，自动采用推荐选项继续生成计划")
@@ -517,7 +499,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
     if data.get("status") == "plan":
         graph.memory.append(state["workdir"], state["session_id"], "planner", "plan", "draft",
                             "计划初稿", graph.model_store.redact(data))
-        # Plan 初稿必须先通过确定性合同审查；不合格时按上限自动修订，用户只看到最终计划。
         normalized_markdown = str(data.get("markdown") or "")
         best_data = {**data, "markdown": normalized_markdown}
         best_issues = _plan_quality_issues(graph, state, normalized_markdown)
@@ -598,7 +579,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             if repaired.get("status") != "plan" or not repaired.get("markdown"):
                 graph.memory.append(state["workdir"], state["session_id"], "planner", "plan", "invalid_revision",
                                     "修订未返回执行计划", graph.model_store.redact(repaired))
-                # 修订输出格式异常只消耗本次机会，不得跳过余下修订预算。
                 current_id = str(getattr(getattr(client, "cfg", None), "id", ""))
                 next_cfg = next((cfg for cfg in fallback_configs if cfg.id != current_id), None)
                 if next_cfg is not None:
@@ -618,8 +598,6 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             if not repaired_issues:
                 repaired_issues = _semantic_plan_issues(graph, {**state, "plan_author_id": str(getattr(getattr(client, "cfg", None), "id", ""))}, context_text, str(repaired["markdown"]))
             improved = len(repaired_issues) < len(best_issues)
-            # 格式检查与语义检查的问题数量不可直接比较质量；下一轮必须看到
-            # 最新候选和它真实未解决的问题，避免一直重修已解决的旧字段问题。
             best_data = repaired
             best_issues = repaired_issues
             best_stage = repaired_stage
@@ -664,9 +642,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
                 "final": "",
             }
     if data.get("status") == "plan" or state.get("execute_plan"):
-        # md 是最终计划正文；缺失时使用兜底计划。
         md = graph._redact_plan_secrets(data.get("markdown") or graph._fallback_plan_markdown(state))
-        # Plan 模式是只读权限层；计划正文只进入会话记忆，绝不写入用户工作目录。
         graph._emit(state, "planner", "plan", "计划已保存到当前会话记忆")
         graph.memory.append(
             state["workdir"],
@@ -677,9 +653,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             "计划已生成",
             {"status": "plan", "path": None, "markdown": md, "goal": graph._plan_goal(state)},
         )
-        # execute_plan=True 时直接进入 repo，否则停在 final 等用户确认。
         route = "repo" if state.get("execute_plan") else "final"
-        # final 是返回给用户的确认提示；直接执行时保持空字符串。
         final = (
             ""
             if route == "repo"
@@ -694,9 +668,7 @@ def planner(graph: AgentGraph, state: AgentState) -> AgentState:
             "need_doc": True,
             "final": final,
         }
-    # summary 是格式化后的选择题文本，直接展示给用户。
     summary = graph._format_plan_questions(data.get("questions", []))
-    # 保存 pending_plan，下一轮用户回复选项时 manager 可以找回上下文。
     graph.memory.append(
         state["workdir"],
         state["session_id"],

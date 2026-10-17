@@ -1,3 +1,7 @@
+// 作者：张又升
+// 邮箱：1041586605@qq.com
+// 单位：西北大学 电子信息学院(人工智能学院)
+
 import React, { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -50,17 +54,12 @@ import type {
 } from "../../api/types";
 import "./style.css";
 
-// ChatMessage 与后端历史消息合同一致，单独起别名用于组件状态语义。
 type ChatMessage = HistoryMessage;
 
-// McpAuthPrompt 为设备授权弹窗补充当前服务 id，便于隔离并发或已取消的轮询。
 type McpAuthPrompt = McpAuthStatus & { id: string };
 
-// ModelTestState 保存模型配置弹窗内的连通性反馈，避免结果只能在主页面状态栏观察。
 type ModelTestState = {
-  // status 区分尚未测试、请求中、测试成功和测试失败四种界面状态。
   status: "idle" | "testing" | "success" | "error";
-  // message 是弹窗内展示的简短结果，错误信息也会保留在主页面右上角。
   message: string;
 };
 
@@ -70,9 +69,7 @@ type PendingImage = {
   preview: string;
 };
 
-// API 是后端地址，启动脚本会通过 VITE_API_URL 注入动态端口。
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8710";
-// agents 是设置页面和运行状态共享的智能体展示列表。
 const agents: Array<{ id: AgentName; name: string }> = [
   { id: "manager", name: "管理者" },
   { id: "planner", name: "规划" },
@@ -93,77 +90,45 @@ const effortOptions: Array<{ value: ReasoningEffort; label: string }> = [
 ];
 
 function App() {
-  // models 保存后端返回的所有模型配置。
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [profiles, setProfiles] = useState<AgentProfileMap>(() => emptyProfiles());
   const [runEffort, setRunEffort] = useState<ReasoningEffort>("inherit");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
-  // draft 是模型弹窗中正在编辑的模型配置草稿。
   const [draft, setDraft] = useState<ModelConfig>(emptyModel());
-  // workdir 是当前选中的项目目录。
   const [workdir, setWorkdir] = useState("");
-  // sessionId 是当前会话 id。
   const [sessionId, setSessionId] = useState("");
-  // sessionTitle 是当前会话展示名称。
   const [sessionTitle, setSessionTitle] = useState("");
-  // task 是底部输入框内容。
   const [task, setTask] = useState("");
-  // planMode 表示 Plan 模式复选框是否开启。
   const [planMode, setPlanMode] = useState(false);
-  // containerShell 表示 Coder 与 Verifier 是否在本轮共享 Docker 容器。
   const [containerShell, setContainerShell] = useState(true);
-  // running 表示当前是否正在执行任务，用于禁用发送按钮和显示 loading。
   const [running, setRunning] = useState(false);
-  // activeRunId 是后端当前运行编号；运行中发送框用它追加指导而不是启动第二个任务。
   const [activeRunId, setActiveRunId] = useState("");
-  // runLockRef 防止快速重复点击在 React 完成重渲染前启动两次任务。
   const runLockRef = useRef(false);
-  // guidanceLockRef 防止同一段指导被快速重复提交；瞬时互斥无需触发界面重渲染。
   const guidanceLockRef = useRef(false);
-  // events 是左侧事件流数据。
   const [events, setEvents] = useState<AgentEvent[]>([]);
-  // result 保存最近一次任务最终结果。
   const [result, setResult] = useState<TaskResult | null>(null);
-  // notice 是右上角运行状态旁边的小提示文本。
   const [notice, setNotice] = useState("等待会话启动");
-  // messages 是中间对话窗口展示的用户消息和 agent 最终回复。
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  // 设置使用原生模态窗口，自动管理焦点、键盘关闭和背景隔离。
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDialogElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
   const [modelError, setModelError] = useState("");
-  // modelModalOpen 控制设置窗口是否进入模型编辑页。
   const [modelModalOpen, setModelModalOpen] = useState(false);
-  // editingModelId 非空表示正在编辑已有模型，此时唯一 id 不允许改名。
   const [editingModelId, setEditingModelId] = useState("");
-  // modelTestState 是模型配置弹窗内独立的连通性结果，不替代主页面 notice。
   const [modelTestState, setModelTestState] = useState<ModelTestState>({ status: "idle", message: "" });
-  // historyModalOpen 控制历史会话弹窗是否显示。
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
-  // historyProjects 保存历史弹窗中的项目和会话树。
   const [historyProjects, setHistoryProjects] = useState<HistoryProject[]>([]);
-  // skills 保存后端从项目根目录 skills 发现的可选 Skill 摘要。
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  // mcps 保存 MCP/servers.json 中已启用服务的安全摘要。
   const [mcps, setMcps] = useState<McpInfo[]>([]);
-  // selectedSkills 是本轮请求要注入结构化上下文的 Skill id。
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  // selectedMcps 是本轮请求允许连接和调用的 MCP 服务 id。
   const [selectedMcps, setSelectedMcps] = useState<string[]>([]);
-  // capabilityModalOpen 控制 Skills/MCP 多选弹窗。
   const [capabilityModalOpen, setCapabilityModalOpen] = useState(false);
-  // mcpAuthPrompt 保存设备码、官方授权地址和当前状态，避免信息只出现在短提示中。
   const [mcpAuthPrompt, setMcpAuthPrompt] = useState<McpAuthPrompt | null>(null);
-  // copiedId 保存刚复制成功的消息 id，用于短暂显示勾选反馈。
   const [copiedId, setCopiedId] = useState("");
-  // authAttemptRef 标识当前授权轮询；关闭弹窗后旧轮询不会再次把弹窗打开。
   const authAttemptRef = useRef(0);
-  // chatRef 指向对话滚动容器，新消息到达后自动滚到最新位置。
   const chatRef = useRef<HTMLDivElement>(null);
-  // eventRef 指向事件流滚动容器，新事件到达后自动滚到底部。
   const eventRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -172,30 +137,25 @@ function App() {
   }, [settingsOpen]);
 
   function closeSettings() {
-    // 先关闭原生窗口再卸载，确保背景恢复可交互并将焦点还给设置入口。
     settingsRef.current?.close();
     setSettingsOpen(false);
     setModelModalOpen(false);
     settingsButtonRef.current?.focus();
   }
 
-  // 组件首次挂载时加载模型配置。
   useEffect(() => {
     void loadModels();
     void loadCapabilities();
   }, []);
 
-  // 只在消息数量变化时滚动，用户阅读长消息内部滚动条时不会被持续抢焦点。
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.length]);
 
-  // 事件流始终跟随最新运行事件，便于观察当前智能体。
   useEffect(() => {
     eventRef.current?.scrollTo({ top: eventRef.current.scrollHeight, behavior: "smooth" });
   }, [events.length]);
 
-  // tokenTotal 是整个会话的累计用量；供应商实值与估算不能混为一谈。
   const tokenTotal = useMemo(() => events.reduce((sum, event) => sum + event.tokens, 0), [events]);
   const usage = useMemo(() => {
     const total = { input: 0, cached: 0, output: 0, reasoning: 0, reasoningKnown: 0, reasoningUnknown: 0, estimated: false };
@@ -214,7 +174,6 @@ function App() {
     }
     return total;
   }, [events]);
-  // capabilityCount 同时统计用户手动选择和后端常驻能力。
   const capabilityCount = useMemo(
     () =>
       selectedSkills.length
@@ -224,7 +183,6 @@ function App() {
       ]).size,
     [mcps, selectedMcps, selectedSkills]
   );
-  // activeAgent 是最后一个产生事件的智能体，没有事件时默认 manager。
   const activeAgent = eventOwner(events.at(-1)) ?? "manager";
   const agentStats = useMemo(
     () =>
@@ -258,7 +216,6 @@ function App() {
 
   async function loadModels() {
     try {
-      // data 包含 models 和 agent_models，requestJson 会统一处理非 2xx 和断网错误。
       const data = await requestJson<{ models: ModelConfig[]; agent_models: AgentModelMap; agent_profiles: AgentProfileMap }>(`${API}/api/models`);
       setModels(data.models);
       setProfiles(data.agent_profiles ?? emptyProfiles(data.agent_models));
@@ -270,11 +227,9 @@ function App() {
 
   async function loadCapabilities() {
     try {
-      // data 只包含 Skill 摘要和 MCP 安全字段，不包含完整 Skill 正文、env 或 headers。
       const data = await requestJson<CapabilitiesResponse>(`${API}/api/capabilities`);
       setSkills(data.skills ?? []);
       setMcps(data.mcps ?? []);
-      // 配置文件删除能力后同步清理旧选择，避免发送时由后端拒绝未知 id。
       const skillIds = new Set((data.skills ?? []).map((item) => item.id));
       const mcpIds = new Set((data.mcps ?? []).map((item) => item.id));
       setSelectedSkills((current) => current.filter((id) => skillIds.has(id)));
@@ -285,7 +240,6 @@ function App() {
   }
 
   async function testMcp(id: string) {
-    // MCP 的 ${workspace} 占位符依赖当前项目，未选择项目时不允许测试。
     if (!workdir) {
       setNotice("请先选择项目目录，再测试 MCP");
       return;
@@ -303,12 +257,10 @@ function App() {
   }
 
   async function authorizeMcp(id: string) {
-    // OAuth 必须绑定当前项目对应的持久 MCP 进程，未选目录时不能发起。
     if (!workdir) {
       setNotice("请先选择项目目录，再授权 MCP");
       return;
     }
-    // attemptId 用于识别本次轮询，用户关闭弹窗或重新授权后立即废弃旧任务。
     const attemptId = ++authAttemptRef.current;
     setMcpAuthPrompt({
       id,
@@ -327,7 +279,6 @@ function App() {
       setMcpAuthPrompt({ id, ...state });
       setNotice(state.msg);
 
-      // GitHub 设备码最长等待十五分钟；轮询只读取后端状态，不重复启动授权流程。
       for (let attempt = 0; attempt < 450 && !["authorized", "error"].includes(state.status); attempt += 1) {
         await delay(2000);
         if (authAttemptRef.current !== attemptId) return;
@@ -346,13 +297,11 @@ function App() {
   }
 
   function closeMcpAuth() {
-    // 递增标识使等待中的旧轮询在下一次检查时退出，不会重新显示已关闭弹窗。
     authAttemptRef.current += 1;
     setMcpAuthPrompt(null);
   }
 
   async function copyMcpCode() {
-    // code 是短期设备码，不包含持久 token；复制后仍不写入会话或事件流。
     if (!mcpAuthPrompt?.code) return;
     try {
       await navigator.clipboard.writeText(mcpAuthPrompt.code);
@@ -363,7 +312,6 @@ function App() {
   }
 
   async function saveModel(event: FormEvent) {
-    // 阻止表单默认刷新页面。
     event.preventDefault();
     setModelSaving(true);
     setModelError("");
@@ -386,7 +334,6 @@ function App() {
   }
 
   async function deleteModel(id: string) {
-    // id 是待删除模型的本地配置 id。
     if (!window.confirm(`删除模型「${id}」？`)) return;
     try {
       await requestJson(`${API}/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -398,14 +345,11 @@ function App() {
   }
 
   async function testModel(id: string, showInModal = false) {
-    // id 是要测试连通性的模型 id。
-    // showInModal 为 true 时同步更新编辑页反馈，列表测试结果显示在设置页底部。
     if (showInModal) {
       setModelTestState({ status: "testing", message: "正在连接模型接口..." });
     }
     setNotice("正在测试模型连通性");
     try {
-      // data 包含模型回复和 token，仅把简短结果放入状态条。
       const data = await requestJson<{ ok: boolean; reply: string }>(`${API}/api/models/${encodeURIComponent(id)}/test`, { method: "POST" });
       const message = data.ok ? `连通成功：${data.reply}` : "模型返回异常";
       setNotice(message);
@@ -441,13 +385,11 @@ function App() {
   }
 
   async function createSession() {
-    // 没有选择项目时不允许新建会话，因为后端需要 workdir 创建 memory。
     if (!workdir) {
       setNotice("请先选择项目目录");
       return;
     }
     try {
-      // data 是后端创建出的 SessionInfo。
       const data = await requestJson<{ id: string; title: string }>(`${API}/api/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -466,12 +408,9 @@ function App() {
   }
 
   async function pickProject() {
-    // 这里不手动输入路径，而是调用后端拉起系统目录选择器。
     setNotice("正在打开目录选择器");
     try {
-      // data 成功时包含 workdir，requestJson 会把失败 detail 转成异常。
       const data = await requestJson<{ workdir: string }>(`${API}/api/pick-dir`, { method: "POST" });
-      // 切换项目后清空当前会话和对话状态，避免不同项目的消息混在一起。
       setWorkdir(data.workdir);
       setSessionId("");
       setSessionTitle("");
@@ -486,10 +425,8 @@ function App() {
   }
 
   async function openHistory() {
-    // 打开历史会话弹窗前先从后端读取最新 memory 列表。
     setNotice("正在读取历史会话");
     try {
-      // data 包含 projects 数组。
       const data = await requestJson<{ projects: HistoryProject[] }>(`${API}/api/history`);
       setHistoryProjects(data.projects ?? []);
       setHistoryModalOpen(true);
@@ -500,14 +437,11 @@ function App() {
   }
 
   function restoreSession(session: HistorySession) {
-    // 恢复会话必须同时恢复 workdir 和 sessionId，否则后端无法定位会话项目。
     setWorkdir(session.workdir);
     setSessionId(session.id);
     setSessionTitle(session.title);
     setMessages(session.messages);
-    // 历史接口携带整个会话的事件摘要，恢复后右侧事件流和 token 统计同步还原。
     setEvents(session.events ?? []);
-    // 能力选择属于会话最近一次任务状态，恢复后下一轮默认延续相同选择。
     setSelectedSkills(session.skills ?? []);
     setSelectedMcps(session.mcps ?? []);
     setContainerShell(session.container_shell ?? true);
@@ -517,15 +451,12 @@ function App() {
   }
 
   async function renameCurrentSession() {
-    // 当前没有会话时，不允许重命名。
     if (!sessionId || !workdir) {
       setNotice("当前没有可重命名的会话");
       return;
     }
-    // nextTitle 是用户在浏览器 prompt 中输入的新会话名。
     const nextTitle = window.prompt("请输入新的会话名称", sessionTitle || sessionId);
     if (nextTitle === null) return;
-    // cleanTitle 去掉首尾空白，避免保存空名字。
     const cleanTitle = nextTitle.trim();
     if (!cleanTitle) {
       setNotice("会话名称不能为空");
@@ -545,19 +476,15 @@ function App() {
   }
 
   async function deleteHistorySession(session: HistorySession) {
-    // 删除会话前二次确认，明确只删除 agent memory，不删除项目文件。
     if (!window.confirm(`删除会话「${session.title}」？只会删除 agent memory 中的会话记录。`)) return;
     try {
-      // data.deleted 表示后端是否真的删除了文件。
       const data = await requestJson<{ deleted: boolean }>(
         `${API}/api/sessions/${encodeURIComponent(session.id)}?workdir=${encodeURIComponent(session.workdir)}`,
         { method: "DELETE" }
       );
-      // 本地同步移除历史弹窗里的会话项，避免删除后还显示旧数据。
       setHistoryProjects((prev) =>
         prev.map((project) => ({ ...project, sessions: project.sessions.filter((item) => item.id !== session.id) }))
       );
-      // 如果删除的是当前正在查看的会话，清空当前对话状态。
       if (sessionId === session.id) {
         setSessionId("");
         setSessionTitle("");
@@ -572,16 +499,12 @@ function App() {
   }
 
   async function deleteHistoryProject(project: HistoryProject) {
-    // 删除项目 memory 前二次确认，强调不会删除真实项目目录。
     if (!window.confirm(`删除项目「${project.name}」的全部 memory 记录？不会删除真实项目目录。`)) return;
     try {
-      // data.deleted 表示后端是否真的删除了 memory 目录。
       const data = await requestJson<{ deleted: boolean }>(`${API}/api/projects?workdir=${encodeURIComponent(project.workdir)}`, {
         method: "DELETE"
       });
-      // 本地同步移除项目项。
       setHistoryProjects((prev) => prev.filter((item) => item.id !== project.id));
-      // 如果删除的是当前项目 memory，清空当前会话展示状态。
       if (workdir === project.workdir) {
         setSessionId("");
         setSessionTitle("");
@@ -596,7 +519,6 @@ function App() {
   }
 
   async function copyMessage(id: string, content: string) {
-    // content 是当前消息正文，复制按钮位于消息框外部右下角。
     try {
       await navigator.clipboard.writeText(content);
       setNotice("消息已复制");
@@ -608,7 +530,6 @@ function App() {
   }
 
   async function sendGuidance() {
-    // 本地条件先检查，避免运行编号尚未就绪时发起无效网络请求。
     const text = task.trim();
     if (!text) {
       setNotice("请输入指导内容");
@@ -689,7 +610,6 @@ function App() {
 
   async function runTask() {
     if (runLockRef.current) return;
-    // trimmedTask 是去掉首尾空白后的用户输入。
     const trimmedTask = task.trim();
     if (!trimmedTask) {
       setNotice("请输入任务内容");
@@ -704,11 +624,9 @@ function App() {
     setActiveRunId("");
     setResult(null);
     try {
-      // id 是本次请求使用的会话 id；没有当前会话时自动创建。
       const id = sessionId || (await createSessionAndReturnId());
       setNotice(pendingImages.length ? "正在安全上传图片" : "任务执行中");
       const uploaded = await uploadImages(id);
-      // 先把用户消息加入对话窗口，让界面立即响应。
       setMessages((prev) => [
         ...prev,
         {
@@ -722,7 +640,6 @@ function App() {
       pendingImages.forEach((item) => URL.revokeObjectURL(item.preview));
       setPendingImages([]);
       setNotice("任务执行中");
-      // res 是后端 NDJSON 流式接口响应。
       const res = await fetch(`${API}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -739,27 +656,20 @@ function App() {
         })
       });
       if (!res.ok) {
-        // errorData 可能是 FastAPI detail，也可能是 Pydantic 校验错误数组。
         const errorData = await res.json().catch(() => ({}));
         throw new Error(detailText(errorData.detail) || `请求失败：${res.status}`);
       }
-      // 运行编号通过允许跨域读取的响应头返回，后续输入会定向发送到这个任务。
       const runId = res.headers.get("X-Run-ID") ?? "";
       if (!runId) throw new Error("后端没有返回当前运行编号");
       setActiveRunId(runId);
-      // reader 用于逐块读取响应体。
       const reader = res.body?.getReader();
       if (!reader) throw new Error("浏览器不支持流式读取");
-      // decoder 把 Uint8Array 数据块解码成字符串。
       const decoder = new TextDecoder();
-      // buf 保存未读完整的一行 NDJSON，防止数据块刚好从中间断开。
       let buf = "";
-      // terminalReceived 表示已经收到 result 或 error 终态。
       let terminalReceived = false;
 
       const consumeLine = (line: string) => {
         if (!line.trim()) return;
-        // item 是后端单行 NDJSON 解析后的对象，heartbeat 不进入界面状态。
         const item = JSON.parse(line) as { type: string; data?: AgentEvent | TaskResult | Record<string, unknown> };
         if (item.type === "event") {
           const event = item.data as AgentEvent;
@@ -784,17 +694,13 @@ function App() {
       };
 
       while (true) {
-        // done 表示流结束，value 是本次读取的数据块。
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        // lines 是当前已经完整读取到的多行 NDJSON。
         const lines = buf.split("\n");
-        // 最后一段可能是不完整 JSON，留到下一次数据块再解析。
         buf = lines.pop() ?? "";
         lines.forEach(consumeLine);
       }
-      // flushText 包含 TextDecoder 最后尚未输出的字符，和 buf 一起做最终解析。
       const flushText = (buf + decoder.decode()).trim();
       if (flushText) consumeLine(flushText);
       if (!terminalReceived) throw new Error("任务流提前结束，没有收到最终结果");
@@ -810,11 +716,9 @@ function App() {
   }
 
   async function createSessionAndReturnId() {
-    // 自动创建会话也必须依赖 workdir，否则后端无法建立项目 memory。
     if (!workdir) {
       throw new Error("请先选择项目目录");
     }
-    // data 是创建会话接口响应。
     const data = await requestJson<{ id: string; title: string }>(`${API}/api/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -828,7 +732,6 @@ function App() {
   return (
     <main className="shell">
       <section className="grid">
-        {/* 左侧事件流与设置入口。 */}
         <aside className="panel log event-panel" aria-label="事件流">
           <div className="event-head">
             <SectionTitle icon={<RadioTower size={18} />} text="事件流" />
@@ -861,7 +764,6 @@ function App() {
           </div>
         </aside>
 
-        {/* 中间栏：只展示用户消息和 agent 最终回复，不展示全部事件。 */}
         <section className="panel chat-panel">
           <div className="chat-window" ref={chatRef} aria-live="polite">
             {messages.length === 0 && (
@@ -900,7 +802,6 @@ function App() {
           </div>
         </section>
 
-        {/* 右侧运行状态独立滚动，内容较多时保持完整可读。 */}
         <aside className="right-col">
           <section className="panel status" aria-label="运行状态" tabIndex={0}>
             <div className="status-title">
@@ -947,7 +848,6 @@ function App() {
           </section>
         </aside>
 
-        {/* 底部输入区：选择项目、历史会话、新建会话、发送和 Plan 模式。 */}
         <section
           className={pendingImages.length ? "composer has-images" : "composer"}
           onDragOver={(event) => event.preventDefault()}
@@ -1053,7 +953,6 @@ function App() {
           </div>
         </section>
 
-        {/* 模型与智能体配置集中在设置页，模型编辑后返回配置总览。 */}
         {settingsOpen && (
           <dialog
             ref={settingsRef}
@@ -1304,7 +1203,6 @@ function App() {
           </dialog>
         )}
 
-        {/* 能力弹窗：手动多选本轮使用的 Skills 和 MCP 服务。 */}
         {capabilityModalOpen && (
           <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="能力选择">
             <section className="modal capability-modal">
@@ -1428,7 +1326,6 @@ function App() {
           </div>
         )}
 
-        {/* MCP 授权弹窗始终保留设备码，用户主动点击后再打开 GitHub 官方页面。 */}
         {mcpAuthPrompt && (
           <div className="modal-backdrop auth-backdrop" role="dialog" aria-modal="true" aria-label="GitHub MCP 授权">
             <section className="modal auth-modal">
@@ -1479,7 +1376,6 @@ function App() {
           </div>
         )}
 
-        {/* 历史会话弹窗，支持恢复、删除会话和删除项目 memory。 */}
         {historyModalOpen && (
           <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="历史会话">
             <section className="modal history-modal">
@@ -1534,7 +1430,6 @@ function App() {
 }
 
 function SectionTitle({ icon, text }: { icon: React.ReactNode; text: string }) {
-  // SectionTitle 是侧栏、状态栏、事件流复用的小标题组件。
   return (
     <h2>
       {icon}
@@ -1544,7 +1439,6 @@ function SectionTitle({ icon, text }: { icon: React.ReactNode; text: string }) {
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
-  // Metric 是运行状态中的单个指标卡片。
   return (
     <div className="metric">
       <span>{label}</span>
@@ -1584,7 +1478,6 @@ function ScrollText({ text, className = "", focusable = true }: { text: string; 
 }
 
 function emptyModel(): ModelConfig {
-  // emptyModel 返回新增模型弹窗的默认空配置。
   return {
     id: "",
     name: "",
@@ -1616,12 +1509,10 @@ function effortLabel(value: ReasoningEffort): string {
 }
 
 function toggleSelected(current: string[], id: string): string[] {
-  // 已选中时移除，未选中时追加；保持用户点击顺序，后端也按这个顺序注入上下文。
   return current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
 }
 
 function delay(milliseconds: number): Promise<void> {
-  // 授权状态轮询间隔使用 Promise 定时器，避免阻塞界面交互。
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
@@ -1631,37 +1522,30 @@ function eventOwner(event: AgentEvent | undefined): string | undefined {
 }
 
 function agentName(id: string) {
-  // agentName 把后端事件中的 agent id 转成中文显示名。
   return agents.find((agent) => agent.id === id)?.name ?? id;
 }
 
 function formatTime(value: string) {
-  // value 为空时显示未知时间，避免 Date 解析空字符串产生 Invalid Date。
   if (!value) return "未知时间";
-  // 使用中文 24 小时制显示历史会话更新时间。
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
 function formatEventTime(value: string) {
-  // 事件流只需要时分秒，完整日期保留在会话历史中。
   if (!value) return "--:--:--";
   return new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
 }
 
 function formatDuration(value: number) {
-  // 小于一秒显示毫秒，较长任务显示一位小数秒。
   if (!Number.isFinite(value) || value < 0) return "--";
   return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
 }
 
 function formatResultMessage(result: TaskResult) {
-  // lines 保存最终展示为 Agent 消息的多行文本。
   const lines = [result.summary];
   if (result.files.length > 0) {
     lines.push(`文件变更：${result.files.join("、")}`);
   }
   if (result.tests.length > 0) {
-    // testSummary 把多个测试结果压缩成一行中文摘要。
     const testSummary = result.tests
       .map((item) => `${String(item.cmd ?? "检查")}：${item.ok ? "通过" : "失败"}`)
       .join("；");
@@ -1677,7 +1561,6 @@ function formatResultMessage(result: TaskResult) {
 }
 
 function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>, send: () => void) {
-  // Cmd/Ctrl + Enter 是开发工具中常见的发送方式，普通 Enter 仍然输入换行。
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     send();
@@ -1685,9 +1568,7 @@ function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>, send: () =
 }
 
 async function requestJson<T = Record<string, unknown>>(url: string, init?: RequestInit): Promise<T> {
-  // response 是统一 API 请求结果；所有普通 JSON 接口都通过这里处理错误。
   const response = await fetch(url, init);
-  // data 在后端无 JSON 响应时回退为空对象，避免二次解析异常掩盖原始状态码。
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
     throw new Error(detailText(data.detail) || `请求失败：${response.status}`);
@@ -1696,7 +1577,6 @@ async function requestJson<T = Record<string, unknown>>(url: string, init?: Requ
 }
 
 function detailText(detail: unknown): string {
-  // FastAPI 的 detail 可能是字符串，也可能是 Pydantic 校验错误数组。
   if (typeof detail === "string") return detail === "Not Found" ? "后端接口不存在，请重启项目" : detail;
   if (Array.isArray(detail)) {
     return detail
@@ -1707,7 +1587,6 @@ function detailText(detail: unknown): string {
 }
 
 function errorMessage(error: unknown): string {
-  // Error 保留后端 detail；其他异常统一转成可读字符串。
   return error instanceof Error ? error.message : String(error);
 }
 

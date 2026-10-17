@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 """有界保存原生工具对话，调用与返回按供应商 ID 成对保留。"""
 
 from __future__ import annotations
@@ -9,19 +13,23 @@ class ToolTrace:
     """滚动缓存完整调用组；未执行动作明确返回取消结果，不能伪造成功。"""
 
     def __init__(self, limit: int = 120_000):
+        """初始化当前对象及其运行状态。"""
         self.limit = limit
         self.groups: list[list[dict]] = []
         self.pending: dict | None = None
         self.results: dict[int, dict] = {}
 
     def start(self, message: dict | None) -> None:
+        """开始记录一组原生工具调用。"""
         self.pending = message
         self.results = {}
 
     def record(self, index: int, result: dict) -> None:
+        """记录指定工具调用的执行结果。"""
         self.results[index] = result
 
     def complete(self, notes: list[str]) -> None:
+        """补齐并保存当前工具调用组。"""
         if not self.pending:
             return
         group = [self.pending]
@@ -44,4 +52,5 @@ class ToolTrace:
         self.results = {}
 
     def messages(self) -> list[dict]:
+        """按原始顺序返回缓存的工具对话消息。"""
         return [message for group in self.groups for message in group]

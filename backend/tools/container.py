@@ -1,3 +1,7 @@
+# 作者：张又升
+# 邮箱：1041586605@qq.com
+# 单位：西北大学 电子信息学院(人工智能学院)
+
 from __future__ import annotations
 
 import os
@@ -23,6 +27,7 @@ class ContainerShellTool:
     _build_lock = threading.Lock()
 
     def __init__(self, workdir: str, image: str | None = None):
+        """初始化当前对象及其运行状态。"""
         self.root = Path(workdir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.docker = shutil.which("docker")
@@ -34,9 +39,11 @@ class ContainerShellTool:
 
     @staticmethod
     def _dockerfile() -> Path:
+        """返回容器镜像定义文件的路径。"""
         return Path(__file__).resolve().parents[2] / "docker" / "Dockerfile"
 
     def _default_image(self) -> str:
+        """根据镜像定义计算默认镜像名称。"""
         dockerfile = self._dockerfile()
         try:
             digest = sha256(dockerfile.read_bytes()).hexdigest()[:12]
@@ -46,9 +53,11 @@ class ContainerShellTool:
 
     @staticmethod
     def _output(proc: subprocess.CompletedProcess[str]) -> str:
+        """合并并截取子进程的标准输出和错误输出。"""
         return (str(proc.stdout or "") + "\n" + str(proc.stderr or "")).strip()[-4000:]
 
     def _inspect_image(self) -> subprocess.CompletedProcess[str]:
+        """查询执行镜像是否已在本地存在。"""
         assert self.docker is not None
         try:
             return subprocess.run(
@@ -85,6 +94,7 @@ class ContainerShellTool:
         self._start()
 
     def _ensure_image(self) -> None:
+        """确认执行镜像可用，必要时构建镜像。"""
         if self.image_ready:
             return
         assert self.docker is not None
@@ -122,6 +132,7 @@ class ContainerShellTool:
         self.image_ready = True
 
     def _start(self) -> None:
+        """启动本轮任务使用的容器。"""
         assert self.docker is not None
         uid = os.getuid() if hasattr(os, "getuid") else 1000
         gid = os.getgid() if hasattr(os, "getgid") else 1000
@@ -180,6 +191,7 @@ class ContainerShellTool:
             raise ContainerShellError("容器 Shell 启动失败：Docker 未返回容器 ID")
 
     def run(self, cmd: str, timeout: int = 180, cwd: Path | None = None) -> dict[str, Any]:
+        """在受控容器中执行命令并返回结果。"""
         active_dir = Path(cwd).resolve() if cwd is not None else self.root
         if self.root != active_dir and self.root not in active_dir.parents:
             return {"ok": False, "code": 126, "out": "", "err": "命令工作目录越出工作区", "cmd": cmd}
@@ -257,8 +269,10 @@ class ContainerShellTool:
             pass
 
     def __enter__(self) -> ContainerShellTool:
+        """进入执行器的上下文。"""
         self.ensure_ready()
         return self
 
     def __exit__(self, *_args: object) -> None:
+        """退出上下文时释放执行器资源。"""
         self.close()
