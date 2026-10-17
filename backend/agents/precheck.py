@@ -219,7 +219,7 @@ def script_imports(fs: FsTool, script: Path, cwd: Path) -> list[str]:
 
 
 def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
-    """只核对脚本中确定的字面只读输入；动态路径、受保护分支和写入场景交给运行。"""
+    """核对确定的只读输入；只静态解析 Path 运算，不执行项目代码。"""
 
     try:
         script = fs.safe(script.relative_to(fs.root).as_posix())
@@ -229,44 +229,111 @@ def script_inputs(fs: FsTool, script: Path, cwd: Path) -> list[str]:
     except (OSError, ValueError, UnicodeError, SyntaxError):
         return []
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    def ancestors(node):
+        result = []
+        while node in parents:
+            node = parents[node]
+            result.append(node)
+        return result
+    def owner(node):
+        return next((item for item in ancestors(node) if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
     shadowed = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "open" or isinstance(node, ast.Name) and node.id == "open" and isinstance(node.ctx, ast.Store) or isinstance(node, ast.ImportFrom) and any((alias.asname or alias.name) == "open" for alias in node.names) for node in ast.walk(tree))
     path_names = {alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "pathlib" for alias in node.names if alias.name == "Path"}
+    path_names -= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+    path_names -= {node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)}
+    known = {"__file__": script}
+    pure_calls = set()
+    def path_value(node):
+        value = None
+        if isinstance(node, ast.Name):
+            value = known.get(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, (str, int)):
+            value = node.value
+        elif isinstance(node, ast.Attribute):
+            base = path_value(node.value)
+            if isinstance(base, Path) and node.attr in {"parent", "parents"}:
+                value = base.parent if node.attr == "parent" else tuple(base.parents)
+        elif isinstance(node, ast.Subscript):
+            base, index = path_value(node.value), path_value(node.slice)
+            if isinstance(base, tuple) and isinstance(index, int) and 0 <= index < len(base):
+                value = base[index]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left, right = path_value(node.left), path_value(node.right)
+            if isinstance(left, Path) and isinstance(right, (str, Path)):
+                value = left / right
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in path_names and len(node.args) == 1:
+                argument = path_value(node.args[0])
+                if isinstance(argument, (str, Path)):
+                    value = Path(argument)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in {"resolve", "absolute"} and not node.args and not node.keywords:
+                base = path_value(node.func.value)
+                if isinstance(base, Path):
+                    value = (cwd / base).resolve()
+            if isinstance(value, Path):
+                pure_calls.add(node)
+        return value
+    for statement in tree.body:
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target] if isinstance(statement, ast.AnnAssign) else []
+        if targets:
+            value = path_value(statement.value)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    known.pop(target.id, None)
+                    if isinstance(value, Path):
+                        known[target.id] = value
+    local_functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    invoked = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in local_functions and owner(node) is None:
+            guards = [item for item in ancestors(node) if isinstance(item, (ast.If, ast.Try, ast.TryStar))]
+            if not guards or all(isinstance(item, ast.If) and ast.unparse(item.test) == "__name__ == '__main__'" for item in guards):
+                invoked.add(node.func.id)
     reads, writes = [], set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        path, mode = None, None
+        path, mode, derived = None, None, False
         if not shadowed and isinstance(node.func, ast.Name) and node.func.id == "open" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
             path = node.args[0].value
             mode = node.args[1] if len(node.args) > 1 else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), ast.Constant(value="r"))
-        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Name) and node.func.value.func.id in path_names and node.func.value.args and isinstance(node.func.value.args[0], ast.Constant) and isinstance(node.func.value.args[0].value, str):
-            path = node.func.value.args[0].value
-            if node.func.attr in {"read_text", "read_bytes"}:
-                mode = ast.Constant(value="r")
-            elif node.func.attr in {"write_text", "write_bytes"}:
-                mode = ast.Constant(value="w")
-            elif node.func.attr == "open":
-                mode = node.args[0] if node.args else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), ast.Constant(value="r"))
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes", "write_text", "write_bytes", "open"}:
+            value = path_value(node.func.value)
+            if isinstance(value, Path):
+                path = str(value)
+                derived = not (isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Name) and node.func.value.func.id in path_names and node.func.value.args and isinstance(node.func.value.args[0], ast.Constant))
+                if node.func.attr in {"read_text", "read_bytes"}:
+                    mode = ast.Constant(value="r")
+                elif node.func.attr in {"write_text", "write_bytes"}:
+                    mode = ast.Constant(value="w")
+                else:
+                    mode = node.args[0] if node.args else next((keyword.value for keyword in node.keywords if keyword.arg == "mode"), ast.Constant(value="r"))
         if path is None or not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
             continue
+        target = (cwd / path).resolve()
         if any(char in mode.value for char in "wax+"):
-            writes.add(path)
+            writes.add(target)
             continue
-        ancestor = node
-        guarded = False
-        while ancestor in parents:
-            ancestor = parents[ancestor]
-            if isinstance(ancestor, (ast.If, ast.IfExp, ast.Try, ast.TryStar)):
-                guarded = True
-        if not guarded and mode.value.startswith("r"):
-            reads.append((path, node.lineno, node.col_offset))
-    opaque_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in {"open", *path_names})]
-    for path, line, column in reads:
-        # 之前的任意外部初始化调用可能创建输入，不能把未知副作用推断为必然缺失。
-        if any((call.lineno, call.col_offset) < (line, column) for call in opaque_calls):
+        chain = ancestors(node)
+        if any(isinstance(item, (ast.If, ast.IfExp, ast.Try, ast.TryStar)) for item in chain):
             continue
-        if path not in writes and not (cwd / path).is_file():
-            return [f"脚本尚未执行：{script.relative_to(fs.root)}:{line} 的字面只读输入 {path} 不存在于实际进程目录 {cwd}。请按输入文件真实位置构造路径，不能把交付目录误当成输入工作区；动态路径与异常回退仍由实际运行验证。"]
+        fn = owner(node)
+        if derived and fn is not None:
+            # 未调用或局部遮蔽的函数路径无法证明必然执行，不作阻断。
+            local_names = {item.id for item in ast.walk(fn) if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)} | {arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg)}
+            used_names = {item.id for item in ast.walk(node.func.value) if isinstance(item, ast.Name)}
+            if fn.name not in invoked or invoked - {fn.name} or local_names & used_names:
+                continue
+        if mode.value.startswith("r"):
+            reads.append((target, node, derived, chain))
+    opaque_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and node not in pure_calls and not (isinstance(node.func, ast.Name) and node.func.id in {"open", *path_names, *local_functions})]
+    for target, node, derived, chain in reads:
+        # 参数先于外层调用求值；外层 json.loads 等不能替内层读取创建文件。
+        previous = [call for call in opaque_calls if call not in chain and (call.lineno, call.col_offset) < (node.lineno, node.col_offset)]
+        if previous or (derived and any(owner(call) is None and call not in chain for call in opaque_calls)):
+            continue
+        if target not in writes and not target.is_file():
+            return [f"脚本尚未执行：{script.relative_to(fs.root)}:{node.lineno} 的静态只读输入 {target} 不存在。请按实际脚本位置逐级解析父目录，交付目录不等于输入工作区；动态路径与异常回退仍由实际运行验证。"]
     return []
 
 
