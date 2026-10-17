@@ -305,6 +305,9 @@ def test_shell_drops_virtualenv_outside_selected_project(tmp_path, monkeypatch) 
     assert "PYTHONHOME" not in captured["env"]
     assert "coding-agent-cache" in captured["env"]["UV_CACHE_DIR"]
     assert "coding-agent-cache" in captured["env"]["NPM_CONFIG_CACHE"]
+    for key in ("UV_PYTHON_INSTALL_DIR", "UV_PYTHON_BIN_DIR", "PLAYWRIGHT_BROWSERS_PATH"):
+        assert "coding-agent-cache" in captured["env"][key]
+        assert str(tmp_path / "user-project") not in captured["env"][key]
     assert str(tmp_path / "user-project") not in captured["env"]["UV_CACHE_DIR"]
 
 

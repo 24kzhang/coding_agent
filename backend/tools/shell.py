@@ -190,6 +190,10 @@ class ShellTool:
         cache_key = sha256(str(self.root).encode("utf-8")).hexdigest()[:16]
         cache_root = Path(tempfile.gettempdir()) / "coding-agent-cache" / cache_key
         env["UV_CACHE_DIR"] = str(cache_root / "uv")
+        # Python 安装与浏览器运行时也需要可写目录，不能只隔离下载缓存。
+        env["UV_PYTHON_INSTALL_DIR"] = str(cache_root / "python")
+        env["UV_PYTHON_BIN_DIR"] = str(cache_root / "bin")
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(cache_root / "browsers")
         env["NPM_CONFIG_CACHE"] = str(cache_root / "npm")
         started = time.monotonic()
         # 日志写入自动清理的临时文件，输出再大也不会无上限占用 Agent 内存。
