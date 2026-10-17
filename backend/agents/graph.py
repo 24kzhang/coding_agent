@@ -1376,20 +1376,25 @@ class AgentGraph:
                     target,
                 )
                 copied = json.loads(path.read_text(encoding="utf-8"))
+                # 集成方需要真实协议与参数合同；只暴露白名单运行元信息，不暴露地址和凭据。
+                metadata = self.model_store.redact({key: copied.get(key) for key in (
+                    "id", "model", "protocol", "timeout", "default_effort", "max_output_tokens",
+                    "request_options", "output_token_field",
+                )})
+                note = "安全运行元信息：" + json.dumps(metadata, ensure_ascii=False)
                 rel = path.relative_to(Path(str((state or {}).get("workdir") or fs.root)).resolve()).as_posix()
                 parts = Path(rel).parts
                 ignore = Path(*parts[:parts.index(".local")]) / ".gitignore"
                 unchanged = all(before.get(item) == fs.version(item) for item in [rel, ignore.as_posix()])
                 if unchanged:
-                    return {"ok": True, "cached": True, "path": rel,
-                            "text": f"受控模型配置未变化，复用 {rel}；密钥不提供。本次不作为新的实现进展。"}
+                    return {"ok": True, "cached": True, "path": rel, **metadata,
+                            "text": f"受控模型配置未变化，复用 {rel}；密钥不提供。本次不作为新的实现进展。" + note}
                 return {
                     "ok": True,
-                    "text": f"模型私密配置已复制到 {rel}；密钥未进入工具结果。",
+                    "text": f"模型私密配置已复制到 {rel}；密钥未进入工具结果。" + note,
                     "file": rel,
                     "files": [rel, ignore.as_posix()],
-                    "request_options": copied.get("request_options", {}),
-                    "output_token_field": copied.get("output_token_field", "max_tokens"),
+                    **metadata,
                 }
             if tool == "append_file":
                 # rel 是实际追加文件的项目相对路径。

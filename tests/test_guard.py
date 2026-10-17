@@ -925,13 +925,20 @@ def test_empty_native_calls_fall_back_to_structured_actions(tmp_path):
 
 def test_nested_private_copy_stays_in_project_and_reports_companion_file(tmp_path):
     graph = make_graph(tmp_path)
-    graph.model_store.upsert(ModelConfig(id="generic", name="测试模型", base_url="https://example.test", api_key="假密钥", model="generic"))
+    graph.model_store.upsert(ModelConfig(id="generic", name="测试模型", base_url="https://example.test", api_key="TEST_ONLY_PRIVATE_KEY", model="generic", protocol="chat_completions"))
     fs = FsTool(str(tmp_path / "work"))
     result = graph._do_action({"tool": "model_copy", "model_id": "generic", "target": "service/.local/model.json"}, fs, ShellTool(str(fs.root)), GitTool(str(fs.root)))
     assert result["ok"]
     assert result["files"] == ["service/.local/model.json", "service/.gitignore"]
     assert not (fs.root / ".gitignore").exists()
     assert (fs.root / "service/.gitignore").read_text() == ".local/\n"
+    assert result["protocol"] == "chat_completions"
+    assert '"protocol": "chat_completions"' in result["text"]
+    assert "TEST_ONLY_PRIVATE_KEY" not in json.dumps(result)
+    assert "https://example.test" not in json.dumps(result)
+    cached = graph._do_action({"tool": "model_copy", "model_id": "generic", "target": "service/.local/model.json"}, fs, ShellTool(str(fs.root)), GitTool(str(fs.root)))
+    assert cached["cached"] and cached["protocol"] == "chat_completions"
+    assert "TEST_ONLY_PRIVATE_KEY" not in json.dumps(cached)
 
 
 def test_private_copy_resolves_unique_name_and_rejects_ambiguous_alias(tmp_path):

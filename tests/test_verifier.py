@@ -428,6 +428,7 @@ def test_private_model_config_facts_verify_secret_without_exposing_it(tmp_path) 
                 "base_url": "https://example.test/v1",
                 "api_key": "sk-private-value",
                 "model": "deepseek-flash",
+                "protocol": "chat_completions",
             }
         ), encoding="utf-8",
     )
@@ -436,9 +437,38 @@ def test_private_model_config_facts_verify_secret_without_exposing_it(tmp_path) 
 
     assert len(facts) == 1
     assert "model='deepseek-flash'" in facts[0]
+    assert "protocol='chat_completions'" in facts[0]
     assert "api_key_nonempty=True" in facts[0]
     assert "api_key_is_redaction_placeholder=False" in facts[0]
     assert "sk-private-value" not in facts[0]
+
+
+def test_preflight_cross_review_discards_speculation_and_retains_proven_conflict(tmp_path):
+    from api.schema import ModelConfig
+    from llm import LlmClient
+    from backend.agents.verifier import review_before_verification
+    store = ModelStore(tmp_path / "models.json")
+    for ident in ("first", "second"):
+        store.upsert(ModelConfig(id=ident, name=ident, base_url="https://example.test", api_key="TEST_ONLY_KEY", model=ident, capabilities=[]))
+    graph = AgentGraph(store, MemoryStore(tmp_path / "mem"))
+    graph._client = lambda *_args: LlmClient(store.get("first"))
+    fs = FsTool(str(tmp_path / "work"))
+    fs.write("main.py", "def result():\n    return False\n")
+    fs.write("test_main.py", "from main import result\ndef test_result():\n    assert result() is True\n")
+    prompts = []
+    responses = iter([
+        {"ok": False, "issues": ["依赖将来可能安装失败", "main.result 返回 False，测试断言为 True"]},
+        {"issues": ["main.result 返回 False，测试断言为 True"], "discarded": ["安装失败没有证据"]},
+    ])
+    def respond(_state, _agent, client, messages, **_kwargs):
+        prompts.append((client.cfg.id, messages))
+        return next(responses)
+    graph._model_json = respond
+    issues = review_before_verification(graph, {"session_id": "s1", "workdir": str(fs.root), "text": "完成函数并验证",
+        "failed_checks": [{"command": "python -m pytest", "output": "断言返回值为 True 失败"}]}, fs, fs.list(), "python -m pytest")
+    assert issues == ["main.result 返回 False，测试断言为 True"]
+    assert [item[0] for item in prompts] == ["first", "second"]
+    assert "断言返回值为 True 失败" in str(prompts[-1][1])
 
 
 def test_verifier_balance_failure_stops_without_repair(tmp_path, monkeypatch) -> None:
