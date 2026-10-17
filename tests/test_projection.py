@@ -58,3 +58,17 @@ def test_parameterized_binary_resource_is_not_a_record_detail_api(tmp_path):
     text = text.replace('GET /api/records/{id}', 'GET /api/records/detail')
     text += '\n### GET /api/files/{path}\n返回 FileResponse，Content-Type: image/webp。\n'
     assert _plan_quality_issues(graph, state, text) == []
+
+
+def test_endpoint_table_keeps_record_and_binary_contracts_separate(tmp_path):
+    graph, state, text = fixture(tmp_path, '详情左侧展示所有详细信息。')
+    text = text.replace('详情接口 `GET /api/records/{id}` 返回全部原始字段，不删除任何字段。', '')
+    text += '''
+### 接口表
+| 方法 | 路径 | 响应 |
+| GET | /api/records/{id} | 返回该对象完整 JSON 记录，字段与数据文件一致 |
+| GET | /api/assets/{path} | 返回 FileResponse，Content-Type: image/webp |
+### 烟测
+请求 /api/records/{首个编号} 并检查 cover 字段。
+'''
+    assert _plan_quality_issues(graph, state, text) == []

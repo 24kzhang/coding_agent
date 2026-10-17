@@ -293,12 +293,17 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
         for endpoint in detail_endpoints:
             start = endpoint.start()
             next_heading = markdown.find("\n### ", start + 1)
-            section = markdown[start : next_heading if next_heading > start else start + 3_500]
-            # 参数化资源下载接口不返回业务 JSON，不能套用实体字段合同。
+            next_method = re.search(r"\n[^\n]{0,24}\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b", markdown[start:])
+            ends = [start + 3_500]
+            if next_heading > start:
+                ends.append(next_heading)
+            if next_method:
+                ends.append(start + next_method.start())
+            section = markdown[start:min(ends)]
+            # 每个接口各自判断；同一表格的下一个下载接口不能覆盖前一个 JSON 合同。
             if re.search(r"FileResponse|Content-Type.{0,12}(?:image/|video/|audio/|application/octet-stream)", section, re.IGNORECASE):
                 continue
             detail_api_sections.append(section)
-        # 媒体说明或测试章节可能先引用接口；检查真实字段合同最完整的定义段。
         detail_api_section = max(detail_api_sections, key=lambda section: sum(_mentions_field(section, field) for field in fields), default="")
         complete_api_claims = (
             "全部原始字段",
@@ -317,8 +322,10 @@ def _plan_quality_issues(graph: AgentGraph, state: AgentState, markdown: str) ->
             "包含全部字段",
             "包含所有字段",
         )
-        complete_api_claim = any(phrase in detail_api_section for phrase in complete_api_claims) or bool(
-            re.search(r"(?:返回|包含|提供).{0,30}(?:所有|全部|完整).{0,20}(?:字段|对象|记录|详情)", detail_api_section)
+        complete_api_claim = any(
+            any(phrase in section for phrase in complete_api_claims)
+            or bool(re.search(r"(?:返回|包含|提供).{0,30}(?:所有|全部|完整).{0,20}(?:字段|对象|记录|详情)", section))
+            for section in detail_api_sections
         )
         if detail_api_section and not complete_api_claim:
             missing_api_fields = [field for field in fields if not _mentions_field(detail_api_section, field)]
