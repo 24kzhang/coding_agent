@@ -50,3 +50,21 @@ def test_state_handoff_cannot_be_approved_when_required_value_is_missing(tmp_pat
     })
     issues = _semantic_plan_issues(graph, {'text': '后续请求继续原任务'}, '原始合同', '无状态接口方案')
     assert len(issues) == 1 and '任务标识' in issues[0]
+
+
+def test_semantic_review_receives_actual_scope_resolution(tmp_path, monkeypatch):
+    from backend.agents.planner import _semantic_plan_issues
+
+    graph = AgentGraph(ModelStore(tmp_path / 'models.json'), MemoryStore(tmp_path / 'mem'))
+    monkeypatch.setattr(graph, '_client', lambda *_: object())
+    messages = []
+    def review(_state, _agent, _client, value, **_kwargs):
+        messages.extend(value)
+        return {'ok': True, 'issues': [], 'handoffs': []}
+    monkeypatch.setattr(graph, '_model_json', review)
+    work = tmp_path / 'work'
+    _semantic_plan_issues(graph, {'text': '项目输出到 portal。创建入口', 'workdir': str(work)}, '原始合同', '计划')
+    content = str(messages[-1]['content'])
+    assert str(work / 'portal') in content
+    assert 'uv run --directory portal python -m pytest' in content
+    assert '显式交付前缀不会再次拼接' in content

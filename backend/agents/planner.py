@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from backend.agents.prompts import PLANNER_PROMPT
 from backend.agents.types import AgentState
+from backend.tools import FsTool
+from backend.tools.scope import command_scope, delivery_root
 from backend.tools.specs import tool_specs
 from llm import LlmBalanceError, LlmClient, LlmError
 
@@ -25,6 +27,20 @@ _MAX_STAGE_REPAIRS = 3
 def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, markdown: str) -> list[str]:
     """独立检查执行合同的规则冲突，接受满足需求的不同实现架构。"""
 
+    scope_context = ""
+    if state.get("workdir"):
+        fs = FsTool(state["workdir"])
+        output = delivery_root(fs, state)
+        prefix = output.relative_to(fs.root).as_posix()
+        examples = []
+        for command in ("uv run python -m pytest", f"uv run --directory {prefix} python -m pytest"):
+            cwd, actual = command_scope(fs, state, command)
+            examples.append({"命令": command, "实际工作目录": str(cwd), "实际命令": actual})
+        scope_context = "\n\n执行层实际路径规则（已由同源解析器计算，不得猜测重复拼接）：\n" + json.dumps({
+            "会话工作目录": str(fs.root), "交付根目录": str(output),
+            "规则": "项目相对路径与带交付前缀路径均受支持；显式交付前缀不会再次拼接。输入路径按会话工作目录定位，服务代码仍须按真实路径加载输入。",
+            "命令解析示例": examples,
+        }, ensure_ascii=False)
     client = graph._client("verifier", state)
     author = str(state.get("plan_author_id") or "")
     if isinstance(client, LlmClient) and author == client.cfg.id and not state.get("model_id"):
@@ -47,6 +63,9 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
                 "检查仅首次、一次、后续复用等时序要求：每次重新构造不等于首次构造后保存复用，即使最终内容相同也不能替换操作次数约束。"
                 "检查全部、必须等要求是否在别处被可选、不显示、降级、人工清单等措辞削弱；验收不能把缺失工具当成自动豁免。"
                 "每个问题引用用户原句与计划原句，确认是逻辑冲突而非个人偏好。"
+                "仅报告已存在的明确矛盾：不能因安装或网络将来可能失败就判定计划失败，不能要求计划提供不可能保证的故障豁免。"
+                "用户未要求的额外持久化、并发幂等、服务端会话和冗余机制不是必需项；应区分单次请求历史重复与失败请求重试。"
+                "以实际工具路径解析结果为准；不能把明确受支持的两种路径写法假想为重复前缀错误。"
                 "对每个跨步骤或跨请求交互，必须做状态交接表：required 列出下一轮仍然需要的所有状态标识，"
                 "available_next 只列按计划的实际返回与保存方式能到达下一轮的状态标识，同一状态使用完全相同的标识。"
                 "不能把模型上次回复当作上次输入原文的可靠副本；不能假定未声明的隐藏会话、隐式缓存或状态自动传递。"
@@ -56,7 +75,7 @@ def _semantic_plan_issues(graph: AgentGraph, state: AgentState, context: str, ma
             )},
             {"role": "user", "content": graph._multimodal_content(
                 context, state, "\n\n待审查的完整执行合同：\n" + markdown
-                + "\n\n再次核对原始用户硬约束（优先于计划中的自我解释）：\n" + graph._plan_goal(state),
+                + "\n\n再次核对原始用户硬约束（优先于计划中的自我解释）：\n" + graph._plan_goal(state) + scope_context,
             )},
         ], temperature=0, plain_text=True,
     )
