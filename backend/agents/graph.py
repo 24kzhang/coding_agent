@@ -84,6 +84,8 @@ class AgentGraph:
         self.event_id = 0
         # 同一次运行中已经不可用的模型不再被下一个节点反复选中。
         self.unavailable_models: set[str] = set()
+        # 只读分析节点学到的 JSON 正文兼容模式，不影响 Coding 原生动作协议。
+        self.json_mode_models: set[str] = set()
         # shell_tool 在一次任务内懒创建；容器模式下由 Coder、Verifier 和修复轮共享。
         self.shell_tool: ShellTool | ContainerShellTool | None = None
         # agent 是编译后的 LangGraph 状态机。
@@ -1643,7 +1645,9 @@ class AgentGraph:
             limit = self._check_model_budget(state, int(kwargs.get("max_tokens") or default_limit))
             call_kwargs = {**kwargs, "max_tokens": limit} if isinstance(client, LlmClient) else kwargs
             if isinstance(client, LlmClient) and "tools" in getattr(client.cfg, "capabilities", []):
-                call_kwargs["structured_tools"] = True
+                call_kwargs["structured_tools"] = client.cfg.id not in self.json_mode_models
+                if client.cfg.id in self.json_mode_models:
+                    call_kwargs["plain_text"] = False
             usage_before = getattr(client, "last_usage", None)
             try:
                 data = client.chat_json(conversation, **call_kwargs)
@@ -1653,11 +1657,10 @@ class AgentGraph:
                 invalid_json = any(marker in str(exc) for marker in ("模型没有返回合法 JSON", "原生工具调用参数不是合法 JSON", "原生工具参数必须是 JSON 对象", "原生工具参数 JSON 顶层必须是对象", "结构化函数没有返回唯一的 result 对象"))
                 if invalid_json and isinstance(client, LlmClient) and not recovered_json:
                     recovered_json = True
-                    correction = "上一输出不是合法 JSON。保持原始对象字段和内容合同，只返回完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不要输出代码围栏，不重复已执行的工具。"
-                    if call_kwargs.get("structured_tools"):
-                        correction = "上一输出未遵循结构化函数合同。本轮必须直接调用 return_json，把原要求的完整 JSON 对象放入 result 参数，正确转义字符串中的双引号、反斜线与换行；不要输出正文、代码围栏或其他函数，不重复已执行工具。"
+                    self.json_mode_models.add(client.cfg.id)
+                    correction = "上一结构化输出不是合法 JSON。保留原始对象字段与内容合同，本轮改用 JSON 正文协议：只返回原始要求的完整 JSON 对象，正确转义字符串中的双引号、反斜线与换行；不调用函数，不包 return_json 或 result 外层，不输出代码围栏，不重复已执行的工具。"
                     conversation.append({"role": "user", "content": correction})
-                    self._emit(state, agent, "model", "结构化返回未遵循合同，已在同模型与预算内进行一次格式修订", data={"reason": "json_repair", "diagnostic": str(exc)[:240]})
+                    self._emit(state, agent, "model", "结构化参数未完整返回，已切换 JSON 正文协议继续原合同", data={"reason": "json_repair", "diagnostic": str(exc)[:240]})
                     continue
                 if isinstance(exc, LlmOutputLimitError) and isinstance(client, LlmClient) and not recovered_limit:
                     recovered_limit = True

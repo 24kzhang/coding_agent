@@ -22,8 +22,8 @@ def setup_graph(tmp_path, monkeypatch, mode, status=503):
         data = json.loads(request.content)
         calls.append(data)
         if data["model"] == "first":
-            if status == "invalid":
-                message = {"tool_calls": [{"id": "broken", "type": "function", "function": {"name": "return_json", "arguments": "{"}}]}
+            if status in {"invalid", "recover_json"}:
+                message = {"tool_calls": [{"id": "broken", "type": "function", "function": {"name": "return_json", "arguments": "{"}}]} if data.get("tools") else {"content": '{"ok": true}' if status == "recover_json" else '{"broken":'}
                 return httpx.Response(200, json={"choices": [{"message": message}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
             if status == "timeout":
                 raise httpx.ReadTimeout("读取超时", request=request)
@@ -126,4 +126,17 @@ def test_invalid_json_switches_after_one_repair_without_losing_task(tmp_path, mo
     assert [item['model'] for item in calls] == ['first', 'first', 'healthy']
     assert calls[-1]['messages'][0] == messages[0]
     assert graph._client('planner', state).cfg.id == 'healthy'
+    assert not any(event.kind == 'error' for event in events)
+
+
+def test_readonly_json_recovery_changes_protocol_and_reuses_it(tmp_path, monkeypatch):
+    graph, calls, events = setup_graph(tmp_path, monkeypatch, 'json', 'recover_json')
+    state = {'workdir': str(tmp_path / 'work'), 'session_id': 'protocol', 'model_id': 'first'}
+    messages = [{'role': 'user', 'content': '完整原始合同'}]
+    client = graph._client('planner', state)
+    assert graph._model_json(state, 'planner', client, messages) == {'ok': True}
+    assert graph._model_json(state, 'planner', client, messages) == {'ok': True}
+    assert len(calls) == 3 and calls[0].get('tools')
+    assert all(call.get('response_format') == {'type': 'json_object'} and not call.get('tools') for call in calls[1:])
+    assert all(call['messages'][0] == messages[0] for call in calls)
     assert not any(event.kind == 'error' for event in events)
