@@ -829,10 +829,21 @@ class McpClient:
         text = json.dumps(payload, ensure_ascii=False, indent=2)
         if len(text) > MCP_OUTPUT_LIMIT:
             text = text[:MCP_OUTPUT_LIMIT] + "\n... MCP 工具结果已按长度上限截断"
+        # 部分上游将额度错误放进普通文本并错误标为成功，不能把它当检索证据。
+        quota_failure = any(
+            isinstance(block, str) and re.match(
+                r"(?is)^\s*(?:you[’']ve hit.{0,100}rate limit|rate limit (?:exceeded|reached)|"
+                r"quota (?:exceeded|exhausted)|insufficient (?:quota|balance)|(?:已达到|超出|超过).{0,30}(?:额度|调用上限))",
+                block,
+            )
+            for block in blocks
+        )
+        structured_error = isinstance(result.structuredContent, dict) and bool(result.structuredContent.get("error"))
         return {
-            "ok": not result.isError,
+            "ok": not result.isError and not quota_failure and not structured_error,
             "text": text,
             "result": payload,
+            **({"reason": "upstream_quota", "retryable": False} if quota_failure else {}),
         }
 
     def _connection(self, config: McpServerConfig, workdir: str) -> _PersistentMcpSession:

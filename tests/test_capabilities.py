@@ -910,3 +910,13 @@ def test_old_session_defaults_to_container_shell(tmp_path: Path) -> None:
     )
 
     assert store.session_capabilities(str(project), "legacy")["container_shell"] is True
+
+
+def test_mcp_plain_text_quota_failure_is_not_search_evidence():
+    client = McpClient()
+    result = SimpleNamespace(isError=False, structuredContent=None, content=[SimpleNamespace(type='text', text="You've hit the free MCP rate limit. Try a different provider.")])
+    value = client._tool_result(result)
+    assert value['ok'] is False
+    assert value['reason'] == 'upstream_quota' and value['retryable'] is False
+    result.content[0].text = '官方文档介绍如何处理 rate limit exceeded。'
+    assert client._tool_result(result)['ok'] is True
